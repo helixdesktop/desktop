@@ -72,6 +72,10 @@ fn x11_owner(session: &HeadlessSession) {
 fn an_x11_image_pastes_into_a_wayland_app() {
     let comp = std::path::PathBuf::from(env!("CARGO_BIN_EXE_helix-comp"));
     let Some(session) = HeadlessSession::start(Options { comp: &comp, shell: None, size: (800, 600), settings: "", env: Vec::new() }) else { return };
+    if session.x_display.is_empty() {
+        eprintln!("no Xwayland; skipped");
+        return;
+    }
     x11_owner(&session);
     assert!(session.wait_for_log("selection set by an X11 app", Duration::from_secs(10)), "the compositor never saw the X11 copy");
 
@@ -121,6 +125,10 @@ fn x11_read(session: &HeadlessSession, target: &str) -> Option<Vec<u8>> {
 fn an_x11_client_reads_the_clipboard_without_focus() {
     let comp = std::path::PathBuf::from(env!("CARGO_BIN_EXE_helix-comp"));
     let Some(session) = HeadlessSession::start(Options { comp: &comp, shell: None, size: (800, 600), settings: "", env: Vec::new() }) else { return };
+    if session.x_display.is_empty() {
+        eprintln!("no Xwayland; skipped");
+        return;
+    }
 
     // A Wayland app has focus and copies; no X11 window exists.
     let mut app = common::connect(&session);
