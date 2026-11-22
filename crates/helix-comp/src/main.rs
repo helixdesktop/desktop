@@ -257,6 +257,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     state.stop_shell();
+    state.release_x11_display();
     result?;
     Ok(())
 }

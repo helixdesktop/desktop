@@ -16,6 +16,8 @@
 //!   Wayland window has focus), and asking for it activates a window for
 //!   a pager or an app moving between its own windows; others only want
 //!   attention (#166).
+//! - The compositor gives its X display back when it exits: no lock is
+//!   left for the next X server to take over (#181).
 //!
 //! Runs the real `helix-comp` headless; needs `dbus-daemon` and Xwayland
 //! (as every headless session), skipped otherwise.
@@ -288,4 +290,14 @@ fn activation_requests() {
     // An app moving from its focused window to another does.
     x.activate(b, 1, a);
     x.until("an app's request from its focused window was not granted", |x| x.active() == Some(b));
+}
+
+#[test]
+fn the_display_is_released_at_exit() {
+    let Some(session) = session() else { return };
+    let number = session.x_display.trim_start_matches(':').to_owned();
+    let lock = std::path::PathBuf::from(format!("/tmp/.X{number}-lock"));
+    assert!(lock.exists(), "no {}", lock.display());
+    drop(session);
+    assert!(!lock.exists(), "{} is left behind", lock.display());
 }
