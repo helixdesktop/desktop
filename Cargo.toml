@@ -106,6 +106,10 @@ accesskit_atspi_common = { path = "vendor/accesskit_atspi_common" }
 #   (write_selection_callback; upstream still has this).
 # - A hidden X11 window's WM_STATE is Withdrawn (UnmapNotify; upstream
 #   eea66710).
+# - An X11 window shown and hidden at once stays hidden instead of
+#   looping: synthetic UnmapNotifys (ICCCM 4.1.4 withdraw) are ignored
+#   once the window left its frame, and a window is unmapped before it is
+#   reparented to the root (upstream 3a08ff96, e592965a).
 # - A layer surface's exclusive zone counts only where the protocol says
 #   (anchored to one edge, or one edge and both perpendicular ones;
 #   src/desktop/wayland/layer.rs).
