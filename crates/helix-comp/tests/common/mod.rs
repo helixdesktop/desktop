@@ -36,6 +36,11 @@ pub struct State {
     offers: Vec<(wl_data_offer::WlDataOffer, Vec<String>)>,
     /// What this client's own selection (`Client::copy`) holds.
     copied: Vec<u8>,
+    /// A drag over one of this client's surfaces: its offer, types and
+    /// the enter serial.
+    pub dnd: Option<(wl_data_offer::WlDataOffer, Vec<String>, u32)>,
+    /// Whether that drag was dropped here.
+    pub dropped: bool,
 }
 
 macro_rules! quiet {
@@ -111,6 +116,15 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for State {
                 });
                 state.offers.clear();
             }
+            wl_data_device::Event::Enter { serial, id, .. } => {
+                state.dnd = id.map(|id| {
+                    let types = state.offers.iter().find(|(o, _)| o == &id).map(|(_, t)| t.clone()).unwrap_or_default();
+                    (id, types, serial)
+                });
+                state.dropped = false;
+            }
+            wl_data_device::Event::Leave => state.dnd = None,
+            wl_data_device::Event::Drop => state.dropped = true,
             _ => {}
         }
     }
@@ -259,6 +273,36 @@ impl Client {
         source.offer(mime.to_owned());
         self.data_device.set_selection(Some(&source), 0);
         self.roundtrip();
+    }
+
+    /// Start dragging `data` as `mime` from `origin`, for the press of
+    /// `serial` (offered for copying).
+    pub fn drag(&mut self, mime: &str, data: &[u8], origin: &wl_surface::WlSurface, serial: u32) {
+        self.state.copied = data.to_vec();
+        let source = self.data_manager.create_data_source(&self.qh, ());
+        source.offer(mime.to_owned());
+        source.set_actions(wl_data_device_manager::DndAction::Copy);
+        self.data_device.start_drag(Some(&source), origin, None, serial);
+        self.roundtrip();
+    }
+
+    /// Read `offer`'s data as `mime` to the end.
+    pub fn receive(&mut self, offer: &wl_data_offer::WlDataOffer, mime: &str) -> Vec<u8> {
+        let (read, write) = std::io::pipe().unwrap();
+        offer.receive(mime.to_owned(), write.as_fd());
+        drop(write);
+        self.roundtrip();
+        let reader = std::thread::spawn(move || {
+            let mut data = Vec::new();
+            std::io::Read::read_to_end(&mut { read }, &mut data).map(|_| data)
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !reader.is_finished() {
+            assert!(Instant::now() < deadline, "the dropped data never ended");
+            self.roundtrip();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        reader.join().unwrap().unwrap()
     }
 
     /// The clipboard selection's data as `mime`, read to the end.

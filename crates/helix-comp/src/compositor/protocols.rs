@@ -122,7 +122,7 @@ impl Helix {
     /// `Some(Some(..))` confined to the surface (at origin) and region.
     fn active_constraint(&self, pointer: &PointerHandle<Self>) -> Option<Constraint> {
         let pos = pointer.current_location();
-        let focus = pointer.current_focus()?;
+        let focus = pointer.current_focus()?.into_surface()?;
         let (_, origin) = self.surface_under(pos).filter(|(s, _)| *s == focus)?;
         let mut out = None;
         with_pointer_constraint(&focus, pointer, |c| {
@@ -191,7 +191,7 @@ impl Helix {
         let pointer = self.seat.get_pointer().unwrap();
         let constraint = if pointer.is_grabbed() { None } else { self.active_constraint(&pointer) };
         if delta != Point::default() || unaccel != Point::default() {
-            let under = self.surface_under(current);
+            let under = self.pointer_focus_under(current);
             pointer.relative_motion(self, under, &RelativeMotionEvent { delta, delta_unaccel: unaccel, time: smithay::backend::input::InputTime::from_micros(utime) });
         }
         let target = match constraint {
@@ -213,7 +213,7 @@ impl Helix {
     pub(super) fn activate_constraint_under(&mut self) {
         let pointer = self.seat.get_pointer().unwrap();
         let pos = pointer.current_location();
-        let Some(focus) = pointer.current_focus() else { return };
+        let Some(focus) = pointer.current_focus().and_then(|f| f.into_surface()) else { return };
         let Some((_, origin)) = self.surface_under(pos).filter(|(s, _)| *s == focus) else { return };
         with_pointer_constraint(&focus, &pointer, |c| {
             if let Some(c) = c {

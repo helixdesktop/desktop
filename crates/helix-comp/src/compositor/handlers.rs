@@ -111,8 +111,8 @@ impl ShmHandler for Helix {
 
 impl SeatHandler for Helix {
     type KeyboardFocus = super::focus::KeyboardFocusTarget;
-    type PointerFocus = WlSurface;
-    type TouchFocus = WlSurface;
+    type PointerFocus = super::focus::PointerFocusTarget;
+    type TouchFocus = super::focus::PointerFocusTarget;
 
     fn seat_state(&mut self) -> &mut SeatState<Self> {
         &mut self.seat_state
@@ -442,7 +442,7 @@ fn check_grab(
     }
     let start_data = pointer.grab_start_data()?;
     let (focus, _) = start_data.focus.as_ref()?;
-    if !focus.id().same_client_as(&surface.id()) {
+    if !focus.surface()?.id().same_client_as(&surface.id()) {
         return None;
     }
     Some(start_data)
@@ -899,7 +899,7 @@ impl helix_comp::cursor_shape::CursorShapeHandler for Helix {
     /// started the pointer grab).
     fn pointer_shape(&mut self, client: smithay::reexports::wayland_server::backend::ClientId, icon: smithay::input::pointer::CursorIcon) {
         let Some(pointer) = self.seat.get_pointer() else { return };
-        let of = |s: &WlSurface| s.client().map(|c| c.id());
+        let of = |s: &super::focus::PointerFocusTarget| s.surface().and_then(|s| s.client()).map(|c| c.id());
         let focused = pointer.current_focus().and_then(|f| of(&f)) == Some(client.clone());
         let grab = pointer.grab_start_data().and_then(|d| d.focus).and_then(|(f, _)| of(&f)) == Some(client);
         tracing::debug!(?icon, taken = focused || grab, "cursor shape");

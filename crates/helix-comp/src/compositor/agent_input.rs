@@ -318,7 +318,8 @@ impl Helix {
 
     /// Move the pointer to `pos` over run `i`'s window.
     fn agent_motion(&mut self, i: usize, pos: Point<f64, Logical>, time: u32) -> Check {
-        let under = self.agent_point(i, pos)?;
+        let (surface, origin) = self.agent_point(i, pos)?;
+        let under = (self.pointer_target(surface), origin);
         let pointer = self.seat.get_pointer().ok_or(Reason::Invalid)?;
         pointer.motion(self, Some(under), &MotionEvent { location: pos, serial: SERIAL_COUNTER.next_serial(), time: smithay::backend::input::InputTime::from_millis(time) });
         pointer.frame(self);

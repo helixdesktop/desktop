@@ -121,7 +121,7 @@ impl Helix {
         let keyboard = self.seat.get_keyboard();
         let pointer = self.seat.get_pointer();
         let keyboard_on = relation(self, window, self.focused_surface().as_ref());
-        let pointer_focus = pointer.as_ref().and_then(|p| p.current_focus());
+        let pointer_focus = pointer.as_ref().and_then(|p| p.current_focus()).and_then(|f| f.into_surface());
         let pointer_on = relation(self, window, pointer_focus.as_ref());
         let under = pointer.as_ref().map(|p| p.current_location()).and_then(|pos| self.surface_under(pos)).map(|(s, _)| s);
         let under_is = relation(self, window, under.as_ref());
