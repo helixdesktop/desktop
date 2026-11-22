@@ -14,6 +14,8 @@
 //! Runs the real `helix-comp` headless; needs `dbus-daemon` and Xwayland
 //! (as every headless session), skipped otherwise.
 
+mod common;
+
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
@@ -345,8 +347,7 @@ fn framed_x11_title_bar_drag_keeps_the_pointer_on_the_title_bar() {
         eprintln!("no Xwayland; skipped");
         return;
     }
-    std::env::set_var("XAUTHORITY", &session.x_authority);
-    let (conn, screen_num) = x11rb::connect(Some(&session.x_display)).unwrap();
+    let (conn, screen_num) = common::x11(&session);
     let root = conn.setup().roots[screen_num].root;
     let atom = |name: &str| conn.intern_atom(false, name.as_bytes()).unwrap().reply().unwrap().atom;
     let (state, horz, vert) = (atom("_NET_WM_STATE"), atom("_NET_WM_STATE_MAXIMIZED_HORZ"), atom("_NET_WM_STATE_MAXIMIZED_VERT"));

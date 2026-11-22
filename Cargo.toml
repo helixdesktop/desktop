@@ -93,20 +93,25 @@ opt-level = 2
 [patch.crates-io]
 accesskit_unix = { path = "vendor/accesskit_unix" }
 accesskit_atspi_common = { path = "vendor/accesskit_atspi_common" }
-# Smithay 0.7.0 (MIT), patched (changes marked "Helix:"): Xwayland window
-# frames take the window's own depth and visual, so X11 windows with an
-# alpha channel (GTK's rounded client-side decorations) keep it
-# (vendor/smithay, src/xwayland/xwm/mod.rs, MapRequest); X11 selections
-# reach Wayland apps in every type, not only plain text (send_selection
-# takes the type's atom by name, as upstream Smithay does); X11 apps
-# paste from Wayland apps more than once (a finished transfer is removed,
-# upstream ae6c51ba); large X11 copies (INCR) arrive whole: without the
-# 4-byte size hint in front (upstream d5437114), and with no chunk deleted
-# unread (write_selection_callback; upstream still has this); a layer surface's exclusive zone counts only where
-# the protocol says (anchored to one edge, or one edge and both
-# perpendicular ones; src/desktop/wayland/layer.rs).
+# Smithay 0.7.0 (MIT), patched (vendor/smithay; changes marked "Helix:"):
+# - Xwayland window frames take the window's own depth and visual, so X11
+#   windows with an alpha channel (GTK's rounded client-side decorations)
+#   keep it (src/xwayland/xwm/mod.rs, MapRequest).
+# - X11 selections reach Wayland apps in every type, not only plain text
+#   (send_selection takes the type's atom by name, as upstream does).
+# - X11 apps paste from Wayland apps more than once (a finished transfer
+#   is removed; upstream ae6c51ba).
+# - Large X11 copies (INCR) arrive whole: without the 4-byte size hint in
+#   front (upstream d5437114), and with no chunk deleted unread
+#   (write_selection_callback; upstream still has this).
+# - A hidden X11 window's WM_STATE is Withdrawn (UnmapNotify; upstream
+#   eea66710).
+# - A layer surface's exclusive zone counts only where the protocol says
+#   (anchored to one edge, or one edge and both perpendicular ones;
+#   src/desktop/wayland/layer.rs).
+# - Page flips may be asynchronous (tearing, wp_tearing_control_v1),
+#   falling back to a vsynced flip (src/backend/drm/surface/*.rs,
+#   set_async_flip).
+# - A selection says which client offers it (src/wayland/selection/
+#   source.rs, SelectionSource::client), for Agent Access's clipboard rules.
 smithay = { path = "vendor/smithay" }
-# Also patched: page flips may be asynchronous (tearing, wp_tearing_control_v1),
-# falling back to a vsynced flip (src/backend/drm/surface/*.rs, set_async_flip);
-# a selection says which client offers it (src/wayland/selection/source.rs,
-# SelectionSource::client), for Agent Access's clipboard rules.

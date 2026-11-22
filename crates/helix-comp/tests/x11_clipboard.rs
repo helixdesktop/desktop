@@ -22,16 +22,6 @@ use x11rb::protocol::xproto::{AtomEnum, ChangeWindowAttributesAux, ConnectionExt
 use x11rb::protocol::Event;
 use x11rb::wrapper::ConnectionExt as _;
 
-/// A connection to `session`'s Xwayland. x11rb reads its authority from
-/// `XAUTHORITY`, which is the whole process's: tests running at once
-/// (each with its own session) take turns.
-fn x11_connect(session: &HeadlessSession) -> (x11rb::rust_connection::RustConnection, usize) {
-    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _turn = ENV.lock().unwrap_or_else(|e| e.into_inner());
-    std::env::set_var("XAUTHORITY", &session.x_authority);
-    x11rb::connect(Some(&session.x_display)).expect("connect to Xwayland")
-}
-
 /// Not a real PNG; any bytes do, as long as they come back unchanged.
 fn picture(len: u32) -> Vec<u8> {
     (0..len).map(|i| (i * 7 % 251) as u8).collect()
@@ -44,7 +34,7 @@ const CHUNK: usize = 64 * 1024;
 /// An X11 client owning CLIPBOARD as `image/png` (`image`) and plain text,
 /// answering requests until the connection closes.
 fn x11_owner(session: &HeadlessSession, image: Vec<u8>) {
-    let (conn, screen_num) = x11_connect(session);
+    let (conn, screen_num) = common::x11(session);
     let root = conn.setup().roots[screen_num].root;
     let window = conn.generate_id().unwrap();
     conn.create_window(0, window, root, 0, 0, 1, 1, 0, WindowClass::INPUT_ONLY, 0, &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE)).unwrap();
@@ -149,7 +139,7 @@ fn a_large_x11_image_pastes_whole() {
 /// no focused window (as `xclip -o`, or an app pasting again); `None`
 /// where refused.
 fn x11_reads(session: &HeadlessSession, target: &str, times: usize) -> Vec<Option<Vec<u8>>> {
-    let (conn, screen_num) = x11_connect(session);
+    let (conn, screen_num) = common::x11(session);
     let root = conn.setup().roots[screen_num].root;
     let window = conn.generate_id().unwrap();
     conn.create_window(0, window, root, 0, 0, 1, 1, 0, WindowClass::INPUT_ONLY, 0, &CreateWindowAux::new()).unwrap();
