@@ -280,7 +280,7 @@ impl Helix {
     pub fn cancel_follow(&mut self) {
         let Some((window, initial, resize)) = self.follow.take() else { return };
         let pointer = self.seat.get_pointer().unwrap();
-        pointer.unset_grab(self, SERIAL_COUNTER.next_serial(), 0);
+        pointer.unset_grab(self, SERIAL_COUNTER.next_serial(), smithay::backend::input::InputTime::from_millis(0));
         if resize {
             if let Some(toplevel) = window.toplevel() {
                 toplevel.with_pending_state(|state| {

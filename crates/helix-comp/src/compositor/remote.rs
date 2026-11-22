@@ -150,7 +150,7 @@ impl Helix {
                     2 => AxisSource::Continuous,
                     _ => AxisSource::Finger,
                 };
-                let mut frame = AxisFrame::new(time).source(source);
+                let mut frame = AxisFrame::new(smithay::backend::input::InputTime::from_millis(time)).source(source);
                 for (axis, value) in [(Axis::Horizontal, dx), (Axis::Vertical, dy)] {
                     if value != 0.0 {
                         frame = frame.value(axis, value);
@@ -165,7 +165,7 @@ impl Helix {
             }
             RemoteInput::AxisDiscrete { axis, steps } => {
                 let axis = if axis == 1 { Axis::Horizontal } else { Axis::Vertical };
-                let frame = AxisFrame::new(time)
+                let frame = AxisFrame::new(smithay::backend::input::InputTime::from_millis(time))
                     .source(AxisSource::Wheel)
                     .value(axis, f64::from(steps) * STEP_PX)
                     .v120(axis, steps * 120);
@@ -440,7 +440,7 @@ impl Helix {
             EisRequest::ScrollDiscrete(s) => {
                 // libei steps are in 120ths of a detent.
                 let time = self.now_ms();
-                let mut frame = AxisFrame::new(time).source(AxisSource::Wheel);
+                let mut frame = AxisFrame::new(smithay::backend::input::InputTime::from_millis(time)).source(AxisSource::Wheel);
                 for (axis, v120) in [(Axis::Horizontal, s.discrete_dx), (Axis::Vertical, s.discrete_dy)] {
                     if v120 != 0 {
                         frame = frame.value(axis, f64::from(v120) / 120.0 * STEP_PX).v120(axis, v120);

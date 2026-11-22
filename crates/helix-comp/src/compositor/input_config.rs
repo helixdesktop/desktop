@@ -182,7 +182,7 @@ fn configure_device(mut device: Device, settings: &InputSettings) {
         return;
     }
     let kind = kind(&device);
-    tracing::debug!(name = device.name(), ?kind, "configuring pointing device");
+    tracing::debug!(name = %device.name(), ?kind, "configuring pointing device");
     match kind {
         Kind::Touchpad => configure_touchpad(&mut device, &settings.touchpad),
         Kind::Mouse => configure_pointer(&mut device, &settings.mouse),
@@ -276,7 +276,7 @@ fn configure_touchpad(device: &mut Device, t: &Touchpad) {
     configure_pointer(device, &t.pointer);
     let _ = device.config_tap_set_enabled(t.tap_to_click);
     let _ = device.config_tap_set_drag_enabled(t.tap_and_drag);
-    let _ = device.config_tap_set_drag_lock_enabled(t.tap_and_drag_lock);
+    let _ = device.config_tap_set_drag_lock_enabled(if t.tap_and_drag_lock { smithay::reexports::input::DragLockState::EnabledTimeout } else { smithay::reexports::input::DragLockState::Disabled });
     let map = match t.tap_button_map.as_str() {
         "lrm" => Some(TapButtonMap::LeftRightMiddle),
         "lmr" => Some(TapButtonMap::LeftMiddleRight),

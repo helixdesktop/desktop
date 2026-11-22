@@ -176,9 +176,8 @@ impl Helix {
                 Ok(())
             }
             Some(ServerSelection::X11) => {
-                let handle = self.loop_handle.clone();
                 let xwm = self.xwm.as_mut().ok_or_else(|| failed("no X11"))?;
-                xwm.send_selection(SelectionTarget::Clipboard, mime_type, fd, handle).map_err(|e| failed(&e.to_string()))
+                xwm.send_selection(SelectionTarget::Clipboard, mime_type, fd).map_err(|e| failed(&e.to_string()))
             }
             None => request_data_device_client_selection(&self.seat, mime_type, fd).map_err(|e| failed(&e.to_string())),
         }

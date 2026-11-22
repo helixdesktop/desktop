@@ -15,7 +15,6 @@ use smithay::reexports::wayland_server::backend::{ClientData, ClientId, Disconne
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{Client, Display, DisplayHandle, Resource};
 use smithay::wayland::compositor::{CompositorClientState, CompositorHandler, CompositorState};
-use smithay::{delegate_compositor, delegate_seat};
 
 // ---- the server ----
 
@@ -54,6 +53,9 @@ impl CompositorHandler for Server {
     fn commit(&mut self, _: &WlSurface) {}
 }
 
+// Smithay's WlSurface pointer target asks for it.
+impl smithay::wayland::pointer_constraints::PointerConstraintsHandler for Server {}
+
 impl SeatHandler for Server {
     type KeyboardFocus = WlSurface;
     type PointerFocus = WlSurface;
@@ -81,8 +83,7 @@ impl helix_comp::cursor_shape::CursorShapeHandler for Server {
     }
 }
 
-delegate_compositor!(Server);
-delegate_seat!(Server);
+smithay::delegate_dispatch2!(Server);
 smithay::reexports::wayland_server::delegate_global_dispatch!(Server: [s::zwp_tablet_manager_v2::ZwpTabletManagerV2: ()] => TabletV2);
 smithay::reexports::wayland_server::delegate_dispatch!(Server: [s::zwp_tablet_manager_v2::ZwpTabletManagerV2: ()] => TabletV2);
 smithay::reexports::wayland_server::delegate_dispatch!(Server: [s::zwp_tablet_seat_v2::ZwpTabletSeatV2: ()] => TabletV2);

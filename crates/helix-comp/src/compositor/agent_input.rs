@@ -240,7 +240,7 @@ impl Helix {
         }
         if let Some(pointer) = self.seat.get_pointer() {
             for button in buttons {
-                pointer.button(self, &ButtonEvent { button, state: ButtonState::Released, serial: SERIAL_COUNTER.next_serial(), time });
+                pointer.button(self, &ButtonEvent { button, state: ButtonState::Released, serial: SERIAL_COUNTER.next_serial(), time: smithay::backend::input::InputTime::from_millis(time) });
                 pointer.frame(self);
             }
         }
@@ -251,7 +251,7 @@ impl Helix {
     fn agent_seat_key(&mut self, keycode: Keycode, state: KeyState, time: u32) {
         let Some(keyboard) = self.seat.get_keyboard() else { return };
         let serial = SERIAL_COUNTER.next_serial();
-        keyboard.input::<(), _>(self, keycode, state, serial, time, |_, _, _| FilterResult::Forward);
+        keyboard.input::<(), _>(self, keycode, state, serial, smithay::backend::input::InputTime::from_millis(time), |_, _, _| FilterResult::Forward);
     }
 
     /// The window `surface` belongs to (through subsurfaces and popups).
@@ -320,7 +320,7 @@ impl Helix {
     fn agent_motion(&mut self, i: usize, pos: Point<f64, Logical>, time: u32) -> Check {
         let under = self.agent_point(i, pos)?;
         let pointer = self.seat.get_pointer().ok_or(Reason::Invalid)?;
-        pointer.motion(self, Some(under), &MotionEvent { location: pos, serial: SERIAL_COUNTER.next_serial(), time });
+        pointer.motion(self, Some(under), &MotionEvent { location: pos, serial: SERIAL_COUNTER.next_serial(), time: smithay::backend::input::InputTime::from_millis(time) });
         pointer.frame(self);
         Ok(())
     }
@@ -371,14 +371,14 @@ impl Helix {
                     // Not held by the run: nothing to let go of.
                     return Ok(true);
                 }
-                pointer.button(self, &ButtonEvent { button, state, serial: SERIAL_COUNTER.next_serial(), time });
+                pointer.button(self, &ButtonEvent { button, state, serial: SERIAL_COUNTER.next_serial(), time: smithay::backend::input::InputTime::from_millis(time) });
                 pointer.frame(self);
             }
             Step::Scroll(x, y) => {
                 let pos = self.seat.get_pointer().ok_or(Reason::Invalid)?.current_location();
                 self.agent_motion(i, pos, time)?;
                 let pointer = self.seat.get_pointer().ok_or(Reason::Invalid)?;
-                let mut frame = AxisFrame::new(time).source(AxisSource::Wheel);
+                let mut frame = AxisFrame::new(smithay::backend::input::InputTime::from_millis(time)).source(AxisSource::Wheel);
                 for (axis, steps) in [(Axis::Horizontal, x), (Axis::Vertical, y)] {
                     if steps != 0 {
                         frame = frame.value(axis, f64::from(steps) * STEP_PX).v120(axis, steps * 120);

@@ -27,7 +27,7 @@ impl Helix {
         let frame = if pointer.is_grabbed() { None } else { self.frame_under(pos) };
         let under = if self.frame_hover(frame.as_ref()) { None } else { self.surface_under(pos) };
         let under_client = under.as_ref().and_then(|(s, _)| smithay::reexports::wayland_server::Resource::client(s)).map(|c| c.id());
-        pointer.motion(self, under, &MotionEvent { location: pos, serial, time });
+        pointer.motion(self, under, &MotionEvent { location: pos, serial, time: smithay::backend::input::InputTime::from_millis(time) });
         pointer.frame(self);
         self.locate_pointer_for_a11y(pos, under_client);
         self.focus_follows_pointer(pos);
@@ -59,7 +59,7 @@ impl Helix {
         }
         tracing::trace!(from = ?current.as_ref().map(|s| s.id()), to = ?under.as_ref().map(|(s, _)| s.id()), "pointer focus synced");
         let time = self.now_ms();
-        pointer.motion(self, under, &MotionEvent { location: pos, serial: SERIAL_COUNTER.next_serial(), time });
+        pointer.motion(self, under, &MotionEvent { location: pos, serial: SERIAL_COUNTER.next_serial(), time: smithay::backend::input::InputTime::from_millis(time) });
         pointer.frame(self);
         true
     }
@@ -224,7 +224,7 @@ impl Helix {
                 // The follow grab ends on a press, which it keeps from apps.
                 let pointer = self.seat.get_pointer().unwrap();
                 let serial = SERIAL_COUNTER.next_serial();
-                pointer.button(self, &ButtonEvent { button: BTN_LEFT, state: ButtonState::Pressed, serial, time });
+                pointer.button(self, &ButtonEvent { button: BTN_LEFT, state: ButtonState::Pressed, serial, time: smithay::backend::input::InputTime::from_millis(time) });
                 pointer.frame(self);
             }
             Action::LocatePointer => self.locate_pointer(),
@@ -284,7 +284,7 @@ impl Helix {
 
         match event {
             InputEvent::Keyboard { event, .. } => {
-                self.device_key(event.key_code(), event.state(), Event::time_msec(&event));
+                self.device_key(event.key_code(), event.state(), Event::time(&event).millis());
             }
             InputEvent::PointerMotionAbsolute { event, .. } => {
                 let Some(output) = self.space.outputs().next() else {
@@ -294,43 +294,43 @@ impl Helix {
                     return;
                 };
                 let pos = event.position_transformed(output_geo.size) + output_geo.loc.to_f64();
-                self.device_motion(Motion::Absolute { position: (pos.x, pos.y), utime: Event::time(&event), time: event.time_msec() });
+                self.device_motion(Motion::Absolute { position: (pos.x, pos.y), utime: Event::time(&event).micros(), time: event.time().millis() });
             }
             InputEvent::PointerMotion { event, .. } => {
                 // Relative motion (real mice/touchpads on bare hardware).
                 let (delta, unaccel) = (event.delta(), event.delta_unaccel());
-                self.device_motion(Motion::Relative { delta: (delta.x, delta.y), unaccel: (unaccel.x, unaccel.y), utime: Event::time(&event), time: event.time_msec() });
+                self.device_motion(Motion::Relative { delta: (delta.x, delta.y), unaccel: (unaccel.x, unaccel.y), utime: Event::time(&event).micros(), time: event.time().millis() });
             }
-            InputEvent::GestureSwipeBegin { event } => self.gesture_swipe_begin(event.fingers(), event.time_msec()),
-            InputEvent::GestureSwipeUpdate { event } => self.gesture_swipe_update(event.delta(), event.time_msec()),
-            InputEvent::GestureSwipeEnd { event } => self.gesture_swipe_end(event.cancelled(), event.time_msec()),
+            InputEvent::GestureSwipeBegin { event } => self.gesture_swipe_begin(event.fingers(), event.time().millis()),
+            InputEvent::GestureSwipeUpdate { event } => self.gesture_swipe_update(event.delta(), event.time().millis()),
+            InputEvent::GestureSwipeEnd { event } => self.gesture_swipe_end(event.cancelled(), event.time().millis()),
             InputEvent::GesturePinchBegin { event } => {
                 let pointer = self.seat.get_pointer().unwrap();
-                let e = smithay::input::pointer::GesturePinchBeginEvent { serial: SERIAL_COUNTER.next_serial(), time: event.time_msec(), fingers: event.fingers() };
+                let e = smithay::input::pointer::GesturePinchBeginEvent { serial: SERIAL_COUNTER.next_serial(), time: event.time(), fingers: event.fingers() };
                 pointer.gesture_pinch_begin(self, &e);
             }
             InputEvent::GesturePinchUpdate { event } => {
                 let pointer = self.seat.get_pointer().unwrap();
-                let e = smithay::input::pointer::GesturePinchUpdateEvent { time: event.time_msec(), delta: event.delta(), scale: event.scale(), rotation: event.rotation() };
+                let e = smithay::input::pointer::GesturePinchUpdateEvent { time: event.time(), delta: event.delta(), scale: event.scale(), rotation: event.rotation() };
                 pointer.gesture_pinch_update(self, &e);
             }
             InputEvent::GesturePinchEnd { event } => {
                 let pointer = self.seat.get_pointer().unwrap();
-                let e = smithay::input::pointer::GesturePinchEndEvent { serial: SERIAL_COUNTER.next_serial(), time: event.time_msec(), cancelled: event.cancelled() };
+                let e = smithay::input::pointer::GesturePinchEndEvent { serial: SERIAL_COUNTER.next_serial(), time: event.time(), cancelled: event.cancelled() };
                 pointer.gesture_pinch_end(self, &e);
             }
             InputEvent::GestureHoldBegin { event } => {
                 let pointer = self.seat.get_pointer().unwrap();
-                let e = smithay::input::pointer::GestureHoldBeginEvent { serial: SERIAL_COUNTER.next_serial(), time: event.time_msec(), fingers: event.fingers() };
+                let e = smithay::input::pointer::GestureHoldBeginEvent { serial: SERIAL_COUNTER.next_serial(), time: event.time(), fingers: event.fingers() };
                 pointer.gesture_hold_begin(self, &e);
             }
             InputEvent::GestureHoldEnd { event } => {
                 let pointer = self.seat.get_pointer().unwrap();
-                let e = smithay::input::pointer::GestureHoldEndEvent { serial: SERIAL_COUNTER.next_serial(), time: event.time_msec(), cancelled: event.cancelled() };
+                let e = smithay::input::pointer::GestureHoldEndEvent { serial: SERIAL_COUNTER.next_serial(), time: event.time(), cancelled: event.cancelled() };
                 pointer.gesture_hold_end(self, &e);
             }
             InputEvent::PointerButton { event, .. } => {
-                self.device_button(event.button_code(), event.state(), event.time_msec());
+                self.device_button(event.button_code(), event.state(), event.time().millis());
             }
             InputEvent::PointerAxis { event, .. } => {
                 let source = event.source();
@@ -347,7 +347,7 @@ impl Helix {
                     self.capture_scroll(amount(Axis::Horizontal), amount(Axis::Vertical), discrete);
                     return;
                 }
-                let mut frame = AxisFrame::new(event.time_msec()).source(source);
+                let mut frame = AxisFrame::new(event.time()).source(source);
                 // Touchpad scrolling speed (`scroll-speed`).
                 let factor = match source {
                     AxisSource::Finger => self.input_settings.as_ref().map_or(1.0, |s| s.touchpad.scroll_speed),
@@ -372,14 +372,14 @@ impl Helix {
             InputEvent::TouchDown { event } => {
                 let Some(area) = self.touch_area_for(&event.device(), true) else { return };
                 let pos = event.position_transformed(area.size) + area.loc.to_f64();
-                self.touch_down_in(event.slot(), pos, area, event.time_msec());
+                self.touch_down_in(event.slot(), pos, area, event.time().millis());
             }
             InputEvent::TouchMotion { event } => {
                 let Some(area) = self.touch_area_for(&event.device(), false) else { return };
                 let pos = event.position_transformed(area.size) + area.loc.to_f64();
-                self.touch_motion(event.slot(), pos, event.time_msec());
+                self.touch_motion(event.slot(), pos, event.time().millis());
             }
-            InputEvent::TouchUp { event } => self.touch_up(event.slot(), event.time_msec()),
+            InputEvent::TouchUp { event } => self.touch_up(event.slot(), event.time().millis()),
             InputEvent::TouchFrame { .. } => {
                 let touch = self.seat.get_touch().unwrap();
                 touch.frame(self);
@@ -406,7 +406,9 @@ impl Helix {
         let serial = SERIAL_COUNTER.next_serial();
         let pressed = key_state == KeyState::Pressed;
         let keyboard = self.seat.get_keyboard().unwrap();
-        let (filtered, mods_changed) = keyboard.input_intercept::<FilterResult<Option<Action>>, _>(
+        // None: the key was already down (or up), as Smithay's `input`.
+        let Some((filtered, mods_changed)) = keyboard.input_intercept::<FilterResult<Option<Action>>, _>(
+            smithay::input::keyboard::KeyboardSource::MAIN,
             self,
             keycode,
             key_state,
@@ -459,14 +461,16 @@ impl Helix {
                     FilterResult::Forward
                 }
             },
-        );
+        ) else {
+            return;
+        };
         let action = match filtered {
             FilterResult::Intercept(action) => action,
             FilterResult::Forward => {
                 // Modifiers changed by keys grabbed for a screen reader
                 // reach the app with its next key.
                 let mods_changed = mods_changed || std::mem::take(&mut self.monitor_mods_dirty);
-                keyboard.input_forward(self, keycode, key_state, serial, time, mods_changed);
+                keyboard.input_forward(self, keycode, key_state, serial, smithay::backend::input::InputTime::from_millis(time), mods_changed);
                 if pressed {
                     let focus = keyboard.current_focus().and_then(|f| f.wl_surface().map(|s| s.into_owned()));
                     self.note_press(serial, focus.as_ref());
@@ -497,7 +501,7 @@ impl Helix {
                 if self.frame_press(window, part, button, time, pos) {
                     return;
                 }
-                pointer.button(self, &ButtonEvent { button, state, serial, time });
+                pointer.button(self, &ButtonEvent { button, state, serial, time: smithay::backend::input::InputTime::from_millis(time) });
                 pointer.frame(self);
                 self.note_press(serial, pointer.current_focus().as_ref());
                 return;
@@ -521,7 +525,7 @@ impl Helix {
                 self.desktop_click_focus(pos);
             }
         }
-        pointer.button(self, &ButtonEvent { button, state, serial, time });
+        pointer.button(self, &ButtonEvent { button, state, serial, time: smithay::backend::input::InputTime::from_millis(time) });
         pointer.frame(self);
         if state == ButtonState::Pressed {
             self.note_press(serial, pointer.current_focus().as_ref());
@@ -579,7 +583,7 @@ impl Helix {
         }
         let under = self.surface_under(pos);
         let touch = self.seat.get_touch().unwrap();
-        let down = smithay::input::touch::DownEvent { slot, location: pos, serial: SERIAL_COUNTER.next_serial(), time };
+        let down = smithay::input::touch::DownEvent { slot, location: pos, serial: SERIAL_COUNTER.next_serial(), time: smithay::backend::input::InputTime::from_millis(time) };
         let pressed = under.as_ref().map(|(s, _)| s.clone());
         touch.down(self, under, &down);
         self.note_press(down.serial, pressed.as_ref());
@@ -592,7 +596,7 @@ impl Helix {
         }
         let under = self.surface_under(pos);
         let touch = self.seat.get_touch().unwrap();
-        touch.motion(self, under, &smithay::input::touch::MotionEvent { slot, location: pos, time });
+        touch.motion(self, under, &smithay::input::touch::MotionEvent { slot, location: pos, time: smithay::backend::input::InputTime::from_millis(time) });
     }
 
     pub(super) fn touch_up(&mut self, slot: smithay::backend::input::TouchSlot, time: u32) {
@@ -604,7 +608,7 @@ impl Helix {
             return;
         }
         let touch = self.seat.get_touch().unwrap();
-        touch.up(self, &smithay::input::touch::UpEvent { slot, serial: SERIAL_COUNTER.next_serial(), time });
+        touch.up(self, &smithay::input::touch::UpEvent { slot, serial: SERIAL_COUNTER.next_serial(), time: smithay::backend::input::InputTime::from_millis(time) });
     }
 
     /// The monitor touchscreens cover: the built-in panel, else the primary.

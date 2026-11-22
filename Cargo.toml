@@ -93,9 +93,9 @@ opt-level = 2
 [patch.crates-io]
 accesskit_unix = { path = "vendor/accesskit_unix" }
 accesskit_atspi_common = { path = "vendor/accesskit_atspi_common" }
-# Smithay (MIT), from Helix's fork: upstream plus Helix's changes, one
-# commit each ("Helix: ..."), listed at
-# https://github.com/helixdesktop/smithay/commits/helix-0.7.0. Moving the
-# pin: rebase those commits onto a newer upstream commit, push, and change
-# rev here (helixdesktop/desktop#187).
-smithay = { git = "https://github.com/helixdesktop/smithay", rev = "b47fc6bf39c454fa3592c34092cbe3e785ac5efe" }
+# Smithay (MIT), from Helix's fork: upstream master plus Helix's changes,
+# one commit each ("Helix: ..."), on the fork's helix branch
+# (https://github.com/helixdesktop/smithay/commits/helix). Moving the pin:
+# rebase those commits onto a newer upstream commit, push, and change rev
+# here (helixdesktop/desktop#187).
+smithay = { git = "https://github.com/helixdesktop/smithay", rev = "e81752d0958abf9784eb7017ef7906f591466bb1" }

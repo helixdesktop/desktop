@@ -21,7 +21,6 @@ use smithay::wayland::compositor::{with_states, CompositorClientState, Composito
 use smithay::wayland::shell::xdg::{PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState};
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::input::{SeatHandler, SeatState};
-use smithay::{delegate_compositor, delegate_seat, delegate_shm, delegate_xdg_shell};
 
 // ---- the server ----
 
@@ -32,6 +31,9 @@ struct Server {
     seat_state: SeatState<Server>,
     toplevels: Vec<ToplevelSurface>,
 }
+
+// Smithay's WlSurface pointer target asks for it.
+impl smithay::wayland::pointer_constraints::PointerConstraintsHandler for Server {}
 
 impl SeatHandler for Server {
     type KeyboardFocus = WlSurface;
@@ -93,10 +95,7 @@ impl ToplevelIconHandler for Server {
     }
 }
 
-delegate_compositor!(Server);
-delegate_seat!(Server);
-delegate_xdg_shell!(Server);
-delegate_shm!(Server);
+smithay::delegate_dispatch2!(Server);
 smithay::reexports::wayland_server::delegate_global_dispatch!(Server: [icon_server::xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1: Vec<i32>] => ToplevelIcons);
 smithay::reexports::wayland_server::delegate_dispatch!(Server: [icon_server::xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1: ()] => ToplevelIcons);
 smithay::reexports::wayland_server::delegate_dispatch!(Server: [icon_server::xdg_toplevel_icon_v1::XdgToplevelIconV1: IconBuilder] => ToplevelIcons);

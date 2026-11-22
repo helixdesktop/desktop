@@ -137,7 +137,7 @@ impl Helix {
     /// the pen moves the pointer.
     fn pen_moved<B: InputBackend>(&mut self, event: &impl TabletToolEvent<B>) {
         let Some(mut pen) = self.tablet.pen.take() else { return };
-        let time = event.time_msec();
+        let time = event.time().millis();
         let pos = if pen.tablet.relative {
             let d = event.delta();
             let current = self.seat.get_pointer().map(|p| p.current_location()).unwrap_or_default();
@@ -162,7 +162,7 @@ impl Helix {
                 // The pointer leaves the app; the app sets the tool's cursor.
                 self.cursor_status = CursorImageStatus::default_named();
             }
-            pointer.motion(self, None, &MotionEvent { location: pos, serial: serial.into(), time });
+            pointer.motion(self, None, &MotionEvent { location: pos, serial: serial.into(), time: smithay::backend::input::InputTime::from_millis(time) });
             pointer.frame(self);
             let curve = if pen.eraser { pen.stylus.eraser_pressure } else { pen.stylus.pressure };
             let axes = Axes {
@@ -182,9 +182,9 @@ impl Helix {
             if pen.tablet.relative {
                 let current = pointer.current_location();
                 let delta = pos - current;
-                self.pointer_moved_by(delta, delta, Event::time(event), time);
+                self.pointer_moved_by(delta, delta, Event::time(event).micros(), time);
             } else {
-                self.pointer_moved_to(pos, Event::time(event), time);
+                self.pointer_moved_to(pos, Event::time(event).micros(), time);
             }
         }
         pen.on_client = aware;
@@ -224,10 +224,10 @@ impl Helix {
                         if pen.tip_down {
                             self.tablet_v2.tool_tip(pen.tool, false, 0);
                         }
-                        self.tablet_v2.tool_out(pen.tool, event.time_msec());
+                        self.tablet_v2.tool_out(pen.tool, event.time().millis());
                         self.cursor_status = CursorImageStatus::default_named();
                     } else if pen.tip_down {
-                        self.device_button(BTN_LEFT, ButtonState::Released, event.time_msec());
+                        self.device_button(BTN_LEFT, ButtonState::Released, event.time().millis());
                     }
                 }
             }
@@ -256,11 +256,11 @@ impl Helix {
             }
             let serial = SERIAL_COUNTER.next_serial().into();
             self.tablet_v2.tool_tip(tool, down, serial);
-            self.tablet_v2.tool_frame(tool, event.time_msec());
+            self.tablet_v2.tool_frame(tool, event.time().millis());
             return;
         }
         let state = if down { ButtonState::Pressed } else { ButtonState::Released };
-        self.device_button(BTN_LEFT, state, event.time_msec());
+        self.device_button(BTN_LEFT, state, event.time().millis());
     }
 
     pub(super) fn tablet_button<B: InputBackend>(&mut self, event: &B::TabletToolButtonEvent) {
@@ -271,9 +271,9 @@ impl Helix {
             Some(ButtonAction::Button(code)) if on_client => {
                 let serial = SERIAL_COUNTER.next_serial().into();
                 self.tablet_v2.tool_button(tool, code, event.button_state() == ButtonState::Pressed, serial);
-                self.tablet_v2.tool_frame(tool, event.time_msec());
+                self.tablet_v2.tool_frame(tool, event.time().millis());
             }
-            Some(ButtonAction::Button(code)) => self.device_button(code, event.button_state(), event.time_msec()),
+            Some(ButtonAction::Button(code)) => self.device_button(code, event.button_state(), event.time().millis()),
             Some(ButtonAction::SwitchMonitor) if event.button_state() == ButtonState::Pressed => {
                 let device = pen.device.clone();
                 self.switch_tablet_monitor(&device);

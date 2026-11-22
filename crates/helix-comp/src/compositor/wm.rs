@@ -477,7 +477,7 @@ impl Helix {
             if fixed != location {
                 self.space.map_element(window.clone(), fixed, false);
                 if let Some(x11) = window.x11_surface() {
-                    let _ = x11.configure(Rectangle::new(fixed, x11.geometry().size));
+                    let _ = x11.configure(Rectangle::new(fixed, x11.last_configure().size));
                 }
             }
         }
@@ -505,7 +505,7 @@ impl Helix {
             }
             self.space.map_element(window.clone(), location, false);
             if let Some(x11) = window.x11_surface() {
-                let _ = x11.configure(Rectangle::new(location, x11.geometry().size));
+                let _ = x11.configure(Rectangle::new(location, x11.last_configure().size));
             }
         }
         // Takeovers follow their (new) monitor; work areas are rechecked.

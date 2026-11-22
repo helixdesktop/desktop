@@ -65,8 +65,8 @@ pub fn init(
     event_loop: &mut EventLoop<'static, Helix>,
     state: &mut Helix,
 ) -> Result<Vec<Monitor>, Box<dyn std::error::Error>> {
-    let attributes = smithay::reexports::winit::window::Window::default_attributes()
-        .with_inner_size(smithay::reexports::winit::dpi::LogicalSize::new(1280.0, 800.0))
+    let attributes = smithay::reexports::winit::window::WindowAttributes::default()
+        .with_surface_size(smithay::reexports::winit::dpi::LogicalSize::new(1280.0, 800.0))
         .with_title("Helix")
         .with_visible(true);
     let (mut backend, winit) = winit::init_from_attributes::<GlesRenderer>(attributes)?;
@@ -82,6 +82,7 @@ pub fn init(
             subpixel: Subpixel::Unknown,
             make: "Helix".into(),
             model: "Nested".into(),
+            serial_number: String::new(),
         },
     );
     output.user_data().insert_if_missing(|| helix_comp::edid::Identity { vendor: "Helix".into(), product: "Nested".into(), serial: "0".into() });
@@ -158,7 +159,7 @@ pub fn init(
                     state.host_cursor = Some(host);
                     match host {
                         Some(icon) => {
-                            backend.window().set_cursor(icon);
+                            backend.window().set_cursor(icon.into());
                             backend.window().set_cursor_visible(true);
                         }
                         None => backend.window().set_cursor_visible(false),

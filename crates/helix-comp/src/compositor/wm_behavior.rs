@@ -234,8 +234,7 @@ impl Helix {
     pub fn is_modal(&self, window: &Window) -> bool {
         match window.toplevel() {
             Some(t) => self.wm.modal.contains(t.wl_surface()),
-            // Smithay's name for `_NET_WM_STATE_MODAL`.
-            None => window.x11_surface().is_some_and(|x| x.is_popup()),
+            None => window.x11_surface().is_some_and(|x| x.is_modal()),
         }
     }
 

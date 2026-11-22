@@ -296,7 +296,7 @@ impl Helix {
         let x = self.space.outputs().filter_map(|o| self.space.output_geometry(o)).map(|g| g.loc.x + g.size.w).max().unwrap_or(0);
         let output = Output::new(
             name.clone(),
-            PhysicalProperties { size: (0, 0).into(), subpixel: Subpixel::Unknown, make: "Helix".into(), model: "Virtual".into() },
+            PhysicalProperties { size: (0, 0).into(), subpixel: Subpixel::Unknown, make: "Helix".into(), model: "Virtual".into(), serial_number: String::new() },
         );
         let mode = Mode { size: VIRTUAL_SIZE.into(), refresh: 60_000 };
         output.change_current_state(Some(mode), Some(smithay::utils::Transform::Normal), Some(Scale::Integer(1)), Some((x, 0).into()));

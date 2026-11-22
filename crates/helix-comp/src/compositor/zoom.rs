@@ -73,8 +73,8 @@ impl Element for Shared {
 }
 
 impl RenderElement<GlesRenderer> for Shared {
-    fn draw(&self, frame: &mut GlesFrame<'_, '_>, src: Rectangle<f64, Buffer>, dst: Rectangle<i32, Physical>, damage: &[Rectangle<i32, Physical>], opaque_regions: &[Rectangle<i32, Physical>]) -> Result<(), GlesError> {
-        RenderElement::<GlesRenderer>::draw(&*self.inner, frame, src, dst, damage, opaque_regions)
+    fn draw(&self, frame: &mut GlesFrame<'_, '_>, src: Rectangle<f64, Buffer>, dst: Rectangle<i32, Physical>, damage: &[Rectangle<i32, Physical>], opaque_regions: &[Rectangle<i32, Physical>], cache: Option<&smithay::utils::user_data::UserDataMap>) -> Result<(), GlesError> {
+        RenderElement::<GlesRenderer>::draw(&*self.inner, frame, src, dst, damage, opaque_regions, cache)
     }
 
     fn underlying_storage(&self, _renderer: &mut GlesRenderer) -> Option<UnderlyingStorage<'_>> {
@@ -123,9 +123,9 @@ impl Element for Effected {
 }
 
 impl RenderElement<GlesRenderer> for Effected {
-    fn draw(&self, frame: &mut GlesFrame<'_, '_>, src: Rectangle<f64, Buffer>, dst: Rectangle<i32, Physical>, damage: &[Rectangle<i32, Physical>], opaque_regions: &[Rectangle<i32, Physical>]) -> Result<(), GlesError> {
+    fn draw(&self, frame: &mut GlesFrame<'_, '_>, src: Rectangle<f64, Buffer>, dst: Rectangle<i32, Physical>, damage: &[Rectangle<i32, Physical>], opaque_regions: &[Rectangle<i32, Physical>], cache: Option<&smithay::utils::user_data::UserDataMap>) -> Result<(), GlesError> {
         frame.override_default_tex_program(self.program.clone(), self.uniforms.clone());
-        let result = RenderElement::<GlesRenderer>::draw(&*self.inner, frame, src, dst, damage, opaque_regions);
+        let result = RenderElement::<GlesRenderer>::draw(&*self.inner, frame, src, dst, damage, opaque_regions, cache);
         frame.clear_tex_program_override();
         result
     }

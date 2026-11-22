@@ -95,8 +95,8 @@ impl Helix {
     /// window placing itself (where it asked, kept on its output): shown
     /// without a frame, and focus stays where it is.
     fn map_unfocused_x11(&mut self, window: &Window, surface: &X11Surface, kind: X11Kind) {
-        let size = surface.geometry().size;
-        let asked = surface.geometry().loc;
+        let size = surface.last_configure().size;
+        let asked = surface.last_configure().loc;
         let output = match kind {
             X11Kind::Placed => self.space.outputs().find(|o| self.space.output_geometry(o).is_some_and(|g| g.contains(asked))).cloned().or_else(|| self.primary()),
             _ => self.pointer_output().or_else(|| self.primary()),
@@ -152,7 +152,7 @@ impl Helix {
             ready(self, None);
             return;
         };
-        let spawn = |display: Option<u32>| XWayland::spawn(&self.display_handle, display, envs.clone(), false, Stdio::null(), Stdio::null(), |_| ());
+        let spawn = |display: Option<u32>| XWayland::spawn(&self.display_handle, display, envs.clone(), std::iter::empty::<&str>(), false, Stdio::null(), Stdio::null(), |_| ());
         // Smithay looks for a free display among :0 to :32; when those are
         // all taken (by other X servers or locks that stay behind), the next
         // ones are tried one by one.
@@ -194,7 +194,7 @@ impl Helix {
                     if let Some(dir) = wrapper_dir() {
                         let _ = std::fs::remove_dir_all(dir);
                     }
-                    match X11Wm::start_wm(state.loop_handle.clone(), x11_socket, client.clone()) {
+                    match X11Wm::start_wm(state.loop_handle.clone(), &state.display_handle.clone(), x11_socket, client.clone()) {
                         Ok(wm) => {
                             state.xwm = Some(wm);
                             state.xdisplay = Some(display_number);
@@ -368,14 +368,14 @@ impl XwmHandler for Helix {
         let (x, y) = self.next_window_position();
         // Room for the title bar Helix draws above it.
         let location: smithay::utils::Point<i32, Logical> = (x, y + super::frames::frame_top(&window)).into();
-        let size = surface.geometry().size;
+        let size = surface.last_configure().size;
         let _ = surface.configure(Rectangle::new(location, size));
         tracing::info!(title = surface.title(), class = surface.class(), ?location, ?size, "new X11 window");
         self.map_new_window(&window, location);
         // States the app set before mapping (EWMH; #167).
-        if surface.fullscreen_at_map() {
+        if surface.is_fullscreen() {
             self.fullscreen(&window, None);
-        } else if surface.maximized_at_map() {
+        } else if surface.is_maximized() {
             self.maximize(&window);
         }
         self.place_new_window(&window);
@@ -385,7 +385,7 @@ impl XwmHandler for Helix {
     }
 
     fn mapped_override_redirect_window(&mut self, _xwm: XwmId, surface: X11Surface) {
-        let location = surface.geometry().loc;
+        let location = surface.last_configure().loc;
         self.space.map_element(Window::new_x11_window(surface), location, false);
     }
 
@@ -416,7 +416,7 @@ impl XwmHandler for Helix {
     ) {
         // Windows that place themselves (notifications, docks) move too.
         if x11_kind(&surface) == X11Kind::Placed {
-            let mut geo = surface.geometry();
+            let mut geo = surface.last_configure();
             geo.loc = (x.unwrap_or(geo.loc.x), y.unwrap_or(geo.loc.y)).into();
             geo.size = (w.map_or(geo.size.w, |w| w as i32), h.map_or(geo.size.h, |h| h as i32)).into();
             let _ = surface.configure(geo);
@@ -426,7 +426,7 @@ impl XwmHandler for Helix {
             return;
         }
         // Apps may resize themselves; Helix keeps deciding where they go.
-        let mut geo = surface.geometry();
+        let mut geo = surface.last_configure();
         if let Some(w) = w {
             geo.size.w = w as i32;
         }
@@ -439,7 +439,7 @@ impl XwmHandler for Helix {
         if let Some(window) = self.x11_window(&surface) {
             if let Some((_, restore, _)) = self.restore.iter_mut().find(|(w, _, _)| *w == window) {
                 restore.size = geo.size;
-                let _ = surface.configure(surface.geometry());
+                let _ = surface.configure(surface.last_configure());
                 return;
             }
         }

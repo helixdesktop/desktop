@@ -115,8 +115,9 @@ impl Helix {
         // Plain modifiers still count towards later keys; locks and latches
         // must not change. The app hears of the modifiers with its next key.
         if !keyboard_monitor::is_lock_keysym(key.keysym) {
-            let ((), changed) = keyboard.input_intercept(self, keycode, key_state, |_, _, _| ());
-            self.monitor_mods_dirty |= changed;
+            if let Some(((), changed)) = keyboard.input_intercept(smithay::input::keyboard::KeyboardSource::MAIN, self, keycode, key_state, |_, _, _| ()) {
+                self.monitor_mods_dirty |= changed;
+            }
         }
         true
     }
