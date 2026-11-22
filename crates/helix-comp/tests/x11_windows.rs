@@ -12,6 +12,10 @@
 //! - A fullscreen or maximized window keeps its size when the app asks
 //!   for another (#165; games set their video mode's): it gets that size
 //!   when restored.
+//! - `_NET_ACTIVE_WINDOW` names the focused X11 window (none while a
+//!   Wayland window has focus), and asking for it activates a window for
+//!   a pager or an app moving between its own windows; others only want
+//!   attention (#166).
 //!
 //! Runs the real `helix-comp` headless; needs `dbus-daemon` and Xwayland
 //! (as every headless session), skipped otherwise.
@@ -95,6 +99,31 @@ impl X11 {
         let message = ClientMessageEvent::new(32, window, state, [action, a, b, 1, 0]);
         self.conn.send_event(false, self.root, EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY, message).unwrap();
         self.conn.flush().unwrap();
+    }
+
+    /// The root's `_NET_ACTIVE_WINDOW`.
+    fn active(&self) -> Option<Window> {
+        let active = self.atom("_NET_ACTIVE_WINDOW");
+        let reply = self.conn.get_property(false, self.root, active, AtomEnum::WINDOW, 0, 1).unwrap().reply().unwrap();
+        reply.value32().and_then(|mut v| v.next())
+    }
+
+    /// Ask for `window` to be activated, from `source` (1 an app, 2 a
+    /// pager), the app's active window being `current`.
+    fn activate(&self, window: Window, source: u32, current: Window) {
+        let active = self.atom("_NET_ACTIVE_WINDOW");
+        let message = ClientMessageEvent::new(32, window, active, [source, x11rb::CURRENT_TIME, current, 0, 0]);
+        self.conn.send_event(false, self.root, EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY, message).unwrap();
+        self.conn.flush().unwrap();
+    }
+
+    /// A mapped window, once the window manager manages it.
+    fn mapped(&self) -> Window {
+        let window = self.window();
+        self.conn.map_window(window).unwrap();
+        self.conn.flush().unwrap();
+        self.until("the window manager never managed the window", |x| x.wm_state(window) == Some(1));
+        window
     }
 
     /// Wait until `done` holds, or fail with `what`.
@@ -222,4 +251,41 @@ fn a_fullscreen_or_maximized_window_keeps_its_size() {
     x.until("the window was not fullscreen", |x| x.size(window) == (800, 600));
     ask(window, (640, 480));
     assert_eq!(x.size(window), (800, 600), "the fullscreen window took the size the app asked for");
+}
+
+#[test]
+fn the_active_window_follows_focus() {
+    let Some(session) = session() else { return };
+    let x = X11::new(&session);
+    let a = x.mapped();
+    x.until("_NET_ACTIVE_WINDOW is not the new window", |x| x.active() == Some(a));
+    let b = x.mapped();
+    x.until("_NET_ACTIVE_WINDOW is not the newer window", |x| x.active() == Some(b));
+
+    // A Wayland window takes focus: no X11 window is active.
+    let mut app = common::connect(&session);
+    let (window, ()) = app.toplevel((200, 100), |_, _| {});
+    let surface = window.surface.clone();
+    app.until("the Wayland window has no focus", |s| s.keyboard.as_ref() == Some(&surface));
+    x.until("_NET_ACTIVE_WINDOW still names an X11 window", |x| x.active() == Some(x11rb::NONE));
+}
+
+#[test]
+fn activation_requests() {
+    let Some(session) = session() else { return };
+    let x = X11::new(&session);
+    let a = x.mapped();
+    let b = x.mapped();
+    x.until("the newer window has no focus", |x| x.active() == Some(b));
+
+    // A pager (wmctrl -a) activates.
+    x.activate(a, 2, x11rb::NONE);
+    x.until("a pager's request was not granted", |x| x.active() == Some(a));
+    // An app out of the blue does not take focus.
+    x.activate(b, 1, x11rb::NONE);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(x.active(), Some(a), "an app's request out of the blue took focus");
+    // An app moving from its focused window to another does.
+    x.activate(b, 1, a);
+    x.until("an app's request from its focused window was not granted", |x| x.active() == Some(b));
 }
