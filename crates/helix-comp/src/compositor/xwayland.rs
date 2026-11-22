@@ -266,6 +266,29 @@ impl XwmHandler for Helix {
         if let Some(h) = h {
             geo.size.h = h as i32;
         }
+        // Not while fullscreen, maximized or tiled (games set their video
+        // mode's size after going fullscreen; as mutter, #165): the app is
+        // told its size again, and gets the one it asked for when restored.
+        if let Some(window) = self.x11_window(&surface) {
+            if let Some((_, restore, _)) = self.restore.iter_mut().find(|(w, _, _)| *w == window) {
+                restore.size = geo.size;
+                let _ = surface.configure(surface.geometry());
+                return;
+            }
+        }
+        // Within the window's own limits (WM_NORMAL_HINTS).
+        if let Some(min) = surface.min_size() {
+            geo.size.w = geo.size.w.max(min.w);
+            geo.size.h = geo.size.h.max(min.h);
+        }
+        if let Some(max) = surface.max_size() {
+            if max.w > 0 {
+                geo.size.w = geo.size.w.min(max.w);
+            }
+            if max.h > 0 {
+                geo.size.h = geo.size.h.min(max.h);
+            }
+        }
         let _ = surface.configure(geo);
     }
 
