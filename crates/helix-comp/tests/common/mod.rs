@@ -1,7 +1,7 @@
 //! A Wayland client for headless focus tests: toplevels with plain
 //! buffers, the keyboard and pointer focus it is told about, the serial
 //! of the last key or button press it got, activation tokens, and the
-//! clipboard selection it is offered.
+//! clipboard selection it is offered or sets.
 
 #![allow(dead_code)]
 
@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use helix_protocols::gtk_shell_client::{gtk_shell1, gtk_surface1};
 use helix_test_support::headless::HeadlessSession;
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
-use wayland_client::protocol::{wl_buffer, wl_compositor, wl_data_device, wl_data_device_manager, wl_data_offer, wl_keyboard, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface};
+use wayland_client::protocol::{wl_buffer, wl_compositor, wl_data_device, wl_data_device_manager, wl_data_offer, wl_data_source, wl_keyboard, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface};
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
 use wayland_protocols::xdg::activation::v1::client::{xdg_activation_token_v1, xdg_activation_v1};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
@@ -34,6 +34,8 @@ pub struct State {
     pub selection: Option<(wl_data_offer::WlDataOffer, Vec<String>)>,
     /// Types of offers announced but not yet made the selection.
     offers: Vec<(wl_data_offer::WlDataOffer, Vec<String>)>,
+    /// What this client's own selection (`Client::copy`) holds.
+    copied: Vec<u8>,
 }
 
 macro_rules! quiet {
@@ -127,6 +129,17 @@ impl Dispatch<wl_data_offer::WlDataOffer, ()> for State {
     }
 }
 
+impl Dispatch<wl_data_source::WlDataSource, ()> for State {
+    fn event(state: &mut Self, _: &wl_data_source::WlDataSource, event: wl_data_source::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+        if let wl_data_source::Event::Send { fd, .. } = event {
+            let data = state.copied.clone();
+            std::thread::spawn(move || {
+                let _ = std::io::Write::write_all(&mut std::fs::File::from(fd), &data);
+            });
+        }
+    }
+}
+
 fn filled(shm: &wl_shm::WlShm, qh: &QueueHandle<State>, (w, h): (i32, i32)) -> wl_buffer::WlBuffer {
     let bytes: Vec<u8> = std::iter::repeat_n(0xFF80_8080u32.to_le_bytes(), (w * h) as usize).flatten().collect();
     // SAFETY: memfd_create returns a new fd we own (or -1).
@@ -152,6 +165,7 @@ pub struct Client {
     pub gtk_shell: gtk_shell1::GtkShell1,
     pub seat: wl_seat::WlSeat,
     pub data_device: wl_data_device::WlDataDevice,
+    data_manager: wl_data_device_manager::WlDataDeviceManager,
 }
 
 pub struct Toplevel {
@@ -237,6 +251,16 @@ impl Client {
         self.state.keyboard.clone()
     }
 
+    /// Set the clipboard to `data` as `mime` (the client must have
+    /// keyboard focus).
+    pub fn copy(&mut self, mime: &str, data: &[u8]) {
+        self.state.copied = data.to_vec();
+        let source = self.data_manager.create_data_source(&self.qh, ());
+        source.offer(mime.to_owned());
+        self.data_device.set_selection(Some(&source), 0);
+        self.roundtrip();
+    }
+
     /// The clipboard selection's data as `mime`, read to the end.
     pub fn paste(&mut self, mime: &str) -> Vec<u8> {
         let (offer, _) = self.state.selection.clone().expect("no clipboard selection offered");
@@ -277,6 +301,7 @@ pub fn connect(session: &HeadlessSession) -> Client {
         gtk_shell: globals.bind(&qh, 1..=7, ()).expect("helix-comp offers gtk_shell1"),
         seat,
         data_device,
+        data_manager: manager,
         queue,
         qh,
         state: State::default(),
