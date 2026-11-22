@@ -5,6 +5,7 @@
 
 #![allow(dead_code)]
 
+pub mod xdnd;
 pub mod xwm;
 
 use std::os::fd::AsFd;
@@ -16,6 +17,7 @@ use helix_test_support::headless::HeadlessSession;
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
 use wayland_client::protocol::{wl_buffer, wl_compositor, wl_data_device, wl_data_device_manager, wl_data_offer, wl_data_source, wl_keyboard, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface};
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
+use wayland_protocols::wp::primary_selection::zv1::client::{zwp_primary_selection_device_manager_v1 as primary_manager, zwp_primary_selection_device_v1 as primary_device, zwp_primary_selection_offer_v1 as primary_offer};
 use wayland_protocols::xdg::activation::v1::client::{xdg_activation_token_v1, xdg_activation_v1};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
@@ -36,8 +38,18 @@ pub struct State {
     pub selection: Option<(wl_data_offer::WlDataOffer, Vec<String>)>,
     /// Types of offers announced but not yet made the selection.
     offers: Vec<(wl_data_offer::WlDataOffer, Vec<String>)>,
-    /// What this client's own selection (`Client::copy`) holds.
+    /// What this client's own selection or drag (`Client::copy`,
+    /// `Client::drag`) holds: by type, and for any other type asked for.
     copied: Vec<u8>,
+    copied_as: Vec<(String, Vec<u8>)>,
+    /// How this client's last drag ended for its source: `"cancelled"`,
+    /// `"dnd_finished"` (or still `None`); and whether it was dropped
+    /// (`dnd_drop_performed`).
+    pub source_ended: Option<&'static str>,
+    pub source_dropped: bool,
+    /// The primary selection offered (while focused) and its types.
+    pub primary: Option<(primary_offer::ZwpPrimarySelectionOfferV1, Vec<String>)>,
+    primary_offers: Vec<(primary_offer::ZwpPrimarySelectionOfferV1, Vec<String>)>,
     /// A drag over one of this client's surfaces: its offer, types and
     /// the enter serial.
     pub dnd: Option<(wl_data_offer::WlDataOffer, Vec<String>, u32)>,
@@ -147,11 +159,47 @@ impl Dispatch<wl_data_offer::WlDataOffer, ()> for State {
 
 impl Dispatch<wl_data_source::WlDataSource, ()> for State {
     fn event(state: &mut Self, _: &wl_data_source::WlDataSource, event: wl_data_source::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
-        if let wl_data_source::Event::Send { fd, .. } = event {
-            let data = state.copied.clone();
-            std::thread::spawn(move || {
-                let _ = std::io::Write::write_all(&mut std::fs::File::from(fd), &data);
-            });
+        match event {
+            wl_data_source::Event::Send { fd, mime_type } => {
+                let data = state.copied_as.iter().find(|(m, _)| *m == mime_type).map_or_else(|| state.copied.clone(), |(_, d)| d.clone());
+                std::thread::spawn(move || {
+                    let _ = std::io::Write::write_all(&mut std::fs::File::from(fd), &data);
+                });
+            }
+            wl_data_source::Event::Cancelled => state.source_ended = Some("cancelled"),
+            wl_data_source::Event::DndFinished => state.source_ended = Some("dnd_finished"),
+            wl_data_source::Event::DndDropPerformed => state.source_dropped = true,
+            _ => {}
+        }
+    }
+}
+
+quiet!(primary_manager::ZwpPrimarySelectionDeviceManagerV1);
+impl Dispatch<primary_device::ZwpPrimarySelectionDeviceV1, ()> for State {
+    fn event(state: &mut Self, _: &primary_device::ZwpPrimarySelectionDeviceV1, event: primary_device::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+        match event {
+            primary_device::Event::DataOffer { offer } => state.primary_offers.push((offer, Vec::new())),
+            primary_device::Event::Selection { id } => {
+                state.primary = id.map(|id| {
+                    let types = state.primary_offers.iter().find(|(o, _)| o == &id).map(|(_, t)| t.clone()).unwrap_or_default();
+                    (id, types)
+                });
+                state.primary_offers.clear();
+            }
+            _ => {}
+        }
+    }
+
+    wayland_client::event_created_child!(State, primary_device::ZwpPrimarySelectionDeviceV1, [
+        primary_device::EVT_DATA_OFFER_OPCODE => (primary_offer::ZwpPrimarySelectionOfferV1, ()),
+    ]);
+}
+impl Dispatch<primary_offer::ZwpPrimarySelectionOfferV1, ()> for State {
+    fn event(state: &mut Self, offer: &primary_offer::ZwpPrimarySelectionOfferV1, event: primary_offer::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+        if let primary_offer::Event::Offer { mime_type } = event {
+            if let Some((_, types)) = state.primary_offers.iter_mut().find(|(o, _)| o == offer) {
+                types.push(mime_type);
+            }
         }
     }
 }
@@ -182,6 +230,8 @@ pub struct Client {
     pub seat: wl_seat::WlSeat,
     pub data_device: wl_data_device::WlDataDevice,
     data_manager: wl_data_device_manager::WlDataDeviceManager,
+    /// The primary selection device, when the compositor offers one.
+    pub primary_device: Option<primary_device::ZwpPrimarySelectionDeviceV1>,
 }
 
 pub struct Toplevel {
@@ -271,6 +321,7 @@ impl Client {
     /// keyboard focus).
     pub fn copy(&mut self, mime: &str, data: &[u8]) {
         self.state.copied = data.to_vec();
+        self.state.copied_as.clear();
         let source = self.data_manager.create_data_source(&self.qh, ());
         source.offer(mime.to_owned());
         self.data_device.set_selection(Some(&source), 0);
@@ -280,9 +331,20 @@ impl Client {
     /// Start dragging `data` as `mime` from `origin`, for the press of
     /// `serial` (offered for copying).
     pub fn drag(&mut self, mime: &str, data: &[u8], origin: &wl_surface::WlSurface, serial: u32) {
-        self.state.copied = data.to_vec();
+        self.drag_types(&[(mime, data)], origin, serial);
+    }
+
+    /// Start dragging `types` (each type with its own data) from
+    /// `origin`, for the press of `serial` (offered for copying).
+    pub fn drag_types(&mut self, types: &[(&str, &[u8])], origin: &wl_surface::WlSurface, serial: u32) {
+        self.state.copied = types.first().map(|(_, d)| d.to_vec()).unwrap_or_default();
+        self.state.copied_as = types.iter().map(|(m, d)| ((*m).to_owned(), d.to_vec())).collect();
+        self.state.source_ended = None;
+        self.state.source_dropped = false;
         let source = self.data_manager.create_data_source(&self.qh, ());
-        source.offer(mime.to_owned());
+        for (mime, _) in types {
+            source.offer((*mime).to_owned());
+        }
         source.set_actions(wl_data_device_manager::DndAction::Copy);
         self.data_device.start_drag(Some(&source), origin, None, serial);
         self.roundtrip();
@@ -339,7 +401,9 @@ pub fn connect(session: &HeadlessSession) -> Client {
     seat.get_pointer(&qh, ());
     let manager: wl_data_device_manager::WlDataDeviceManager = globals.bind(&qh, 3..=3, ()).unwrap();
     let data_device = manager.get_data_device(&seat, &qh, ());
+    let primary_device = globals.bind::<primary_manager::ZwpPrimarySelectionDeviceManagerV1, _, _>(&qh, 1..=1, ()).ok().map(|m| m.get_device(&seat, &qh, ()));
     Client {
+        primary_device,
         compositor: globals.bind(&qh, 4..=6, ()).unwrap(),
         shm: globals.bind(&qh, 1..=1, ()).unwrap(),
         base: globals.bind(&qh, 1..=6, ()).unwrap(),

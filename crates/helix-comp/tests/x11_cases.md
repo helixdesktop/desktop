@@ -17,7 +17,6 @@ Status:
   (frame windows), or contradicts a choice Helix made on purpose.
 - **not testable headlessly**: it needs something a headless test can't
   force (timing between Xwayland's two connections, real hardware).
-- **not yet tested**: applicable and testable; still to be written.
 
 Apps are the ones the upstream reports name.
 
@@ -103,10 +102,10 @@ Apps are the ones the upstream reports name.
 | X43 | S18, W86 | `_NET_WM_SYNC_REQUEST` before each resize for apps that sync | | `x11_configure::resizes_are_announced_to_apps_that_sync` (ignored) |
 | X44 | W88 | `_NET_WM_MOVERESIZE`: move follows the pointer; unknown directions ignored | Steam, Chromium, Electron | `x11_configure::an_app_moves_its_window_from_its_own_title_bar` |
 | X73 | S19 | The frame's visual dropped the client's alpha | | not applicable: no frame windows |
-| X75 | S16 | Coordinates rounded wrongly with an Xwayland client scale | | not yet tested: needs a session with an Xwayland scale (Helix sets one on HiDPI) |
-| X94 | W30 | Input shape: clicks outside it go through | shaped windows, OSDs | not yet tested: needs x11rb's shape extension in the tests |
+| X75 | S16 | Coordinates rounded wrongly with an Xwayland client scale | `x11_configure::coordinates_at_an_xwayland_scale_of_two` (Helix's Xwayland scale is always whole, see `xwayland_scale`, so the fractional rounding of S16 can't happen; this checks both directions at scale 2) |
+| X94 | W30 | Input shape: clicks outside it go through | shaped windows, OSDs | `x11_focus::the_pointer_outside_an_input_shape_goes_through` (ignored) |
 | X95 | W28 | Windows at negative layout coordinates | | not testable headlessly: the headless session has one monitor at 0,0 |
-| X98 | W43 | `_MOTIF_WM_HINTS` without decorations: no title bar from Helix | Steam, Chromium | not yet tested |
+| X98 | W43 | `_MOTIF_WM_HINTS` without decorations: no title bar from Helix | Steam, Chromium | `x11_props::motif_hints_without_decorations_get_no_title_bar`; a truncated property: `x11_props` garbage tests |
 
 ## Properties
 
@@ -168,25 +167,25 @@ Apps are the ones the upstream reports name.
 | X104 | W73 | Every type an X11 app offers reaches Wayland | Chromium → LibreOffice | `x11_clipboard::an_x11_image_pastes_into_a_wayland_app` |
 | X105 | S40 | The INCR size hint is not data | GTK on X11 | `x11_clipboard::a_large_x11_image_pastes_whole` |
 | X91 | W74 | X11 apps refused the clipboard while no X11 window has focus | | not applicable: Helix serves every request, as GNOME does (#172) |
-| X96 | W65 | CLIPBOARD and PRIMARY changed at once keep their own types | | not yet tested: the test client has no primary selection |
-| X97 | W68 | Ownership flipping fast between an X11 app and the WM: no self-copy loop | Emacs | not yet tested |
+| X96 | W65 | CLIPBOARD and PRIMARY changed at once keep their own types | `x11_selection::clipboard_and_primary_taken_at_once_keep_their_own_types` |
+| X97 | W68 | Ownership flipping fast between an X11 app and the WM: no self-copy loop | Emacs | `x11_selection::clipboard_ownership_flipping_fast_settles` (ignored), `x11_selection::the_clipboard_recovers_after_ownership_flipped_fast` |
 
 ## Drag and drop
 
 | ID | Sources | Scenario | Apps | Status |
 |---|---|---|---|---|
 | X114 | W76 | Wayland onto X11: XdndEnter, Position, Drop, data | GTK, Firefox | `x11_dnd::a_wayland_app_drags_onto_an_x11_window` |
-| X107 | S45 | X11 drag whose messages come from another window than the selection owner | Chromium, Electron | not yet tested |
-| X108 | S46 | XdndFinished names the target window | | not yet tested |
-| X109 | S47 | The WM's drop proxy has a WM_NAME | Chromium, Electron | not yet tested |
-| X110 | S48 | `XdndProxy` on an X11 drop target | | not yet tested |
-| X111 | S49 | The X11 drag source destroyed mid-drag: the drag ends | | not yet tested |
-| X112 | S50 | An override-redirect drag icon under the pointer isn't the target | Chromium, Electron | not yet tested |
-| X113 | S51 | Wayland drag over one X11 window, then another: the drop lands on the second | | not yet tested |
-| X115 | W77 | XdndFinished with performed false ends the drag; a forged one is ignored | | not yet tested |
-| X116 | W78 | The X11 target asks for the data a while after the drop | | not yet tested |
-| X117 | W79 | The X11 target window destroyed mid-drag | | not yet tested |
-| X118 | W80 | Several targets asked for at once during a drag | Chromium | not yet tested |
+| X107 | S45 | X11 drag whose messages come from another window than the selection owner | Chromium, Electron | `x11_dnd::a_drag_whose_messages_come_from_another_window` |
+| X108 | S46 | XdndFinished names the target window | `x11_dnd::the_drop_window_over_wayland_is_named_and_finishes_in_its_own_name` |
+| X109 | S47 | The WM's drop proxy has a WM_NAME | Chromium, Electron | `x11_dnd::the_drop_window_over_wayland_is_named_and_finishes_in_its_own_name` |
+| X110 | S48 | `XdndProxy` on an X11 drop target | `x11_dnd::a_drop_target_behind_an_xdnd_proxy_gets_the_drag_there`, `x11_dnd::a_broken_xdnd_proxy_is_not_followed` |
+| X111 | S49 | The X11 drag source destroyed mid-drag: the drag ends | `x11_dnd::a_drag_whose_source_goes_away_ends` (ignored) |
+| X112 | S50 | An override-redirect drag icon under the pointer isn't the target | Chromium, Electron | `x11_dnd::a_drag_icon_under_the_pointer_is_not_the_target` |
+| X113 | S51 | Wayland drag over one X11 window, then another: the drop lands on the second | `x11_dnd::a_wayland_drag_goes_from_one_x11_window_to_another` |
+| X115 | W77 | XdndFinished with performed false ends the drag; a forged one is ignored | `x11_dnd::a_drop_the_target_refuses_ends_the_drag_and_a_forged_finish_does_not` |
+| X116 | W78 | The X11 target asks for the data a while after the drop | `x11_dnd::a_drop_fetched_late_is_still_served` |
+| X117 | W79 | The X11 target window destroyed mid-drag | `x11_dnd::a_drag_whose_x11_target_goes_away_goes_on` (shutting the window manager down mid-drag: not testable headlessly, Xwayland only goes away by crashing) |
+| X118 | W80 | Several targets asked for at once during a drag | Chromium | `x11_dnd::several_types_fetched_at_once` (ignored), `x11_dnd::several_types_fetched_one_after_another` |
 
 ## Xwayland itself
 

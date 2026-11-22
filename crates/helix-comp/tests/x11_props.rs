@@ -260,3 +260,27 @@ fn decode_xsettings(data: &[u8]) -> Result<Vec<(String, Setting)>, String> {
     }
     Ok(settings)
 }
+
+/// X98 (W43): `_MOTIF_WM_HINTS` saying the app decorates itself (Steam,
+/// Chromium): Helix draws no title bar for it, so maximized it gets the
+/// whole screen; without the hints it gets one (and the screen below it).
+#[test]
+fn motif_hints_without_decorations_get_no_title_bar() {
+    let Some(session) = xwm::session() else { return };
+    let x = X::new(&session);
+    let plain = x.window();
+    let undecorated = x.window();
+    let motif = x.atom("_MOTIF_WM_HINTS");
+    // flags: decorations given; decorations: none.
+    x.set32(undecorated, "_MOTIF_WM_HINTS", motif, &[2, 0, 0, 0, 0]);
+    for window in [plain, undecorated] {
+        x.map_managed(window);
+        x.net_wm_state(window, 1, &MAXIMIZED);
+        until("the window was not maximized", || x.size(window).0 == xwm::SCREEN.0);
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    let (plain_at, undecorated_at) = (x.position(plain), x.position(undecorated));
+    assert_eq!((undecorated_at, x.size(undecorated)), ((0, 0), xwm::SCREEN), "the undecorated window maximized");
+    assert!(plain_at.1 > 0, "the decorated window has no room for its title bar: at {plain_at:?}");
+    assert_eq!(i32::from(x.size(plain).1) + i32::from(plain_at.1), i32::from(xwm::SCREEN.1), "the decorated window maximized under its title bar");
+}

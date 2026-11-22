@@ -277,3 +277,52 @@ fn an_app_moves_its_window_from_its_own_title_bar() {
     session.input("button 272 0");
     until("the window did not follow the pointer", || x.position(window) == (px + 100, py + 50));
 }
+
+/// X75 (S16): X11 coordinates at an Xwayland scale (Helix scales Xwayland
+/// on HiDPI screens; always by a whole number, see `xwayland_scale`):
+/// the X screen is that much bigger, and the pointer and windows agree
+/// on where things are, both ways.
+#[test]
+fn coordinates_at_an_xwayland_scale_of_two() {
+    let comp = std::path::PathBuf::from(env!("CARGO_BIN_EXE_helix-comp"));
+    let settings = "[org/gnome/mutter/wayland]\nxwayland-scaling-factor=2.0\n";
+    let options = helix_test_support::headless::Options { comp: &comp, shell: None, size: (u32::from(xwm::SCREEN.0), u32::from(xwm::SCREEN.1)), settings, env: Vec::new() };
+    let Some(mut session) = helix_test_support::headless::HeadlessSession::start(options) else { return };
+    if session.x_display.is_empty() {
+        return;
+    }
+    let x = X::new(&session);
+    until("the X screen never became twice as big", || {
+        let g = x.conn.get_geometry(x.root).unwrap().reply().unwrap();
+        (g.width, g.height) == (xwm::SCREEN.0 * 2, xwm::SCREEN.1 * 2)
+    });
+    // A menu at an X position, and the pointer moved on the screen.
+    let menu = x.create_with(600, 400, 200, 200, x11rb::protocol::xproto::CreateWindowAux::new().override_redirect(1));
+    let events = x11rb::protocol::xproto::EventMask::STRUCTURE_NOTIFY | x11rb::protocol::xproto::EventMask::ENTER_WINDOW | x11rb::protocol::xproto::EventMask::LEAVE_WINDOW | x11rb::protocol::xproto::EventMask::POINTER_MOTION;
+    x.conn.change_window_attributes(menu, &x11rb::protocol::xproto::ChangeWindowAttributesAux::new().event_mask(events)).unwrap();
+    x.conn.map_window(menu).unwrap();
+    x.flush();
+    std::thread::sleep(Duration::from_millis(300));
+    // Screen (350, 250) is X (700, 500): inside the menu.
+    session.input("move 350 250");
+    let (rx, ry) = x.wait_event("the menu never got the pointer", |e| match e {
+        Event::EnterNotify(n) if n.event == menu => Some((n.root_x, n.root_y)),
+        Event::MotionNotify(n) if n.event == menu => Some((n.root_x, n.root_y)),
+        _ => None,
+    });
+    assert_eq!((rx, ry), (700, 500), "the pointer at screen (350, 250) is at X {:?}", (rx, ry));
+    // Screen (290, 190) is X (580, 380): outside it.
+    x.events_for(Duration::from_millis(100));
+    session.input("move 290 190");
+    x.wait_event("the menu never lost the pointer", |e| match e {
+        Event::LeaveNotify(n) if n.event == menu => Some(()),
+        _ => None,
+    });
+    // A managed window is where the window manager says, in X pixels.
+    let window = x.window();
+    x.map_managed(window);
+    let (px, py) = x.position(window);
+    let (w, h) = x.size(window);
+    assert_eq!((w, h), (200, 100), "the window's size in X pixels");
+    assert!(px % 2 == 0 && py % 2 == 0, "a managed window at an odd X position {:?} at scale 2", (px, py));
+}
