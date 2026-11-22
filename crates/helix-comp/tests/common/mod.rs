@@ -5,6 +5,8 @@
 
 #![allow(dead_code)]
 
+pub mod xwm;
+
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
