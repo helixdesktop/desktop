@@ -9,6 +9,9 @@
 //! - Typing reaches an app whose focused window takes no input
 //!   (`WM_HINTS` input false): the X server hands the keys to the window
 //!   the app gave the X focus (#164; JetBrains IDEs' popups).
+//! - A fullscreen or maximized window keeps its size when the app asks
+//!   for another (#165; games set their video mode's): it gets that size
+//!   when restored.
 //!
 //! Runs the real `helix-comp` headless; needs `dbus-daemon` and Xwayland
 //! (as every headless session), skipped otherwise.
@@ -21,7 +24,7 @@ use helix_test_support::headless::{HeadlessSession, Options};
 use x11rb::connection::Connection;
 use x11rb::properties::WmHints;
 use x11rb::protocol::Event;
-use x11rb::protocol::xproto::{AtomEnum, ConnectionExt, InputFocus, MapState, PropMode, CreateWindowAux, EventMask, UnmapNotifyEvent, Window, WindowClass, UNMAP_NOTIFY_EVENT};
+use x11rb::protocol::xproto::{AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt, InputFocus, MapState, PropMode, CreateWindowAux, EventMask, UnmapNotifyEvent, Window, WindowClass, UNMAP_NOTIFY_EVENT};
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
@@ -74,6 +77,23 @@ impl X11 {
         self.conn.unmap_window(window).unwrap();
         let notify = UnmapNotifyEvent { response_type: UNMAP_NOTIFY_EVENT, sequence: 0, event: self.root, window, from_configure: false };
         self.conn.send_event(false, self.root, EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY, notify).unwrap();
+        self.conn.flush().unwrap();
+    }
+
+    /// The window's size.
+    fn size(&self, window: Window) -> (u16, u16) {
+        let g = self.conn.get_geometry(window).unwrap().reply().unwrap();
+        (g.width, g.height)
+    }
+
+    /// Ask the window manager to add (1) or remove (0) `states`
+    /// (`_NET_WM_STATE`).
+    fn net_wm_state(&self, window: Window, action: u32, states: &[&str]) {
+        let state = self.atom("_NET_WM_STATE");
+        let a = self.atom(states[0]);
+        let b = states.get(1).map_or(0, |s| self.atom(s));
+        let message = ClientMessageEvent::new(32, window, state, [action, a, b, 1, 0]);
+        self.conn.send_event(false, self.root, EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY, message).unwrap();
         self.conn.flush().unwrap();
     }
 
@@ -172,4 +192,34 @@ fn typing_reaches_an_app_whose_focused_window_takes_no_input() {
         }
     }
     assert_eq!(keys, 3, "key presses the main window got");
+}
+
+#[test]
+fn a_fullscreen_or_maximized_window_keeps_its_size() {
+    let Some(session) = session() else { return };
+    let x = X11::new(&session);
+    let ask = |window: Window, (w, h): (u32, u32)| {
+        x.conn.configure_window(window, &ConfigureWindowAux::new().width(w).height(h)).unwrap();
+        x.conn.flush().unwrap();
+        // Time for the window manager to (wrongly) follow.
+        std::thread::sleep(Duration::from_millis(500));
+    };
+
+    let window = x.window();
+    x.conn.map_window(window).unwrap();
+    x.conn.flush().unwrap();
+    x.until("the window manager never managed the window", |x| x.wm_state(window) == Some(1));
+    let maximized = ["_NET_WM_STATE_MAXIMIZED_HORZ", "_NET_WM_STATE_MAXIMIZED_VERT"];
+    x.net_wm_state(window, 1, &maximized);
+    x.until("the window was not maximized", |x| x.size(window).0 == 800);
+    let size = x.size(window);
+    ask(window, (300, 200));
+    assert_eq!(x.size(window), size, "the maximized window took the size the app asked for");
+    x.net_wm_state(window, 0, &maximized);
+    x.until("the restored window does not have the size the app asked for", |x| x.size(window) == (300, 200));
+
+    x.net_wm_state(window, 1, &["_NET_WM_STATE_FULLSCREEN"]);
+    x.until("the window was not fullscreen", |x| x.size(window) == (800, 600));
+    ask(window, (640, 480));
+    assert_eq!(x.size(window), (800, 600), "the fullscreen window took the size the app asked for");
 }
