@@ -5,7 +5,6 @@
 
 use std::future::Future;
 
-use futures_util::StreamExt;
 use zbus::zvariant::OwnedFd;
 use zbus::{Connection, MatchRule, MessageStream};
 use helix_i18n::tr;
@@ -82,15 +81,17 @@ where
         Ok(rule) => MessageStream::for_match_rule(rule, &conn, None).await,
         Err(err) => Err(err),
     };
+    // Read apart from the calls on this connection below: see
+    // `bus_signals`.
     let mut signals = match stream {
-        Ok(s) => s,
+        Ok(s) => crate::bus_signals::forward(s),
         Err(err) => {
             tracing::warn!(%err, "cannot follow logind sleep; the screen will not lock before suspend");
             return;
         }
     };
     let mut held = take_delay(&conn).await;
-    while let Some(Ok(message)) = signals.next().await {
+    while let Some(Ok(message)) = signals.recv().await {
         let Ok(start) = message.body().deserialize::<bool>() else { continue };
         if start {
             tracing::info!("system is about to sleep");

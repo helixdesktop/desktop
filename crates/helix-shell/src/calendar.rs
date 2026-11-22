@@ -264,7 +264,6 @@ fn micros(v: &OwnedValue) -> Option<i64> {
 /// interface: a new track, play/pause), the chosen player is read again
 /// and handed to the UI, which shows it in the media cards it has open.
 pub async fn follow_players(conn: Connection, ui: tokio::sync::mpsc::UnboundedSender<crate::UiEvent>) -> zbus::Result<()> {
-    use futures_util::StreamExt;
     let seeked = zbus::MatchRule::builder().msg_type(zbus::message::Type::Signal).path(MPRIS_PATH)?.interface(MPRIS_PLAYER)?.member("Seeked")?.build();
     let changed = zbus::MatchRule::builder()
         .msg_type(zbus::message::Type::Signal)
@@ -273,18 +272,16 @@ pub async fn follow_players(conn: Connection, ui: tokio::sync::mpsc::UnboundedSe
         .member("PropertiesChanged")?
         .arg(0, MPRIS_PLAYER)?
         .build();
-    let mut seeked = zbus::MessageStream::for_match_rule(seeked, &conn, Some(16)).await?;
-    let mut changed = zbus::MessageStream::for_match_rule(changed, &conn, Some(16)).await?;
-    loop {
-        tokio::select! {
-            m = seeked.next() => if m.is_none() { break },
-            m = changed.next() => if m.is_none() { break },
-        }
+    let seeked = zbus::MessageStream::for_match_rule(seeked, &conn, Some(16)).await?;
+    let changed = zbus::MessageStream::for_match_rule(changed, &conn, Some(16)).await?;
+    // Read apart from `player`'s calls on this connection (a video starting
+    // in a browser sends a burst of these): see `bus_signals`.
+    let mut signals = crate::bus_signals::nudges(futures_util::stream::select(seeked, changed));
+    while signals.changed().await.is_ok() {
         // Players send several at once (a new track: metadata, then
         // status): read once they settle.
         tokio::time::sleep(Duration::from_millis(150)).await;
-        while futures_util::FutureExt::now_or_never(seeked.next()).flatten().is_some() {}
-        while futures_util::FutureExt::now_or_never(changed.next()).flatten().is_some() {}
+        signals.borrow_and_update();
         if ui.send(crate::UiEvent::MediaPlayer(player(&conn).await)).is_err() {
             break;
         }

@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use futures_util::StreamExt;
 use tokio::sync::{mpsc, Notify};
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 use zbus::Connection;
@@ -494,8 +493,9 @@ pub async fn follow(ui: mpsc::UnboundedSender<UiEvent>) {
         .interface("org.freedesktop.DBus.Properties")
         .and_then(|b| b.member("PropertiesChanged"))
         .map(|b| b.build());
+    // Read apart from `read`'s calls on this connection: see `bus_signals`.
     let mut signals = match (&system, rule) {
-        (Some(conn), Ok(rule)) => zbus::MessageStream::for_match_rule(rule, conn, Some(64)).await.ok(),
+        (Some(conn), Ok(rule)) => zbus::MessageStream::for_match_rule(rule, conn, Some(64)).await.ok().map(crate::bus_signals::nudges),
         _ => None,
     };
     let mut last: Option<Status> = None;
@@ -506,11 +506,13 @@ pub async fn follow(ui: mpsc::UnboundedSender<UiEvent>) {
             last = Some(status);
         }
         let signal = async {
-            match signals.as_mut() {
-                Some(s) => {
-                    s.next().await;
-                }
-                None => std::future::pending().await,
+            let changed = match signals.as_mut() {
+                Some(s) => s.changed().await.is_ok(),
+                None => false,
+            };
+            if !changed {
+                // Gone (or never there): the timer and pokes remain.
+                std::future::pending::<()>().await;
             }
         };
         tokio::select! {
@@ -521,7 +523,7 @@ pub async fn follow(ui: mpsc::UnboundedSender<UiEvent>) {
         // Changes come in bursts.
         tokio::time::sleep(Duration::from_millis(150)).await;
         if let Some(s) = signals.as_mut() {
-            while futures_util::FutureExt::now_or_never(s.next()).flatten().is_some() {}
+            s.borrow_and_update();
         }
     }
 }
