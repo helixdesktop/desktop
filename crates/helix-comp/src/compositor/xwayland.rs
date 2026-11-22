@@ -31,6 +31,22 @@ use super::Helix;
 const FALLBACK_DISPLAYS: std::ops::RangeInclusive<u32> = 33..=99;
 
 impl Helix {
+    /// At shutdown: give Xwayland's display back (its lock file and
+    /// socket). Smithay would on dropping the Xwayland source, but the
+    /// event loop's sources are not dropped at exit, and a lock left
+    /// behind is one the next X server has to take over (#181).
+    pub fn release_x11_display(&self) {
+        let Some(number) = self.xdisplay else { return };
+        let lock = format!("/tmp/.X{number}-lock");
+        // Only ours: the lock holds the pid of the process that took it.
+        let ours = std::fs::read_to_string(&lock).is_ok_and(|pid| pid.trim() == std::process::id().to_string());
+        if ours {
+            let _ = std::fs::remove_file(format!("/tmp/.X11-unix/X{number}"));
+            let _ = std::fs::remove_file(&lock);
+            tracing::info!(display = number, "released the X display");
+        }
+    }
+
     /// Start Xwayland. `ready` runs once it is up (with its display number)
     /// or has failed (`None`).
     pub fn start_xwayland(&mut self, ready: impl FnOnce(&mut Helix, Option<u32>) + 'static) {
