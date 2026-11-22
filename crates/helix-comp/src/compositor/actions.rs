@@ -237,11 +237,20 @@ impl Helix {
     }
 
     fn toggle_above(&mut self, window: &Window) {
-        if let Some(pos) = self.above.iter().position(|w| w == window) {
-            self.above.remove(pos);
-        } else {
+        let above = self.above.contains(window);
+        self.set_above(window, !above);
+    }
+
+    /// Put `window` Always on Top or take it out; an X11 window is told
+    /// (`_NET_WM_STATE_ABOVE`), so it can show it.
+    pub fn set_above(&mut self, window: &Window, above: bool) {
+        self.above.retain(|w| w != window);
+        if above {
             self.above.push(window.clone());
             self.restack_above();
+        }
+        if let Some(x11) = window.x11_surface() {
+            let _ = x11.set_above(above);
         }
     }
 

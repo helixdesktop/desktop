@@ -241,7 +241,16 @@ impl XwmHandler for Helix {
         let _ = surface.configure(Rectangle::new(location, size));
         tracing::info!(title = surface.title(), class = surface.class(), ?location, ?size, "new X11 window");
         self.map_new_window(&window, location);
+        // States the app set before mapping (EWMH; #167).
+        if surface.fullscreen_at_map() {
+            self.fullscreen(&window, None);
+        } else if surface.maximized_at_map() {
+            self.maximize(&window);
+        }
         self.place_new_window(&window);
+        if surface.is_above() {
+            self.set_above(&window, true);
+        }
     }
 
     fn mapped_override_redirect_window(&mut self, _xwm: XwmId, surface: X11Surface) {
@@ -346,6 +355,32 @@ impl XwmHandler for Helix {
         if let Some(window) = self.x11_window(&surface) {
             self.restore_window(&window);
         }
+    }
+
+    fn above_request(&mut self, _xwm: XwmId, surface: X11Surface) {
+        if let Some(window) = self.x11_window(&surface) {
+            self.set_above(&window, true);
+        }
+    }
+
+    fn unabove_request(&mut self, _xwm: XwmId, surface: X11Surface) {
+        if let Some(window) = self.x11_window(&surface) {
+            self.set_above(&window, false);
+        }
+    }
+
+    /// A dialog made modal after it was shown (`gtk_window_set_modal`,
+    /// Qt's `setWindowModality`): as a Wayland dialog's, focus goes to it
+    /// when its parent has it.
+    fn modal_request(&mut self, _xwm: XwmId, surface: X11Surface) {
+        let _ = surface.set_modal(true);
+        if let Some(window) = self.x11_window(&surface) {
+            self.modal_window_changed(&window);
+        }
+    }
+
+    fn unmodal_request(&mut self, _xwm: XwmId, surface: X11Surface) {
+        let _ = surface.set_modal(false);
     }
 
     fn minimize_request(&mut self, _xwm: XwmId, surface: X11Surface) {

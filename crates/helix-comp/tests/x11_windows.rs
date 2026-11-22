@@ -16,6 +16,10 @@
 //!   Wayland window has focus), and asking for it activates a window for
 //!   a pager or an app moving between its own windows; others only want
 //!   attention (#166).
+//! - `_NET_WM_STATE`: Always on Top asked for (and shown back), a dialog
+//!   made modal before or after it is shown, fullscreen asked for before
+//!   mapping, and helper windows left out of the window list
+//!   (`SKIP_TASKBAR`) (#167).
 //! - The compositor gives its X display back when it exits: no lock is
 //!   left for the next X server to take over (#181).
 //!
@@ -122,6 +126,30 @@ impl X11 {
     /// A mapped window, once the window manager manages it.
     fn mapped(&self) -> Window {
         let window = self.window();
+        self.conn.map_window(window).unwrap();
+        self.conn.flush().unwrap();
+        self.until("the window manager never managed the window", |x| x.wm_state(window) == Some(1));
+        window
+    }
+
+    /// The window's `_NET_WM_STATE` atoms.
+    fn net_states(&self, window: Window) -> Vec<u32> {
+        let state = self.atom("_NET_WM_STATE");
+        let reply = self.conn.get_property(false, window, state, AtomEnum::ATOM, 0, 64).unwrap().reply().unwrap();
+        reply.value32().map(|v| v.collect()).unwrap_or_default()
+    }
+
+    /// A window with `_NET_WM_STATE` `states` and `title` set before it
+    /// maps, transient for `parent` if any; mapped and managed.
+    fn mapped_with(&self, title: &str, states: &[&str], parent: Option<Window>) -> Window {
+        let window = self.window();
+        self.conn.change_property8(PropMode::REPLACE, window, AtomEnum::WM_NAME, AtomEnum::STRING, title.as_bytes()).unwrap();
+        let atoms: Vec<u32> = states.iter().map(|s| self.atom(s)).collect();
+        let state = self.atom("_NET_WM_STATE");
+        self.conn.change_property32(PropMode::REPLACE, window, state, AtomEnum::ATOM, &atoms).unwrap();
+        if let Some(parent) = parent {
+            self.conn.change_property32(PropMode::REPLACE, window, AtomEnum::WM_TRANSIENT_FOR, AtomEnum::WINDOW, &[parent]).unwrap();
+        }
         self.conn.map_window(window).unwrap();
         self.conn.flush().unwrap();
         self.until("the window manager never managed the window", |x| x.wm_state(window) == Some(1));
@@ -300,4 +328,159 @@ fn the_display_is_released_at_exit() {
     assert!(lock.exists(), "no {}", lock.display());
     drop(session);
     assert!(!lock.exists(), "{} is left behind", lock.display());
+}
+
+#[test]
+fn always_on_top() {
+    let Some(session) = session() else { return };
+    let x = X11::new(&session);
+    let above = x.atom("_NET_WM_STATE_ABOVE");
+    let window = x.mapped();
+    x.net_wm_state(window, 1, &["_NET_WM_STATE_ABOVE"]);
+    x.until("Always on Top was not shown back", |x| x.net_states(window).contains(&above));
+    x.net_wm_state(window, 0, &["_NET_WM_STATE_ABOVE"]);
+    x.until("Always on Top stayed after it was taken back", |x| !x.net_states(window).contains(&above));
+    x.net_wm_state(window, 2, &["_NET_WM_STATE_ABOVE"]);
+    x.until("toggling Always on Top did nothing", |x| x.net_states(window).contains(&above));
+}
+
+#[test]
+fn modal_dialogs_take_their_parents_focus() {
+    let Some(session) = session() else { return };
+    let x = X11::new(&session);
+    // Made modal before it is shown, as most toolkits do.
+    let parent = x.mapped();
+    let dialog = x.mapped_with("dialog", &["_NET_WM_STATE_MODAL"], Some(parent));
+    x.activate(parent, 2, x11rb::NONE);
+    std::thread::sleep(Duration::from_millis(300));
+    x.until("focus went to the parent, not its modal dialog", |x| x.active() == Some(dialog));
+
+    // Made modal once shown (gtk_window_set_modal on a shown window).
+    let parent = x.mapped();
+    let dialog = x.mapped_with("dialog", &[], Some(parent));
+    x.activate(parent, 2, x11rb::NONE);
+    x.until("the parent did not get focus", |x| x.active() == Some(parent));
+    x.net_wm_state(dialog, 1, &["_NET_WM_STATE_MODAL"]);
+    x.until("focus stayed on the parent of a dialog made modal", |x| x.active() == Some(dialog));
+}
+
+#[test]
+fn fullscreen_asked_for_before_mapping() {
+    let Some(session) = session() else { return };
+    let x = X11::new(&session);
+    let window = x.mapped_with("game", &["_NET_WM_STATE_FULLSCREEN"], None);
+    x.until("the window did not go fullscreen", |x| x.size(window) == (800, 600));
+    let fullscreen = x.atom("_NET_WM_STATE_FULLSCREEN");
+    assert!(x.net_states(window).contains(&fullscreen));
+}
+
+// ---- the window list, as the shell sees it ----
+
+mod shell {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::path::Path;
+
+    use helix_protocols::client::window_list::helix_window_list_v1::{self, HelixWindowListV1};
+    use wayland_client::globals::{registry_queue_init, GlobalListContents};
+    use wayland_client::protocol::wl_registry;
+    use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle};
+
+    #[derive(Default)]
+    pub struct Listed {
+        pub windows: Vec<(u32, String)>,
+    }
+
+    impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for Listed {
+        fn event(_: &mut Self, _: &wl_registry::WlRegistry, _: wl_registry::Event, _: &GlobalListContents, _: &Connection, _: &QueueHandle<Self>) {}
+    }
+
+    impl Dispatch<HelixWindowListV1, ()> for Listed {
+        fn event(state: &mut Self, _: &HelixWindowListV1, event: helix_window_list_v1::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+            match event {
+                helix_window_list_v1::Event::Window { id, title, .. } => {
+                    state.windows.retain(|(i, _)| *i != id);
+                    state.windows.push((id, title));
+                }
+                helix_window_list_v1::Event::Closed { id } => state.windows.retain(|(i, _)| *i != id),
+                _ => {}
+            }
+        }
+    }
+
+    /// A stand-in shell (`--shell`): it hands its Wayland socket to the
+    /// test, which then talks as the shell.
+    pub fn program(dir: &Path) -> (std::path::PathBuf, UnixListener) {
+        let path = dir.join("handover");
+        let listener = UnixListener::bind(&path).unwrap();
+        let script = dir.join("shell");
+        let python = format!(
+            "import os,socket,time\ns=socket.socket(socket.AF_UNIX)\ns.connect({path:?})\nsocket.send_fds(s,[b'x'],[int(os.environ['WAYLAND_SOCKET'])])\ntime.sleep(3600)\n",
+            path = path.to_str().unwrap()
+        );
+        std::fs::write(&script, format!("#!/bin/sh\nexec /usr/bin/python3 -I -c \"$(cat <<'EOF'\n{python}EOF\n)\"\n")).unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        (script, listener)
+    }
+
+    /// The shell's socket, from the stand-in.
+    pub fn socket(listener: &UnixListener) -> UnixStream {
+        let (stream, _) = listener.accept().unwrap();
+        let mut byte = [0u8; 1];
+        let mut space = [0u8; 64];
+        let mut iov = libc::iovec { iov_base: byte.as_mut_ptr().cast(), iov_len: 1 };
+        // SAFETY: a zeroed msghdr pointing at the buffers above, which
+        // outlive the call.
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = space.as_mut_ptr().cast();
+        msg.msg_controllen = space.len() as _;
+        // SAFETY: as above; the descriptor is ours to own once received.
+        unsafe {
+            assert!(libc::recvmsg(std::os::fd::AsRawFd::as_raw_fd(&stream), &mut msg, 0) >= 0, "no socket from the stand-in shell");
+            let cmsg = libc::CMSG_FIRSTHDR(&msg);
+            assert!(!cmsg.is_null() && (*cmsg).cmsg_type == libc::SCM_RIGHTS, "no descriptor from the stand-in shell");
+            let fd = std::ptr::read_unaligned(libc::CMSG_DATA(cmsg).cast::<i32>());
+            UnixStream::from(OwnedFd::from_raw_fd(fd))
+        }
+    }
+
+    pub fn window_list(stream: UnixStream) -> (EventQueue<Listed>, Listed, HelixWindowListV1) {
+        let conn = Connection::from_socket(stream).unwrap();
+        let (globals, mut queue) = registry_queue_init::<Listed>(&conn).unwrap();
+        let qh = queue.handle();
+        let list: HelixWindowListV1 = globals.bind(&qh, 1..=1, ()).expect("the shell is offered the window list");
+        let mut listed = Listed::default();
+        queue.roundtrip(&mut listed).unwrap();
+        (queue, listed, list)
+    }
+}
+
+#[test]
+fn helper_windows_stay_out_of_the_window_list() {
+    let comp = std::path::PathBuf::from(env!("CARGO_BIN_EXE_helix-comp"));
+    let dir = std::env::temp_dir().join(format!("helix-skip-taskbar-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (program, listener) = shell::program(&dir);
+    let Some(session) = HeadlessSession::start(Options { comp: &comp, shell: Some(&program), size: (800, 600), settings: "", env: Vec::new() }) else { return };
+    if session.x_display.is_empty() {
+        eprintln!("no Xwayland; skipped");
+        return;
+    }
+    let (mut queue, mut listed, _list) = shell::window_list(shell::socket(&listener));
+    let x = X11::new(&session);
+    x.mapped_with("listed", &[], None);
+    x.mapped_with("helper", &["_NET_WM_STATE_SKIP_TASKBAR"], None);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !listed.windows.iter().any(|(_, t)| t == "listed") {
+        assert!(Instant::now() < deadline, "the window never showed in the list: {:?}", listed.windows);
+        queue.roundtrip(&mut listed).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    queue.roundtrip(&mut listed).unwrap();
+    assert!(!listed.windows.iter().any(|(_, t)| t == "helper"), "the helper window is listed: {:?}", listed.windows);
+    drop(session);
+    let _ = std::fs::remove_dir_all(&dir);
 }
