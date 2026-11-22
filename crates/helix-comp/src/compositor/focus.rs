@@ -15,6 +15,9 @@ use smithay::xwayland::X11Surface;
 
 use super::Helix;
 
+// An X11Surface carries Smithay's atom table, which outgrew clippy's limit
+// with the EWMH state atoms (upstream allows it for its WindowSurface too).
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum KeyboardFocusTarget {
     Surface(WlSurface),
