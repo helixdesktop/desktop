@@ -1,7 +1,8 @@
 //! Window management policy: focus, cycling, maximize, fullscreen,
 //! minimize and close — for both Wayland (xdg) and X11 (Xwayland) windows.
 
-use smithay::desktop::{layer_map_for_output, Window};
+use smithay::desktop::{layer_map_for_output};
+use super::window::Window;
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
@@ -182,7 +183,7 @@ impl Helix {
             self.space.raise_element(window, true);
             self.restack_above();
             if let (Some(xwm), Some(x11)) = (self.xwm.as_mut(), window.x11_surface()) {
-                let _ = xwm.raise_window(x11);
+                let _ = xwm.raise_window(x11.smithay());
             }
         }
         let keyboard = self.seat.get_keyboard().unwrap();

@@ -8,7 +8,7 @@
 use std::os::fd::OwnedFd;
 use std::process::Stdio;
 
-use smithay::desktop::Window;
+use super::window::{Window, X11Window};
 use smithay::input::pointer::Focus;
 use smithay::utils::{Logical, Rectangle, Size, SERIAL_COUNTER};
 use smithay::wayland::selection::data_device::{
@@ -41,7 +41,7 @@ pub enum X11Kind {
     Placed,
 }
 
-pub fn x11_kind(surface: &X11Surface) -> X11Kind {
+pub fn x11_kind(surface: &X11Window) -> X11Kind {
     use smithay::xwayland::xwm::WmWindowType as T;
     match surface.window_type() {
         Some(T::Splash) => X11Kind::Splash,
@@ -253,7 +253,7 @@ impl Helix {
     /// (#169), at most [`XWAYLAND_RESTARTS`] times a minute.
     fn xwayland_gone(&mut self, xwm: XwmId) {
         tracing::error!("Xwayland is gone; X11 apps have closed");
-        let windows: Vec<Window> = self.space.elements().chain(self.minimized.iter()).chain(self.workspaces.parked()).filter(|w| w.x11_surface().is_some_and(|x| x.xwm_id() == Some(xwm))).cloned().collect();
+        let windows: Vec<Window> = self.space.elements().chain(self.minimized.iter()).chain(self.workspaces.parked()).filter(|w| w.x11_surface().is_some_and(|x| x.smithay().xwm_id() == Some(xwm))).cloned().collect();
         for window in &windows {
             self.forget_window(window);
         }
@@ -295,7 +295,7 @@ impl Helix {
         self.space
             .elements()
             .chain(self.minimized.iter())
-            .find(|w| w.x11_surface() == Some(surface))
+            .find(|w| w.x11_surface().is_some_and(|x| x.smithay() == surface))
             .cloned()
     }
 }
@@ -349,7 +349,7 @@ impl XwmHandler for Helix {
 
     fn property_notify(&mut self, _xwm: XwmId, window: X11Surface, property: smithay::xwayland::xwm::WmWindowProperty) {
         if matches!(property, smithay::xwayland::xwm::WmWindowProperty::Hints) {
-            self.x11_hints_changed(&window);
+            self.x11_hints_changed(&X11Window::new(window));
         }
     }
     fn new_override_redirect_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
@@ -359,8 +359,9 @@ impl XwmHandler for Helix {
             tracing::warn!(%err, "cannot map X11 window");
             return;
         }
-        let window = Window::new_x11_window(surface.clone());
-        let kind = x11_kind(&surface);
+        let x11 = X11Window::new(surface.clone());
+        let window = Window::new_x11_window(x11.clone());
+        let kind = x11_kind(&x11);
         if kind != X11Kind::App {
             self.map_unfocused_x11(&window, &surface, kind);
             return;
@@ -386,7 +387,7 @@ impl XwmHandler for Helix {
 
     fn mapped_override_redirect_window(&mut self, _xwm: XwmId, surface: X11Surface) {
         let location = surface.last_configure().loc;
-        self.space.map_element(Window::new_x11_window(surface), location, false);
+        self.space.map_element(Window::new_x11_window(X11Window::new(surface)), location, false);
     }
 
     fn unmapped_window(&mut self, _xwm: XwmId, surface: X11Surface) {
@@ -415,7 +416,7 @@ impl XwmHandler for Helix {
         _reorder: Option<Reorder>,
     ) {
         // Windows that place themselves (notifications, docks) move too.
-        if x11_kind(&surface) == X11Kind::Placed {
+        if x11_kind(&X11Window::new(surface.clone())) == X11Kind::Placed {
             let mut geo = surface.last_configure();
             geo.loc = (x.unwrap_or(geo.loc.x), y.unwrap_or(geo.loc.y)).into();
             geo.size = (w.map_or(geo.size.w, |w| w as i32), h.map_or(geo.size.h, |h| h as i32)).into();
@@ -540,7 +541,7 @@ impl XwmHandler for Helix {
     fn active_window_request(&mut self, _xwm: XwmId, surface: X11Surface, source: u32, _timestamp: u32, currently_active: Option<X11Surface>) {
         let Some(window) = self.x11_window(&surface) else { return };
         let focused = self.seat.get_keyboard().and_then(|k| k.current_focus()).and_then(|f| self.window_for_focus(&f));
-        let from_focused = currently_active.is_some_and(|active| focused.as_ref().and_then(|w| w.x11_surface()) == Some(&active));
+        let from_focused = currently_active.is_some_and(|active| focused.as_ref().and_then(|w| w.x11_surface()).is_some_and(|x| x.smithay() == &active));
         let pager = source == 2;
         tracing::debug!(pager, from_focused, "X11 activation request");
         if pager || from_focused {

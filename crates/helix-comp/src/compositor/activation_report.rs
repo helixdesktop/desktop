@@ -9,7 +9,8 @@
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
-use smithay::desktop::{layer_map_for_output, PopupManager, Window};
+use smithay::desktop::{layer_map_for_output, PopupManager};
+use super::window::Window;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource;

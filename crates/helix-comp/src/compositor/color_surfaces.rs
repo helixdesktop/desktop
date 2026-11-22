@@ -12,7 +12,7 @@ use smithay::backend::renderer::gles::element::TextureShaderElement;
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexProgram, GlesTexture, Uniform, UniformName, UniformType, UniformValue};
 use smithay::backend::renderer::utils::RendererSurfaceStateUserData;
 use smithay::backend::renderer::{ContextId, Renderer};
-use smithay::desktop::Window;
+use super::window::Window;
 use smithay::wayland::seat::WaylandFocus;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Physical, Point};

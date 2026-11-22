@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use helix_protocols::server::helix_window_list_v1::{self, HelixWindowListV1};
-use smithay::desktop::Window;
+use super::window::Window;
 use smithay::reexports::wayland_server::{Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource};
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;

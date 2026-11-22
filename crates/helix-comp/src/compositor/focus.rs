@@ -108,9 +108,9 @@ impl KeyboardTarget<Helix> for KeyboardFocusTarget {
 }
 
 /// What gets keyboard focus for `window`: its X11 window, or its surface.
-pub fn focus_target(window: &smithay::desktop::Window) -> Option<KeyboardFocusTarget> {
+pub fn focus_target(window: &super::window::Window) -> Option<KeyboardFocusTarget> {
     match window.x11_surface() {
-        Some(x11) => Some(KeyboardFocusTarget::X11(x11.clone())),
+        Some(x11) => Some(KeyboardFocusTarget::X11(x11.smithay().clone())),
         None => window.wl_surface().map(|s| KeyboardFocusTarget::Surface(s.into_owned())),
     }
 }
@@ -123,14 +123,14 @@ impl Helix {
         focus.and_then(|f| self.window_for_focus(&f)).map(|w| super::window_list::describe(&w).0).unwrap_or_default()
     }
 
-    pub fn window_for_focus(&self, focus: &KeyboardFocusTarget) -> Option<smithay::desktop::Window> {
+    pub fn window_for_focus(&self, focus: &KeyboardFocusTarget) -> Option<super::window::Window> {
         match focus {
             KeyboardFocusTarget::X11(x11) => self
                 .space
                 .elements()
                 .chain(self.minimized.iter())
                 .chain(self.workspaces.parked())
-                .find(|w| w.x11_surface() == Some(x11))
+                .find(|w| w.x11_surface().is_some_and(|x| x.smithay() == x11))
                 .cloned(),
             KeyboardFocusTarget::Surface(surface) => self.window_for_surface(surface),
         }
@@ -384,7 +384,7 @@ impl Helix {
             .elements()
             .filter_map(|w| w.x11_surface())
             .find(|x| x.wl_surface().as_ref() == Some(&surface))
-            .cloned();
+            .map(|x| x.smithay().clone());
         match x11 {
             Some(x) => PointerFocusTarget::X11(x),
             None => PointerFocusTarget::Surface(surface),

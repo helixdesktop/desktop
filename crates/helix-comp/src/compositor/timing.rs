@@ -3,7 +3,8 @@
 
 use std::time::Duration;
 
-use smithay::desktop::{layer_map_for_output, Space, Window};
+use smithay::desktop::{layer_map_for_output, Space};
+use super::window::Window;
 use smithay::desktop::utils::OutputPresentationFeedback;
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;

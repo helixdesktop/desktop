@@ -4,9 +4,8 @@
 //! `_NET_WM_STATE_DEMANDS_ATTENTION` marks the window until it gets focus;
 //! the shell is told (`helix_window_list_v1.attention`).
 
-use smithay::desktop::Window;
+use super::window::Window;
 use smithay::reexports::wayland_server::Resource;
-use smithay::xwayland::X11Surface;
 
 use super::Helix;
 
@@ -55,8 +54,8 @@ impl Helix {
     }
 
     /// An X11 window's `WM_HINTS` changed: its urgency flag.
-    pub fn x11_hints_changed(&mut self, surface: &X11Surface) {
-        let urgent = surface.hints().is_some_and(|h| h.urgent);
+    pub fn x11_hints_changed(&mut self, surface: &super::window::X11Window) {
+        let urgent = surface.is_urgent();
         if let Some(window) = self.x11_by_id(surface.window_id()) {
             self.set_attention(&window, urgent);
         }

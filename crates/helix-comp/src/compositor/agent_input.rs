@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use helix_protocols::server::helix_agent_input_v1::{self, HelixAgentInputV1, Reason};
 use smithay::backend::input::{Axis, AxisSource, ButtonState, KeyState};
-use smithay::desktop::Window;
+use super::window::Window;
 use smithay::input::keyboard::{xkb, FilterResult, KeymapFile, Keycode, ModifiersState};
 use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};

@@ -13,7 +13,8 @@ use smithay::backend::renderer::element::solid::{SolidColorBuffer, SolidColorRen
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::{AsRenderElements, Kind};
 use smithay::backend::renderer::gles::GlesRenderer;
-use smithay::desktop::{layer_map_for_output, Space, Window};
+use smithay::desktop::{layer_map_for_output, Space};
+use super::window::Window;
 use smithay::input::pointer::{CursorIcon, CursorImageStatus, Focus, GrabStartData};
 use smithay::output::Output;
 use smithay::utils::{Logical, Point, Rectangle, Scale, Transform, SERIAL_COUNTER};
