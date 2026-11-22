@@ -2,8 +2,8 @@
 //! not only plain text: an image copied in Krita (X11 through Xwayland)
 //! pasted into a GTK 4 app. Smithay 0.7.0 looked a type's atom up in a
 //! property that was never there, so every type but text failed
-//! (vendor/smithay, `send_selection`).
-//!
+//! (vendor/smithay, `send_selection`); and large ones, sent
+//! incrementally, came with 4 bytes of size hint in front (#161).
 //!
 //! And an X11 client reads the clipboard whatever has focus, as in GNOME:
 //! `xclip -o` run from a Wayland terminal (#172), and as often as it
@@ -18,35 +18,72 @@ use std::time::Duration;
 
 use helix_test_support::headless::{HeadlessSession, Options};
 use x11rb::connection::Connection;
-use x11rb::protocol::xproto::{AtomEnum, ConnectionExt, CreateWindowAux, EventMask, PropMode, SelectionNotifyEvent, WindowClass, SELECTION_NOTIFY_EVENT};
+use x11rb::protocol::xproto::{AtomEnum, ChangeWindowAttributesAux, ConnectionExt, CreateWindowAux, Property, EventMask, PropMode, SelectionNotifyEvent, WindowClass, SELECTION_NOTIFY_EVENT};
 use x11rb::protocol::Event;
 use x11rb::wrapper::ConnectionExt as _;
 
-/// Not a real PNG; any bytes do, as long as they come back unchanged.
-fn picture() -> Vec<u8> {
-    (0..10_000u32).map(|i| (i * 7 % 251) as u8).collect()
+/// A connection to `session`'s Xwayland. x11rb reads its authority from
+/// `XAUTHORITY`, which is the whole process's: tests running at once
+/// (each with its own session) take turns.
+fn x11_connect(session: &HeadlessSession) -> (x11rb::rust_connection::RustConnection, usize) {
+    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _turn = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("XAUTHORITY", &session.x_authority);
+    x11rb::connect(Some(&session.x_display)).expect("connect to Xwayland")
 }
 
-/// An X11 client owning CLIPBOARD as `image/png` and plain text, answering
-/// requests until the connection closes.
-fn x11_owner(session: &HeadlessSession) {
-    std::env::set_var("XAUTHORITY", &session.x_authority);
-    let (conn, screen_num) = x11rb::connect(Some(&session.x_display)).expect("connect to Xwayland");
+/// Not a real PNG; any bytes do, as long as they come back unchanged.
+fn picture(len: u32) -> Vec<u8> {
+    (0..len).map(|i| (i * 7 % 251) as u8).collect()
+}
+
+/// Larger data goes incrementally (INCR), in chunks of this size, as
+/// Xlib apps do above their maximum request size.
+const CHUNK: usize = 64 * 1024;
+
+/// An X11 client owning CLIPBOARD as `image/png` (`image`) and plain text,
+/// answering requests until the connection closes.
+fn x11_owner(session: &HeadlessSession, image: Vec<u8>) {
+    let (conn, screen_num) = x11_connect(session);
     let root = conn.setup().roots[screen_num].root;
     let window = conn.generate_id().unwrap();
     conn.create_window(0, window, root, 0, 0, 1, 1, 0, WindowClass::INPUT_ONLY, 0, &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE)).unwrap();
     let atom = |name: &str| conn.intern_atom(false, name.as_bytes()).unwrap().reply().unwrap().atom;
-    let (clipboard, targets, png, utf8) = (atom("CLIPBOARD"), atom("TARGETS"), atom("image/png"), atom("UTF8_STRING"));
+    let (clipboard, targets, png, utf8, incr) = (atom("CLIPBOARD"), atom("TARGETS"), atom("image/png"), atom("UTF8_STRING"), atom("INCR"));
     conn.set_selection_owner(window, clipboard, x11rb::CURRENT_TIME).unwrap();
     conn.flush().unwrap();
     std::thread::spawn(move || {
+        // Incremental transfers under way: (requestor, property) and what
+        // is left to send.
+        let mut sending: Vec<((u32, u32), Vec<u8>)> = Vec::new();
         while let Ok(event) = conn.wait_for_event() {
+            if let Event::PropertyNotify(n) = event {
+                // The requestor took the last chunk: send the next (an
+                // empty one ends the transfer).
+                let Some(i) = sending.iter().position(|(k, _)| *k == (n.window, n.atom)) else { continue };
+                if n.state != Property::DELETE {
+                    continue;
+                }
+                let left = &mut sending[i].1;
+                let chunk: Vec<u8> = left.drain(..left.len().min(CHUNK)).collect();
+                conn.change_property8(PropMode::REPLACE, n.window, n.atom, png, &chunk).unwrap();
+                if chunk.is_empty() {
+                    sending.remove(i);
+                }
+                conn.flush().unwrap();
+                continue;
+            }
             let Event::SelectionRequest(request) = event else { continue };
             let property = if request.target == targets {
                 conn.change_property32(PropMode::REPLACE, request.requestor, request.property, AtomEnum::ATOM, &[targets, png, utf8]).unwrap();
                 request.property
+            } else if request.target == png && image.len() > CHUNK {
+                conn.change_window_attributes(request.requestor, &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE)).unwrap();
+                conn.change_property32(PropMode::REPLACE, request.requestor, request.property, incr, &[image.len() as u32]).unwrap();
+                sending.push(((request.requestor, request.property), image.clone()));
+                request.property
             } else if request.target == png {
-                conn.change_property8(PropMode::REPLACE, request.requestor, request.property, png, &picture()).unwrap();
+                conn.change_property8(PropMode::REPLACE, request.requestor, request.property, png, &image).unwrap();
                 request.property
             } else if request.target == utf8 {
                 conn.change_property8(PropMode::REPLACE, request.requestor, request.property, utf8, b"words").unwrap();
@@ -69,15 +106,16 @@ fn x11_owner(session: &HeadlessSession) {
     });
 }
 
-#[test]
-fn an_x11_image_pastes_into_a_wayland_app() {
+/// An X11 app copies an image of `len` bytes; a focused Wayland app
+/// pastes it (and the text).
+fn x11_copy_wayland_pastes(len: u32) {
     let comp = std::path::PathBuf::from(env!("CARGO_BIN_EXE_helix-comp"));
     let Some(session) = HeadlessSession::start(Options { comp: &comp, shell: None, size: (800, 600), settings: "", env: Vec::new() }) else { return };
     if session.x_display.is_empty() {
         eprintln!("no Xwayland; skipped");
         return;
     }
-    x11_owner(&session);
+    x11_owner(&session, picture(len));
     assert!(session.wait_for_log("selection set by an X11 app", Duration::from_secs(10)), "the compositor never saw the X11 copy");
 
     // A focused Wayland window is offered the selection.
@@ -91,15 +129,27 @@ fn an_x11_image_pastes_into_a_wayland_app() {
 
     assert_eq!(app.paste("text/plain;charset=utf-8"), b"words");
     let image = app.paste("image/png");
-    assert!(image == picture(), "the image arrived whole: {} of {} bytes", image.len(), picture().len());
+    let first = |d: &[u8]| d.iter().take(8).copied().collect::<Vec<u8>>();
+    assert!(image == picture(len), "the image arrived whole: {} of {len} bytes, starting {:?}", image.len(), first(&image));
+}
+
+#[test]
+fn an_x11_image_pastes_into_a_wayland_app() {
+    x11_copy_wayland_pastes(10_000);
+}
+
+/// Over the chunk size the image goes incrementally; the INCR size hint
+/// is not data (#161).
+#[test]
+fn a_large_x11_image_pastes_whole() {
+    x11_copy_wayland_pastes(400_000);
 }
 
 /// The CLIPBOARD's `target`, read `times` over by one X11 client that has
 /// no focused window (as `xclip -o`, or an app pasting again); `None`
 /// where refused.
 fn x11_reads(session: &HeadlessSession, target: &str, times: usize) -> Vec<Option<Vec<u8>>> {
-    std::env::set_var("XAUTHORITY", &session.x_authority);
-    let (conn, screen_num) = x11rb::connect(Some(&session.x_display)).expect("connect to Xwayland");
+    let (conn, screen_num) = x11_connect(session);
     let root = conn.setup().roots[screen_num].root;
     let window = conn.generate_id().unwrap();
     conn.create_window(0, window, root, 0, 0, 1, 1, 0, WindowClass::INPUT_ONLY, 0, &CreateWindowAux::new()).unwrap();

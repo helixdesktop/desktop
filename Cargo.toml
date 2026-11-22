@@ -100,7 +100,9 @@ accesskit_atspi_common = { path = "vendor/accesskit_atspi_common" }
 # reach Wayland apps in every type, not only plain text (send_selection
 # takes the type's atom by name, as upstream Smithay does); X11 apps
 # paste from Wayland apps more than once (a finished transfer is removed,
-# upstream ae6c51ba); a layer surface's exclusive zone counts only where
+# upstream ae6c51ba); large X11 copies (INCR) arrive whole: without the
+# 4-byte size hint in front (upstream d5437114), and with no chunk deleted
+# unread (write_selection_callback; upstream still has this); a layer surface's exclusive zone counts only where
 # the protocol says (anchored to one edge, or one edge and both
 # perpendicular ones; src/desktop/wayland/layer.rs).
 smithay = { path = "vendor/smithay" }
