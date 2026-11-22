@@ -107,7 +107,7 @@ impl PointerGrab<Helix> for MoveGrab {
         data.update_tile_preview(event.location);
         // X11 apps need to know where they are (for menus and input).
         if let Some(x11) = self.window.x11_surface() {
-            let _ = x11.configure(Rectangle::new(location, x11.geometry().size));
+            let _ = x11.configure(Rectangle::new(location, x11.last_configure().size));
         }
     }
 

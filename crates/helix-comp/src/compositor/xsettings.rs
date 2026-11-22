@@ -129,7 +129,7 @@ impl Helix {
                     continue;
                 }
                 let Some(at) = self.space.element_location(&window) else { continue };
-                let mut geometry = surface.geometry();
+                let mut geometry = surface.last_configure();
                 geometry.loc = at;
                 let _ = surface.configure(Some(geometry));
             }

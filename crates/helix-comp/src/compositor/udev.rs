@@ -314,7 +314,7 @@ pub fn init(
     let manager = DrmOutputManager::new(
         drm,
         GbmAllocator::new(gbm.clone(), GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT),
-        GbmFramebufferExporter::new(gbm.clone(), import_node),
+        GbmFramebufferExporter::new(gbm.clone(), import_node.into()),
         Some(gbm),
         COLOR_FORMATS,
         render_formats,
@@ -385,7 +385,7 @@ pub fn init(
                 tracing::warn!(?err, "cannot resume libinput");
             }
             if let Some(udev) = state.udev.as_mut() {
-                if let Err(err) = udev.manager.activate(false) {
+                if let Err(err) = udev.manager.lock().activate(false) {
                     tracing::warn!(%err, "cannot reactivate DRM device");
                 }
                 for surface in udev.surfaces.values_mut() {
@@ -472,6 +472,7 @@ impl Helix {
                 subpixel: connector.subpixel().into(),
                 make: identity.vendor.clone(),
                 model: identity.product.clone(),
+                serial_number: identity.serial.clone(),
             },
         );
         output.user_data().insert_if_missing(|| identity.clone());
@@ -500,7 +501,7 @@ impl Helix {
                 planes.overlay.clear();
             }
         }
-        let drm_output = match udev.manager.initialize_output::<_, super::zoom::ScreenElement>(
+        let drm_output = match udev.manager.lock().initialize_output::<_, super::zoom::ScreenElement>(
             crtc,
             drm_mode,
             &[connector.handle()],

@@ -15,7 +15,6 @@ use smithay::reexports::wayland_server::backend::{ClientData, ClientId, Disconne
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{Client, Display, DisplayHandle, Resource};
 use smithay::wayland::compositor::{CompositorClientState, CompositorHandler, CompositorState};
-use smithay::delegate_compositor;
 
 // ---- the server ----
 
@@ -47,7 +46,7 @@ impl CompositorHandler for Server {
     fn commit(&mut self, _: &WlSurface) {}
 }
 
-delegate_compositor!(Server);
+smithay::delegate_dispatch2!(Server);
 smithay::reexports::wayland_server::delegate_global_dispatch!(Server: [tearing_server::wp_tearing_control_manager_v1::WpTearingControlManagerV1: ()] => TearingControl);
 smithay::reexports::wayland_server::delegate_dispatch!(Server: [tearing_server::wp_tearing_control_manager_v1::WpTearingControlManagerV1: ()] => TearingControl);
 smithay::reexports::wayland_server::delegate_dispatch!(Server: [tearing_server::wp_tearing_control_v1::WpTearingControlV1: ControlData] => TearingControl);

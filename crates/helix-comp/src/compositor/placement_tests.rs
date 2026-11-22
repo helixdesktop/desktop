@@ -54,7 +54,7 @@ fn start() -> (EventLoop<'static, Helix>, Helix) {
     let mut state = Helix::new(&mut event_loop, display, events).unwrap();
     let output = Output::new(
         "TEST-1".into(),
-        PhysicalProperties { size: (0, 0).into(), subpixel: Subpixel::Unknown, make: "Helix".into(), model: "Test".into() },
+        PhysicalProperties { size: (0, 0).into(), subpixel: Subpixel::Unknown, make: "Helix".into(), model: "Test".into(), serial_number: String::new() },
     );
     let _ = output.create_global::<Helix>(&state.display_handle);
     let mode = Mode { size: SIZE.into(), refresh: 60_000 };
@@ -87,7 +87,7 @@ fn serve<T>(event_loop: &mut EventLoop<'static, Helix>, state: &mut Helix, from_
 fn window(state: &Helix) -> (Rectangle<i32, Logical>, Point<i32, Logical>, bool) {
     let window = state.space.elements().next().expect("a window").clone();
     let area = state.space.element_geometry(&window).unwrap();
-    let maximized = window.toplevel().unwrap().current_state().states.contains(xdg_toplevel::State::Maximized);
+    let maximized = window.toplevel().unwrap().with_committed_state(|s| s.is_some_and(|s| s.states.contains(xdg_toplevel::State::Maximized)));
     assert!(!state.wm.unplaced.contains(&window), "placed");
     (area, window.geometry().loc, maximized)
 }

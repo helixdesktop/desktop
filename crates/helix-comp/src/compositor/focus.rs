@@ -81,7 +81,7 @@ impl KeyboardTarget<Helix> for KeyboardFocusTarget {
         }
     }
 
-    fn key(&self, seat: &Seat<Helix>, data: &mut Helix, key: KeysymHandle<'_>, state: KeyState, serial: Serial, time: u32) {
+    fn key(&self, seat: &Seat<Helix>, data: &mut Helix, key: KeysymHandle<'_>, state: KeyState, serial: Serial, time: smithay::backend::input::InputTime) {
         match self {
             Self::Surface(s) => KeyboardTarget::key(s, seat, data, key, state, serial, time),
             Self::X11(x) => KeyboardTarget::key(x, seat, data, key, state, serial, time),

@@ -30,6 +30,7 @@ mod remote_share;
 mod icons;
 mod scales;
 mod x11ping;
+mod virtual_keyboard;
 mod sync;
 mod tearing;
 mod timing;
@@ -256,6 +257,9 @@ pub struct Helix {
     /// Keys grabbed for screen readers changed the modifiers since the
     /// focused app last heard of them.
     pub monitor_mods_dirty: bool,
+    /// The input method's virtual keyboards: each one's xkb state, for
+    /// the modifiers it sets (`virtual_keyboard.rs`).
+    pub(crate) virtual_keyboards: std::collections::HashMap<smithay::wayland::virtual_keyboard::VirtualKeyboardDevice, virtual_keyboard::Device>,
     /// Mouse accessibility (secondary click, dwell click).
     pub mouse_access: helix_comp::a11y_mouse::Mouse,
     /// The magnifier.
@@ -409,6 +413,7 @@ impl Helix {
             access: Default::default(),
             keyboard_monitor: Default::default(),
             monitor_mods_dirty: false,
+            virtual_keyboards: std::collections::HashMap::new(),
             mouse_access: Default::default(),
             zoom: Default::default(),
             hot_corner: Default::default(),

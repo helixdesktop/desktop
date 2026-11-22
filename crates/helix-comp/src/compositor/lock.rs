@@ -62,7 +62,7 @@ impl SessionLockHandler for Helix {
         self.lock.pending = Some(confirmation);
         // Nothing of the session may keep input.
         if let Some(pointer) = self.seat.get_pointer() {
-            pointer.unset_grab(self, SERIAL_COUNTER.next_serial(), 0);
+            pointer.unset_grab(self, SERIAL_COUNTER.next_serial(), smithay::backend::input::InputTime::from_millis(0));
         }
         let keyboard = self.seat.get_keyboard().unwrap();
         keyboard.unset_grab(self);

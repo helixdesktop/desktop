@@ -18,7 +18,6 @@ use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{Client, Display, DisplayHandle};
 use smithay::utils::SERIAL_COUNTER;
 use smithay::wayland::compositor::{CompositorClientState, CompositorHandler, CompositorState};
-use smithay::{delegate_compositor, delegate_seat};
 
 // ---- the server ----
 
@@ -28,6 +27,9 @@ struct Server {
     seat: Seat<Server>,
     surfaces: Vec<WlSurface>,
 }
+
+// Smithay's WlSurface pointer target asks for it.
+impl smithay::wayland::pointer_constraints::PointerConstraintsHandler for Server {}
 
 impl SeatHandler for Server {
     type KeyboardFocus = WlSurface;
@@ -70,8 +72,7 @@ impl CompositorHandler for Server {
     fn commit(&mut self, _: &WlSurface) {}
 }
 
-delegate_compositor!(Server);
-delegate_seat!(Server);
+smithay::delegate_dispatch2!(Server);
 
 type Command = Box<dyn FnOnce(&mut Server, &mut Display<Server>) + Send>;
 
@@ -124,7 +125,7 @@ fn flood(tx: &mpsc::Sender<Command>, seconds: u32) {
         for ms in 0..seconds * 1000 {
             let location = (f64::from(ms % 500), f64::from(ms % 300)).into();
             let focus = Some((surface.clone(), (0.0, 0.0).into()));
-            pointer.motion(state, focus, &MotionEvent { location, serial: SERIAL_COUNTER.next_serial(), time: ms });
+            pointer.motion(state, focus, &MotionEvent { location, serial: SERIAL_COUNTER.next_serial(), time: smithay::backend::input::InputTime::from_millis(ms) });
             pointer.frame(state);
             if ms % 8 == 0 {
                 let _ = display.flush_clients();

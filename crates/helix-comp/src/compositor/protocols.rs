@@ -192,7 +192,7 @@ impl Helix {
         let constraint = if pointer.is_grabbed() { None } else { self.active_constraint(&pointer) };
         if delta != Point::default() || unaccel != Point::default() {
             let under = self.surface_under(current);
-            pointer.relative_motion(self, under, &RelativeMotionEvent { delta, delta_unaccel: unaccel, utime });
+            pointer.relative_motion(self, under, &RelativeMotionEvent { delta, delta_unaccel: unaccel, time: smithay::backend::input::InputTime::from_micros(utime) });
         }
         let target = match constraint {
             Some(Constraint::Locked) => {
@@ -233,7 +233,7 @@ impl Helix {
         }
         self.protocols.swipe = None;
         let pointer = self.seat.get_pointer().unwrap();
-        let e = smithay::input::pointer::GestureSwipeBeginEvent { serial: SERIAL_COUNTER.next_serial(), time, fingers };
+        let e = smithay::input::pointer::GestureSwipeBeginEvent { serial: SERIAL_COUNTER.next_serial(), time: smithay::backend::input::InputTime::from_millis(time), fingers };
         pointer.gesture_swipe_begin(self, &e);
     }
 
@@ -243,7 +243,7 @@ impl Helix {
             return;
         }
         let pointer = self.seat.get_pointer().unwrap();
-        pointer.gesture_swipe_update(self, &smithay::input::pointer::GestureSwipeUpdateEvent { time, delta });
+        pointer.gesture_swipe_update(self, &smithay::input::pointer::GestureSwipeUpdateEvent { time: smithay::backend::input::InputTime::from_millis(time), delta });
     }
 
     pub(super) fn gesture_swipe_end(&mut self, cancelled: bool, time: u32) {
@@ -256,7 +256,7 @@ impl Helix {
             return;
         }
         let pointer = self.seat.get_pointer().unwrap();
-        let e = smithay::input::pointer::GestureSwipeEndEvent { serial: SERIAL_COUNTER.next_serial(), time, cancelled };
+        let e = smithay::input::pointer::GestureSwipeEndEvent { serial: SERIAL_COUNTER.next_serial(), time: smithay::backend::input::InputTime::from_millis(time), cancelled };
         pointer.gesture_swipe_end(self, &e);
     }
 
@@ -458,10 +458,3 @@ impl XWaylandKeyboardGrabHandler for Helix {
     }
 }
 
-smithay::delegate_idle_inhibit!(Helix);
-smithay::delegate_relative_pointer!(Helix);
-smithay::delegate_pointer_constraints!(Helix);
-smithay::delegate_pointer_gestures!(Helix);
-smithay::delegate_keyboard_shortcuts_inhibit!(Helix);
-smithay::delegate_xdg_foreign!(Helix);
-smithay::delegate_xwayland_keyboard_grab!(Helix);

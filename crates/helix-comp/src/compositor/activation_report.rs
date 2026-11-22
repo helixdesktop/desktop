@@ -127,7 +127,7 @@ impl Helix {
         let under_is = relation(self, window, under.as_ref());
         let mapped = self.space.elements().any(|w| w == window);
         let on_top = self.top_window().as_ref() == Some(window);
-        let activated = window.toplevel().map(|t| t.current_state().states.contains(smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Activated));
+        let activated = window.toplevel().map(|t| t.with_committed_state(|s| s.is_some_and(|s| s.states.contains(smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Activated))));
         let exclusive: Vec<String> = self
             .space
             .outputs()

@@ -15,7 +15,7 @@ use smithay::wayland::dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportN
 use smithay::wayland::fractional_scale::{with_fractional_scale, FractionalScaleHandler};
 use smithay::wayland::selection::primary_selection::{PrimarySelectionHandler, PrimarySelectionState};
 use smithay::wayland::shell::xdg::decoration::XdgDecorationHandler;
-use smithay::wayland::tablet_manager::TabletSeatHandler;
+use smithay::input::tablet::TabletSeatHandler;
 use smithay::wayland::xdg_activation::{
     XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
 };
@@ -37,9 +37,9 @@ use smithay::wayland::compositor::{
     CompositorState,
 };
 use smithay::wayland::output::OutputHandler;
+use smithay::input::dnd::{DnDGrab, DndGrabHandler, GrabType, Source};
 use smithay::wayland::selection::data_device::{
-    set_data_device_focus, ClientDndGrabHandler, DataDeviceHandler, DataDeviceState,
-    ServerDndGrabHandler,
+    set_data_device_focus, DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler,
 };
 use smithay::wayland::selection::SelectionHandler;
 use smithay::wayland::shell::xdg::{
@@ -47,12 +47,6 @@ use smithay::wayland::shell::xdg::{
     XdgToplevelSurfaceData,
 };
 use smithay::wayland::shm::{ShmHandler, ShmState};
-use smithay::{
-    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_fractional_scale,
-    delegate_layer_shell, delegate_output, delegate_primary_selection, delegate_seat,
-    delegate_shm, delegate_viewporter, delegate_xdg_activation, delegate_xdg_decoration,
-    delegate_xdg_shell,
-};
 
 use super::grabs::{MoveGrab, ResizeGrab, ResizeTracking};
 use super::wm::ConfigureWhenReady;
@@ -198,7 +192,7 @@ impl SelectionHandler for Helix {
             return;
         }
         if let Some(xwm) = self.xwm.as_mut() {
-            if let Err(err) = xwm.send_selection(ty, mime_type, fd, self.loop_handle.clone()) {
+            if let Err(err) = xwm.send_selection(ty, mime_type, fd) {
                 tracing::warn!(?err, "cannot transfer selection from X11");
             }
         }
@@ -206,19 +200,38 @@ impl SelectionHandler for Helix {
 }
 
 impl DataDeviceHandler for Helix {
-    fn data_device_state(&self) -> &DataDeviceState {
-        &self.data_device_state
+    fn data_device_state(&mut self) -> &mut DataDeviceState {
+        &mut self.data_device_state
     }
 }
 
 impl PrimarySelectionHandler for Helix {
-    fn primary_selection_state(&self) -> &PrimarySelectionState {
-        &self.primary_selection_state
+    fn primary_selection_state(&mut self) -> &mut PrimarySelectionState {
+        &mut self.primary_selection_state
     }
 }
 
-impl ClientDndGrabHandler for Helix {}
-impl ServerDndGrabHandler for Helix {}
+/// A drag started by a Wayland client: Smithay's grab carries it, by
+/// pointer or touch (no drag icon is drawn).
+impl WaylandDndGrabHandler for Helix {
+    fn dnd_requested<S: Source>(&mut self, source: S, _icon: Option<WlSurface>, seat: Seat<Self>, serial: Serial, type_: GrabType) {
+        match type_ {
+            GrabType::Pointer => {
+                let Some(pointer) = seat.get_pointer() else { return source.cancel() };
+                let Some(start_data) = pointer.grab_start_data() else { return source.cancel() };
+                let grab = DnDGrab::new_pointer(&self.display_handle, start_data, source, seat);
+                pointer.set_grab(self, grab, serial, Focus::Keep);
+            }
+            GrabType::Touch => {
+                let Some(touch) = seat.get_touch() else { return source.cancel() };
+                let Some(start_data) = touch.grab_start_data() else { return source.cancel() };
+                let grab = DnDGrab::new_touch(&self.display_handle, start_data, source, seat);
+                touch.set_grab(self, grab, serial);
+            }
+        }
+    }
+}
+impl DndGrabHandler for Helix {}
 impl OutputHandler for Helix {}
 
 impl XdgShellHandler for Helix {
@@ -453,6 +466,9 @@ impl XdgDecorationHandler for Helix {
     fn unset_mode(&mut self, toplevel: ToplevelSurface) {
         self.request_mode(toplevel, DecorationMode::ClientSide);
     }
+
+    // Always client-side already.
+    fn decoration_destroyed(&mut self, _toplevel: ToplevelSurface) {}
 }
 
 /// Whether a token may take focus, decided when it was made (kept in the
@@ -810,21 +826,12 @@ impl Helix {
     }
 }
 
-delegate_compositor!(Helix);
-delegate_shm!(Helix);
-delegate_seat!(Helix);
-delegate_data_device!(Helix);
-delegate_output!(Helix);
-delegate_xdg_shell!(Helix);
-delegate_layer_shell!(Helix);
-delegate_primary_selection!(Helix);
-delegate_xdg_decoration!(Helix);
-delegate_xdg_activation!(Helix);
-delegate_viewporter!(Helix);
-delegate_fractional_scale!(Helix);
-delegate_dmabuf!(Helix);
-smithay::delegate_xdg_system_bell!(Helix);
-smithay::delegate_xdg_dialog!(Helix);
+
+// Every Smithay protocol: Smithay's user data types dispatch them.
+smithay::delegate_dispatch2!(Helix);
+
+/// Nothing to do when a text input turns on or off.
+impl smithay::wayland::text_input::TextInputActivation for Helix {}
 
 /// `xdg_system_bell_v1`: an app rang the bell.
 impl smithay::wayland::xdg_system_bell::XdgSystemBellHandler for Helix {
@@ -836,12 +843,11 @@ impl smithay::wayland::xdg_system_bell::XdgSystemBellHandler for Helix {
 /// `xdg_dialog_v1`: which dialogs are modal (for `attach-modal-dialogs`,
 /// and focus going to a window's modal dialog).
 impl smithay::wayland::shell::xdg::dialog::XdgDialogHandler for Helix {
-    fn modal_changed(&mut self, toplevel: ToplevelSurface, is_modal: bool) {
-        self.set_modal(toplevel.wl_surface(), is_modal);
+    fn dialog_hint_changed(&mut self, toplevel: ToplevelSurface, hint: smithay::wayland::shell::xdg::dialog::ToplevelDialogHint) {
+        use smithay::wayland::shell::xdg::dialog::ToplevelDialogHint;
+        self.set_modal(toplevel.wl_surface(), hint == ToplevelDialogHint::Modal);
     }
 }
-smithay::delegate_session_lock!(Helix);
-smithay::delegate_xwayland_shell!(Helix);
 
 impl DmabufHandler for Helix {
     fn dmabuf_state(&mut self) -> &mut DmabufState {
@@ -874,7 +880,10 @@ impl DmabufHandler for Helix {
 }
 
 /// Required by cursor-shape (tablet tool cursors); defaults suffice.
-impl TabletSeatHandler for Helix {}
+// Tablets are Helix's own (`tablet_v2`); Smithay's tablet seat is unused.
+impl TabletSeatHandler for Helix {
+    type ToolFocus = WlSurface;
+}
 
 impl helix_comp::tablet_v2::TabletV2Handler for Helix {
     fn tablet_v2(&mut self) -> &mut helix_comp::tablet_v2::TabletV2 {
@@ -951,14 +960,7 @@ impl smithay::wayland::input_method::InputMethodHandler for Helix {
     }
 }
 
-smithay::delegate_text_input_manager!(Helix);
-smithay::delegate_input_method_manager!(Helix);
-smithay::delegate_virtual_keyboard_manager!(Helix);
 
-smithay::delegate_presentation!(Helix);
-smithay::delegate_single_pixel_buffer!(Helix);
-smithay::delegate_fifo!(Helix);
-smithay::delegate_commit_timing!(Helix);
 
 fn layer_interactivity(i: KeyboardInteractivity) -> helix_comp::layer_focus::Interactivity {
     use helix_comp::layer_focus::Interactivity;

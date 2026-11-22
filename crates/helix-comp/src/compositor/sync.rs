@@ -73,4 +73,3 @@ impl DrmSyncobjHandler for Helix {
     }
 }
 
-smithay::delegate_drm_syncobj!(Helix);

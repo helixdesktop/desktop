@@ -94,7 +94,7 @@ fn describe(size: Size<i32, Logical>, count: usize) -> Vec<Monitor> {
 fn add_output(state: &mut Helix, connector: &str, serial: &str, mode: Mode, x: i32) -> Output {
     let output = Output::new(
         connector.to_string(),
-        PhysicalProperties { size: (0, 0).into(), subpixel: Subpixel::Unknown, make: "Helix".into(), model: "Headless".into() },
+        PhysicalProperties { size: (0, 0).into(), subpixel: Subpixel::Unknown, make: "Helix".into(), model: "Headless".into(), serial_number: serial.into() },
     );
     output.user_data().insert_if_missing(|| helix_comp::edid::Identity { vendor: "Helix".into(), product: "Headless".into(), serial: serial.into() });
     let _global = output.create_global::<Helix>(&state.display_handle);
@@ -284,14 +284,14 @@ impl Helix {
             }
             image.draw_tree(&surface, location - geometry.loc - geo.loc);
             let toplevel = window.toplevel().map(|t| {
-                let current = t.current_state();
+                let current = t.with_committed_state(|s| s.map(|s| (s.states.clone(), s.size)).unwrap_or_default());
                 let title = smithay::wayland::compositor::with_states(t.wl_surface(), |states| {
                     states
                         .data_map
                         .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
                         .and_then(|d| d.lock().ok().map(|d| (d.app_id.clone(), d.title.clone())))
                 });
-                (format!("{:?}", current.states), current.size, title)
+                (format!("{:?}", current.0), current.1, title)
             });
             tracing::info!(
                 ?location,
