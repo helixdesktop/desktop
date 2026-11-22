@@ -6,6 +6,9 @@
 //!   (#163).
 //! - A window shown and hidden at once stays hidden, and nothing loops
 //!   (#162; Zoom's screen-sharing toolbar does this).
+//! - Typing reaches an app whose focused window takes no input
+//!   (`WM_HINTS` input false): the X server hands the keys to the window
+//!   the app gave the X focus (#164; JetBrains IDEs' popups).
 //!
 //! Runs the real `helix-comp` headless; needs `dbus-daemon` and Xwayland
 //! (as every headless session), skipped otherwise.
@@ -16,8 +19,11 @@ use std::time::{Duration, Instant};
 
 use helix_test_support::headless::{HeadlessSession, Options};
 use x11rb::connection::Connection;
-use x11rb::protocol::xproto::{AtomEnum, ConnectionExt, MapState, CreateWindowAux, EventMask, UnmapNotifyEvent, Window, WindowClass, UNMAP_NOTIFY_EVENT};
+use x11rb::properties::WmHints;
+use x11rb::protocol::Event;
+use x11rb::protocol::xproto::{AtomEnum, ConnectionExt, InputFocus, MapState, PropMode, CreateWindowAux, EventMask, UnmapNotifyEvent, Window, WindowClass, UNMAP_NOTIFY_EVENT};
 use x11rb::rust_connection::RustConnection;
+use x11rb::wrapper::ConnectionExt as _;
 
 fn session() -> Option<HeadlessSession> {
     let comp = std::path::PathBuf::from(env!("CARGO_BIN_EXE_helix-comp"));
@@ -120,4 +126,50 @@ fn a_window_shown_and_hidden_at_once_stays_hidden() {
     assert_eq!(attributes.map_state, MapState::UNMAPPED, "the hidden window is shown ({events} events in a second)");
     assert!(events < 10, "{events} events in a second after the window was hidden");
     assert_ne!(x.wm_state(window), Some(1), "WM_STATE is still Normal");
+}
+
+#[test]
+fn typing_reaches_an_app_whose_focused_window_takes_no_input() {
+    let Some(mut session) = session() else { return };
+    let x = X11::new(&session);
+    let hints = |window: Window, input: bool| {
+        let mut hints = WmHints::new();
+        hints.input = Some(input);
+        hints.set(&x.conn, window).unwrap();
+    };
+    let watch = |window: Window| {
+        let aux = x11rb::protocol::xproto::ChangeWindowAttributesAux::new().event_mask(EventMask::KEY_PRESS | EventMask::STRUCTURE_NOTIFY | EventMask::PROPERTY_CHANGE);
+        x.conn.change_window_attributes(window, &aux).unwrap();
+    };
+    // The main window, and a popup for it that takes no input.
+    let main = x.window();
+    watch(main);
+    hints(main, true);
+    x.conn.map_window(main).unwrap();
+    x.conn.flush().unwrap();
+    x.until("the window manager never managed the main window", |x| x.wm_state(main) == Some(1));
+    let popup = x.window();
+    watch(popup);
+    hints(popup, false);
+    x.conn.change_property32(PropMode::REPLACE, popup, AtomEnum::WM_TRANSIENT_FOR, AtomEnum::WINDOW, &[main]).unwrap();
+    x.conn.map_window(popup).unwrap();
+    x.conn.flush().unwrap();
+    x.until("the window manager never managed the popup", |x| x.wm_state(popup) == Some(1));
+    // The app keeps the X focus on its main window, as Java does.
+    x.conn.set_input_focus(InputFocus::PARENT, main, x11rb::CURRENT_TIME).unwrap();
+    x.conn.flush().unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    while x.conn.poll_for_event().unwrap().is_some() {}
+
+    session.input("type abc");
+    let mut keys = 0;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        match x.conn.poll_for_event().unwrap() {
+            Some(Event::KeyPress(press)) if press.event == main => keys += 1,
+            Some(_) => {}
+            None => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+    assert_eq!(keys, 3, "key presses the main window got");
 }
