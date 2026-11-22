@@ -23,6 +23,8 @@
 //! - Splash screens, notifications and docks (`_NET_WM_WINDOW_TYPE`) get
 //!   no title bar and no focus: splash screens centered, the others where
 //!   they ask (#168).
+//! - Over X11 windows that set no cursor, the pointer is the cursor
+//!   theme's at `cursor-size`, not Helix's built-in arrow (#171).
 //! - The compositor gives its X display back when it exits: no lock is
 //!   left for the next X server to take over (#181).
 //!
@@ -423,6 +425,29 @@ fn splash_screens_notifications_and_docks() {
     x.conn.configure_window(notification, &ConfigureWindowAux::new().x(480).y(120)).unwrap();
     x.conn.flush().unwrap();
     x.until("the notification did not move where it asked", |x| x.position(notification) == (480, 120));
+}
+
+#[test]
+fn x11_windows_show_the_cursor_theme() {
+    // The default settings' theme and size; without it installed (as on
+    // CI) the fallback arrow is right.
+    let Some(path) = xcursor::CursorTheme::load("Adwaita").load_icon("default") else {
+        eprintln!("no Adwaita cursor theme; skipped");
+        return;
+    };
+    let images = xcursor::parser::parse_xcursor(&std::fs::read(path).unwrap()).unwrap();
+    let nominal = images.iter().map(|i| i.size).min_by_key(|s| s.abs_diff(24)).unwrap();
+    let theme = images.iter().find(|i| i.size == nominal).unwrap();
+    let Some(mut session) = session() else { return };
+    let x = X11::new(&session);
+    let window = x.mapped();
+    let (wx, wy) = x.position(window);
+    session.input(&format!("move {} {}", wx + 100, wy + 50));
+    x11rb::protocol::xfixes::ConnectionExt::xfixes_query_version(&x.conn, 5, 0).unwrap().reply().unwrap();
+    x.until("the pointer is not the theme's cursor", |x| {
+        let image = x11rb::protocol::xfixes::ConnectionExt::xfixes_get_cursor_image(&x.conn).unwrap().reply().unwrap();
+        (u32::from(image.width), u32::from(image.height), u32::from(image.xhot), u32::from(image.yhot)) == (theme.width, theme.height, theme.xhot, theme.yhot)
+    });
 }
 
 // ---- the window list, as the shell sees it ----

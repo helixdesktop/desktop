@@ -195,6 +195,8 @@ pub struct Helix {
     pub headless_gpu: Option<Box<headless::HeadlessGpu>>,
     /// The X11 window manager for Xwayland, once it is running.
     pub xwm: Option<X11Wm>,
+    /// The X root cursor's theme, size and scale, as last set.
+    pub x11_cursor: Option<(String, u32, i32)>,
     /// Xwayland's display number (`DISPLAY=:N`), once it is running.
     pub xdisplay: Option<u32>,
     /// Xwayland's Wayland client, once it is running.
@@ -372,6 +374,7 @@ impl Helix {
             xwayland_client: None,
             xsettings: None,
             x11_settings: helix_comp::xsettings::read(),
+            x11_cursor: None,
             xwayland_scale: 0,
             input_capture: Default::default(),
             xwayland_shell_state: XWaylandShellState::new::<Self>(&dh),

@@ -54,6 +54,40 @@ pub fn x11_kind(surface: &X11Surface) -> X11Kind {
 const FALLBACK_DISPLAYS: std::ops::RangeInclusive<u32> = 33..=99;
 
 impl Helix {
+    /// X11 windows that set no cursor of their own show the X root cursor:
+    /// the theme's default at `cursor-size`, in X11 pixels (the Xwayland
+    /// scale; #171). Set again when the theme, size or scale changes.
+    pub fn set_x11_root_cursor(&mut self) {
+        let scale = self.xwayland_scale.max(1);
+        let key = (self.wm_settings.cursor_theme.clone(), self.wm_settings.cursor_size, scale);
+        if self.x11_cursor.as_ref() == Some(&key) {
+            return;
+        }
+        let Some(wm) = self.xwm.as_mut() else { return };
+        let frame = self.cursors.frame(smithay::input::pointer::CursorIcon::Default, f64::from(scale));
+        let (straight, w, h) = &*frame.bgra;
+        // X takes the pixels as 32-bit ARGB, B, G, R, A in memory, with
+        // premultiplied alpha (Render cursors).
+        let pixels: Vec<u8> = straight
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|p| {
+                let a = u32::from(p[3]);
+                let pre = |c: u8| ((u32::from(c) * a + 127) / 255) as u8;
+                [pre(p[0]), pre(p[1]), pre(p[2]), p[3]]
+            })
+            .collect();
+        let hotspot = (frame.hotspot.0.max(0) as u16, frame.hotspot.1.max(0) as u16);
+        match wm.set_cursor(&pixels, Size::from((*w as u16, *h as u16)), hotspot.into()) {
+            Ok(()) => {
+                tracing::debug!(width = w, height = h, scale, "X11 cursor");
+                self.x11_cursor = Some(key);
+            }
+            Err(err) => tracing::warn!(%err, "cannot set the X11 cursor"),
+        }
+    }
+
     /// A splash screen (centered on the output under the pointer) or a
     /// window placing itself (where it asked, kept on its output): shown
     /// without a frame, and focus stays where it is.
@@ -150,22 +184,12 @@ impl Helix {
                         let _ = std::fs::remove_dir_all(dir);
                     }
                     match X11Wm::start_wm(state.loop_handle.clone(), x11_socket, client.clone()) {
-                        Ok(mut wm) => {
-                            let (pixels, w, h) = super::cursor::arrow();
-                            // The arrow is BGRA; X wants RGBA.
-                            let rgba: Vec<u8> = pixels
-                                .as_chunks::<4>()
-                                .0
-                                .iter()
-                                .flat_map(|p| [p[2], p[1], p[0], p[3]])
-                                .collect();
-                            if let Err(err) = wm.set_cursor(&rgba, Size::from((w as u16, h as u16)), (0u16, 0u16).into()) {
-                                tracing::warn!(%err, "cannot set the X11 cursor");
-                            }
+                        Ok(wm) => {
                             state.xwm = Some(wm);
                             state.xdisplay = Some(display_number);
                             state.xwayland_client = Some(client.clone());
                             state.start_x11_settings(display_number);
+                            state.set_x11_root_cursor();
                             let (answers, received) = smithay::reexports::calloop::channel::channel::<super::x11ping::X11Note>();
                             match super::x11ping::X11Ping::start(display_number, answers) {
                                 Ok(ping) => {

@@ -139,5 +139,7 @@ impl Helix {
                 tracing::warn!(%err, "cannot publish XSETTINGS");
             }
         }
+        // The X root cursor, in X11 pixels.
+        self.set_x11_root_cursor();
     }
 }
