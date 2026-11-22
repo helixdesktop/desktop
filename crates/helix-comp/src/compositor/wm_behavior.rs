@@ -273,8 +273,13 @@ impl Helix {
     /// the parent just before saying whose dialog it is).
     pub fn modal_dialog_changed(&mut self, surface: &WlSurface) {
         let Some(dialog) = self.window_for_surface(surface) else { return };
-        let Some(parent) = self.parent_of(&dialog) else { return };
-        if self.is_modal(&dialog) && self.focused_window().as_ref() == Some(&parent) && self.modal_dialog_of(&parent).is_some() {
+        self.modal_window_changed(&dialog);
+    }
+
+    /// [`Self::modal_dialog_changed`], for the dialog's window.
+    pub fn modal_window_changed(&mut self, dialog: &Window) {
+        let Some(parent) = self.parent_of(dialog) else { return };
+        if self.is_modal(dialog) && self.focused_window().as_ref() == Some(&parent) && self.modal_dialog_of(&parent).is_some() {
             self.focus_window(&parent);
         }
     }

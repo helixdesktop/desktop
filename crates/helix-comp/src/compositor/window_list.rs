@@ -100,6 +100,10 @@ impl Helix {
             .chain(self.minimized.iter())
             .chain(self.workspaces.parked())
             .filter(|w| !is_override_redirect(w))
+            // X11 helper windows that ask to stay out of taskbars
+            // (`_NET_WM_STATE_SKIP_TASKBAR`) are left out of the window
+            // list (overview, dash, switcher), as GNOME Shell does.
+            .filter(|w| !w.x11_surface().is_some_and(|x| x.is_skip_taskbar()))
             .cloned()
             .collect();
         let list = &mut self.window_list;
