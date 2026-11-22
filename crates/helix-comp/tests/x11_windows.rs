@@ -25,6 +25,8 @@
 //!   they ask (#168).
 //! - Over X11 windows that set no cursor, the pointer is the cursor
 //!   theme's at `cursor-size`, not Helix's built-in arrow (#171).
+//! - Xwayland gone (crashed, killed): it is started again on the same
+//!   display, and X11 apps run again (#169).
 //! - The compositor gives its X display back when it exits: no lock is
 //!   left for the next X server to take over (#181).
 //!
@@ -450,6 +452,56 @@ fn x11_windows_show_the_cursor_theme() {
     });
 }
 
+/// The session's Xwayland process (`Xwayland :N ...`).
+fn xwayland_pid(display: &str) -> Option<i32> {
+    std::fs::read_dir("/proc").ok()?.flatten().find_map(|entry| {
+        let pid: i32 = entry.file_name().to_str()?.parse().ok()?;
+        let cmdline = std::fs::read(entry.path().join("cmdline")).ok()?;
+        let mut args = cmdline.split(|b| *b == 0);
+        let program = args.next()?;
+        let ours = program.ends_with(b"Xwayland") && args.next() == Some(display.as_bytes());
+        ours.then_some(pid)
+    })
+}
+
+#[test]
+fn xwayland_is_started_again() {
+    let Some(session) = session() else { return };
+    let before = xwayland_pid(&session.x_display).expect("the session's Xwayland");
+    {
+        let x = X11::new(&session);
+        x.mapped();
+        // SAFETY: signalling the Xwayland of this test's own session.
+        assert_eq!(unsafe { libc::kill(before, libc::SIGKILL) }, 0);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while x.conn.get_input_focus().ok().and_then(|c| c.reply().ok()).is_some() {
+            assert!(Instant::now() < deadline, "the X connection outlived Xwayland");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    // Back on the same display (DISPLAY is exported), with a cookie in
+    // the same file.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while xwayland_pid(&session.x_display).is_none_or(|pid| pid == before) {
+        assert!(Instant::now() < deadline, "Xwayland was not started again on {}", session.x_display);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let x = loop {
+        let (conn, _) = match std::panic::catch_unwind(|| common::x11(&session)) {
+            Ok(c) => c,
+            Err(_) => {
+                assert!(Instant::now() < deadline, "cannot connect to the new Xwayland");
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+        };
+        drop(conn);
+        break X11::new(&session);
+    };
+    // Managed again.
+    x.mapped();
+}
+
 // ---- the window list, as the shell sees it ----
 
 mod shell {
@@ -558,6 +610,38 @@ fn helper_windows_stay_out_of_the_window_list() {
     }
     queue.roundtrip(&mut listed).unwrap();
     assert!(!listed.windows.iter().any(|(_, t)| t == "helper" || t == "toast"), "a helper or notification window is listed: {:?}", listed.windows);
+    drop(session);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_window_list_drops_x11_windows_when_xwayland_goes() {
+    let comp = std::path::PathBuf::from(env!("CARGO_BIN_EXE_helix-comp"));
+    let dir = std::env::temp_dir().join(format!("helix-xwayland-gone-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (program, listener) = shell::program(&dir);
+    let Some(session) = HeadlessSession::start(Options { comp: &comp, shell: Some(&program), size: (800, 600), settings: "", env: Vec::new() }) else { return };
+    if session.x_display.is_empty() {
+        eprintln!("no Xwayland; skipped");
+        return;
+    }
+    let (mut queue, mut listed, _list) = shell::window_list(shell::socket(&listener));
+    let x = X11::new(&session);
+    x.mapped_with("x11 app", &[], None);
+    let until = |queue: &mut wayland_client::EventQueue<shell::Listed>, listed: &mut shell::Listed, what: &str, done: &dyn Fn(&shell::Listed) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done(listed) {
+            assert!(Instant::now() < deadline, "{what}: {:?}", listed.windows);
+            queue.roundtrip(listed).unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    until(&mut queue, &mut listed, "the X11 window is not listed", &|l| l.windows.iter().any(|(_, t)| t == "x11 app"));
+    let pid = xwayland_pid(&session.x_display).expect("the session's Xwayland");
+    // SAFETY: signalling the Xwayland of this test's own session.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+    until(&mut queue, &mut listed, "the dead X11 window is still listed", &|l| !l.windows.iter().any(|(_, t)| t == "x11 app"));
     drop(session);
     let _ = std::fs::remove_dir_all(&dir);
 }

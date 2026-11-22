@@ -197,6 +197,10 @@ pub struct Helix {
     pub xwm: Option<X11Wm>,
     /// The X root cursor's theme, size and scale, as last set.
     pub x11_cursor: Option<(String, u32, i32)>,
+    /// The running Xwayland's event source (removing it gives its display
+    /// back), and when it was started again after going away.
+    pub xwayland_source: Option<smithay::reexports::calloop::RegistrationToken>,
+    pub xwayland_restarts: Vec<std::time::Instant>,
     /// Xwayland's display number (`DISPLAY=:N`), once it is running.
     pub xdisplay: Option<u32>,
     /// Xwayland's Wayland client, once it is running.
@@ -374,6 +378,8 @@ impl Helix {
             xwayland_client: None,
             xsettings: None,
             x11_settings: helix_comp::xsettings::read(),
+            xwayland_source: None,
+            xwayland_restarts: Vec::new(),
             x11_cursor: None,
             xwayland_scale: 0,
             input_capture: Default::default(),

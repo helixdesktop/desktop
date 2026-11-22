@@ -50,6 +50,9 @@ pub fn x11_kind(surface: &X11Surface) -> X11Kind {
     }
 }
 
+/// How many times a minute Xwayland is started again after it went away.
+const XWAYLAND_RESTARTS: usize = 3;
+
 /// Displays tried after Smithay's own search (`:0` to `:32`) found none free.
 const FALLBACK_DISPLAYS: std::ops::RangeInclusive<u32> = 33..=99;
 
@@ -130,7 +133,7 @@ impl Helix {
 
     /// Start Xwayland. `ready` runs once it is up (with its display number)
     /// or has failed (`None`).
-    pub fn start_xwayland(&mut self, ready: impl FnOnce(&mut Helix, Option<u32>) + 'static) {
+    pub fn start_xwayland(&mut self, prefer: Option<u32>, ready: impl FnOnce(&mut Helix, Option<u32>) + 'static) {
         // Only clients with the cookie may connect (and no abstract
         // socket, which any process in the network namespace can reach).
         let auth = match new_auth() {
@@ -153,7 +156,15 @@ impl Helix {
         // Smithay looks for a free display among :0 to :32; when those are
         // all taken (by other X servers or locks that stay behind), the next
         // ones are tried one by one.
-        let mut spawned = spawn(None);
+        // Again on the display it had (restarted: DISPLAY is exported).
+        let mut spawned = match prefer.map(|d| spawn(Some(d))) {
+            Some(Ok(spawned)) => Ok(spawned),
+            Some(Err(err)) => {
+                tracing::warn!(%err, display = prefer, "cannot start Xwayland on its display again");
+                spawn(None)
+            }
+            None => spawn(None),
+        };
         for display in FALLBACK_DISPLAYS {
             if !matches!(&spawned, Err(err) if err.kind() == std::io::ErrorKind::AddrInUse) {
                 break;
@@ -231,9 +242,53 @@ impl Helix {
                 ready(state, display);
             }
         });
-        if let Err(err) = result {
-            tracing::warn!(%err, "cannot watch Xwayland");
+        match result {
+            Ok(token) => self.xwayland_source = Some(token),
+            Err(err) => tracing::warn!(%err, "cannot watch Xwayland"),
         }
+    }
+
+    /// Xwayland went away (it crashed or was killed): forget its windows
+    /// and everything tied to it, and start it again on the same display
+    /// (#169), at most [`XWAYLAND_RESTARTS`] times a minute.
+    fn xwayland_gone(&mut self, xwm: XwmId) {
+        tracing::error!("Xwayland is gone; X11 apps have closed");
+        let windows: Vec<Window> = self.space.elements().chain(self.minimized.iter()).chain(self.workspaces.parked()).filter(|w| w.x11_surface().is_some_and(|x| x.xwm_id() == Some(xwm))).cloned().collect();
+        for window in &windows {
+            self.forget_window(window);
+        }
+        self.cleared_selection(xwm, SelectionTarget::Clipboard);
+        self.cleared_selection(xwm, SelectionTarget::Primary);
+        self.xwm = None;
+        self.xwayland_client = None;
+        self.x11ping = None;
+        self.xsettings = None;
+        self.x11_cursor = None;
+        self.xwayland_scale = 0;
+        let old = self.xdisplay.take();
+        // Dropping it gives its display (lock and socket) back.
+        if let Some(token) = self.xwayland_source.take() {
+            self.loop_handle.remove(token);
+        }
+        helix_comp::xauth::set_current(None);
+        self.sync_window_list();
+
+        let now = std::time::Instant::now();
+        self.xwayland_restarts.retain(|t| now.duration_since(*t) < std::time::Duration::from_secs(60));
+        if self.xwayland_restarts.len() >= XWAYLAND_RESTARTS {
+            tracing::error!("Xwayland keeps going away; not starting it again this session");
+            return;
+        }
+        self.xwayland_restarts.push(now);
+        let timer = smithay::reexports::calloop::timer::Timer::from_duration(std::time::Duration::from_secs(1));
+        let _ = self.loop_handle.insert_source(timer, move |_, _, state| {
+            state.start_xwayland(old, move |_, started| match started {
+                Some(n) if Some(n) == old => tracing::info!(display = n, "Xwayland is back"),
+                Some(n) => tracing::warn!(display = n, before = old, "Xwayland is back on another display; apps started before keep the old DISPLAY"),
+                None => tracing::error!("cannot start Xwayland again; X11 apps will not run"),
+            });
+            smithay::reexports::calloop::timer::TimeoutAction::Drop
+        });
     }
 
     fn x11_window(&self, surface: &X11Surface) -> Option<Window> {
@@ -602,6 +657,10 @@ impl XwmHandler for Helix {
                 set_primary_selection(&self.display_handle, &self.seat, mime_types, super::ServerSelection::X11)
             }
         }
+    }
+
+    fn disconnected(&mut self, xwm: XwmId) {
+        self.xwayland_gone(xwm);
     }
 
     fn cleared_selection(&mut self, _xwm: XwmId, selection: SelectionTarget) {

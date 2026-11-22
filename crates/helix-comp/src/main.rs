@@ -232,7 +232,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     stop_on_signals(state.loop_signal.clone());
 
-    state.start_xwayland(move |state, xdisplay| {
+    state.start_xwayland(None, move |state, xdisplay| {
         let _ = xdisplay_tx.send(xdisplay);
         if let Some(program) = shell {
             state.exit_with_shell = exit_with_shell;
