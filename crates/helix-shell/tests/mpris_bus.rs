@@ -122,3 +122,46 @@ async fn no_bar_without_a_position() {
     assert_eq!((read.position, read.length), (None, None));
     assert_eq!(read.progress(std::time::Instant::now()), None);
 }
+
+/// A player slow to say where it is.
+struct Slow;
+
+#[zbus::interface(name = "org.mpris.MediaPlayer2.Player")]
+impl Slow {
+    #[zbus(property)]
+    async fn playback_status(&self) -> String {
+        "Playing".into()
+    }
+    #[zbus(property)]
+    async fn position(&self) -> i64 {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        1
+    }
+    #[zbus(signal)]
+    async fn seeked(emitter: &zbus::object_server::SignalEmitter<'_>, position: i64) -> zbus::Result<()>;
+}
+
+/// A burst of player signals while the player is being read (a browser
+/// starting a video) must not stop the connection: once the followed
+/// streams filled up, zbus stopped reading the socket, the read's
+/// replies never came, and every call into the shell hung.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_burst_while_reading_does_not_stop_the_bus() {
+    use std::time::Duration;
+    let Some(bus) = TestBus::start() else { return };
+    let conn = bus.connect().await;
+    let server = bus.builder().serve_at("/org/mpris/MediaPlayer2", Slow).unwrap().name("org.mpris.MediaPlayer2.video").unwrap().build().await.unwrap();
+    let (ui, mut events) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(helix_shell::calendar::follow_players(conn.clone(), ui));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let emitter = zbus::object_server::SignalEmitter::new(&server, "/org/mpris/MediaPlayer2").unwrap();
+    Slow::seeked(&emitter, 0).await.unwrap();
+    // Now reading the player (slowly): the burst arrives meanwhile.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    for n in 0..200 {
+        Slow::seeked(&emitter, n).await.unwrap();
+    }
+    let dbus = zbus::fdo::DBusProxy::new(&conn).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), dbus.get_id()).await.expect("the connection still answers").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), events.recv()).await.expect("the player was read").unwrap();
+}

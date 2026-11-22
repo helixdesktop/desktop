@@ -39,6 +39,7 @@ pub mod location;
 pub mod logind;
 pub mod night_light;
 pub mod bluetooth_agent;
+pub mod bus_signals;
 pub mod obex;
 pub mod osk_words;
 pub mod panel_layout;

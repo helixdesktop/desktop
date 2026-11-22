@@ -6,7 +6,6 @@
 
 use std::future::Future;
 
-use futures_util::StreamExt;
 use gio::prelude::*;
 use zbus::zvariant::OwnedObjectPath;
 use zbus::Connection;
@@ -44,13 +43,15 @@ pub async fn track(conn: &Connection, accuracy: u32, mut sink: impl FnMut(f64, f
         .member("LocationUpdated")?
         .path(client.clone())?
         .build();
-    let mut updates = zbus::MessageStream::for_match_rule(rule, conn, None).await?;
+    // Read apart from the calls on this connection below: see
+    // `bus_signals`.
+    let mut updates = crate::bus_signals::forward(zbus::MessageStream::for_match_rule(rule, conn, None).await?);
     proxy.call_method("Start", &()).await?;
     tokio::pin!(stop);
     loop {
         tokio::select! {
             _ = &mut stop => break,
-            update = updates.next() => {
+            update = updates.recv() => {
                 let Some(Ok(msg)) = update else { break };
                 let Ok((_, location)) = msg.body().deserialize::<(OwnedObjectPath, OwnedObjectPath)>() else { continue };
                 let place = zbus::Proxy::new(conn, GEOCLUE, location, "org.freedesktop.GeoClue2.Location").await?;

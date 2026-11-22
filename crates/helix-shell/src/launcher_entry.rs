@@ -5,7 +5,6 @@
 
 use std::collections::HashMap;
 
-use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use zbus::zvariant::OwnedValue;
 use zbus::Connection;
@@ -180,16 +179,18 @@ pub fn app_of(app_uri: &str) -> Option<String> {
 /// app's entry as it changes (`None` once its sender left the bus).
 pub async fn follow(conn: Connection, ui: mpsc::UnboundedSender<UiEvent>) -> zbus::Result<()> {
     let rule = zbus::MatchRule::builder().msg_type(zbus::message::Type::Signal).interface(INTERFACE)?.member("Update")?.build();
-    let mut updates = zbus::MessageStream::for_match_rule(rule, &conn, None).await?;
-    let mut owners = zbus::fdo::DBusProxy::new(&conn).await?.receive_name_owner_changed().await?;
+    // Read apart from the quicklist calls on this connection below: see
+    // `bus_signals`.
+    let mut updates = crate::bus_signals::forward(zbus::MessageStream::for_match_rule(rule, &conn, None).await?);
+    let mut owners = crate::bus_signals::forward(zbus::fdo::DBusProxy::new(&conn).await?.receive_name_owner_changed().await?);
     let layout_rule = zbus::MatchRule::builder().msg_type(zbus::message::Type::Signal).interface(DBUSMENU)?.member("LayoutUpdated")?.build();
-    let mut layouts = zbus::MessageStream::for_match_rule(layout_rule, &conn, None).await?;
+    let mut layouts = crate::bus_signals::forward(zbus::MessageStream::for_match_rule(layout_rule, &conn, None).await?);
     let mut entries: HashMap<String, Entry> = HashMap::new();
     // Sender → the apps it updated.
     let mut senders: HashMap<String, Vec<String>> = HashMap::new();
     loop {
         tokio::select! {
-            message = updates.next() => {
+            message = updates.recv() => {
                 let Some(Ok(message)) = message else { break };
                 let Ok((uri, props)) = message.body().deserialize::<(String, HashMap<String, OwnedValue>)>() else { continue };
                 let Some(app) = app_of(&uri) else { continue };
@@ -211,8 +212,9 @@ pub async fn follow(conn: Connection, ui: mpsc::UnboundedSender<UiEvent>) -> zbu
                 }
                 let _ = ui.send(UiEvent::LauncherEntry(app, Some(entry.clone())));
             }
-            layout = layouts.next() => {
-                let Some(Ok(message)) = layout else { continue };
+            layout = layouts.recv() => {
+                let Some(layout) = layout else { break };
+                let Ok(message) = layout else { continue };
                 let header = message.header();
                 let (Some(sender), Some(path)) = (header.sender().map(|s| s.to_string()), header.path().map(|p| p.to_string())) else { continue };
                 let matching: Vec<String> = entries
@@ -227,7 +229,7 @@ pub async fn follow(conn: Connection, ui: mpsc::UnboundedSender<UiEvent>) -> zbu
                     let _ = ui.send(UiEvent::LauncherEntry(app, Some(entry.clone())));
                 }
             }
-            change = owners.next() => {
+            change = owners.recv() => {
                 let Some(change) = change else { break };
                 let Ok(args) = change.args() else { continue };
                 if args.new_owner().is_some() {

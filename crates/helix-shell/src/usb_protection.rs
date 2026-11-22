@@ -8,7 +8,6 @@
 //! machine's devices. `HELIX_TEST_USBGUARD=1` looks for it on the session
 //! bus instead (tests with a fake).
 
-use futures_util::StreamExt;
 use zbus::Connection;
 use helix_i18n::tr;
 
@@ -77,9 +76,11 @@ pub async fn run(center: crate::notifications::Center) {
 
 pub async fn follow(conn: &Connection, center: &crate::notifications::Center) -> zbus::Result<()> {
     let rule = zbus::MatchRule::builder().msg_type(zbus::message::Type::Signal).sender(USBGUARD)?.interface(DEVICES)?.member("DevicePresenceChanged")?.build();
-    let mut events = zbus::MessageStream::for_match_rule(rule, conn, None).await?;
+    // Read apart from the calls on this connection below: see
+    // `bus_signals`.
+    let mut events = crate::bus_signals::forward(zbus::MessageStream::for_match_rule(rule, conn, None).await?);
     tracing::info!("USB protection follows USBGuard");
-    while let Some(Ok(message)) = events.next().await {
+    while let Some(Ok(message)) = events.recv().await {
         let Ok((id, event, _target, device_rule, _attributes)) = message.body().deserialize::<(u32, u32, u32, String, std::collections::HashMap<String, String>)>() else { continue };
         if event != INSERT || !rejects(read(), center.locked(), &device_rule) {
             continue;
