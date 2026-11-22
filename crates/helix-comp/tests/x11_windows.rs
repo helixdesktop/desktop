@@ -4,6 +4,8 @@
 //! - A window the app hides is marked Withdrawn (`WM_STATE`), as ICCCM
 //!   asks; Wine waits for that before it shows a game's window again
 //!   (#163).
+//! - A window shown and hidden at once stays hidden, and nothing loops
+//!   (#162; Zoom's screen-sharing toolbar does this).
 //!
 //! Runs the real `helix-comp` headless; needs `dbus-daemon` and Xwayland
 //! (as every headless session), skipped otherwise.
@@ -14,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use helix_test_support::headless::{HeadlessSession, Options};
 use x11rb::connection::Connection;
-use x11rb::protocol::xproto::{AtomEnum, ConnectionExt, CreateWindowAux, EventMask, UnmapNotifyEvent, Window, WindowClass, UNMAP_NOTIFY_EVENT};
+use x11rb::protocol::xproto::{AtomEnum, ConnectionExt, MapState, CreateWindowAux, EventMask, UnmapNotifyEvent, Window, WindowClass, UNMAP_NOTIFY_EVENT};
 use x11rb::rust_connection::RustConnection;
 
 fn session() -> Option<HeadlessSession> {
@@ -90,4 +92,32 @@ fn a_hidden_window_is_withdrawn() {
 
     x.withdraw(window);
     x.until("WM_STATE stayed Normal after the window was hidden", |x| x.wm_state(window) == Some(0));
+}
+
+#[test]
+fn a_window_shown_and_hidden_at_once_stays_hidden() {
+    let Some(session) = session() else { return };
+    let x = X11::new(&session);
+    let window = x.window();
+    // Before the window manager has handled the MapRequest.
+    x.conn.map_window(window).unwrap();
+    x.withdraw(window);
+
+    std::thread::sleep(Duration::from_millis(500));
+    while x.conn.poll_for_event().unwrap().is_some() {}
+    // A second of quiet: the window manager reparenting and remapping it
+    // over and over shows here as a stream of events.
+    let mut events = 0;
+    let quiet = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < quiet {
+        if x.conn.poll_for_event().unwrap().is_some() {
+            events += 1;
+        } else {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    let attributes = x.conn.get_window_attributes(window).unwrap().reply().unwrap();
+    assert_eq!(attributes.map_state, MapState::UNMAPPED, "the hidden window is shown ({events} events in a second)");
+    assert!(events < 10, "{events} events in a second after the window was hidden");
+    assert_ne!(x.wm_state(window), Some(1), "WM_STATE is still Normal");
 }
