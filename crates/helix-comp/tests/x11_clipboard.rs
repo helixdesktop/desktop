@@ -103,6 +103,12 @@ fn x11_read(session: &HeadlessSession, target: &str) -> Option<Vec<u8>> {
     conn.create_window(0, window, root, 0, 0, 1, 1, 0, WindowClass::INPUT_ONLY, 0, &CreateWindowAux::new()).unwrap();
     let atom = |name: &str| conn.intern_atom(false, name.as_bytes()).unwrap().reply().unwrap().atom;
     let (clipboard, target, property) = (atom("CLIPBOARD"), atom(target), atom("HELIX_TEST"));
+    // The compositor takes the X11 selection a moment after the Wayland copy.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while conn.get_selection_owner(clipboard).unwrap().reply().unwrap().owner == x11rb::NONE {
+        assert!(std::time::Instant::now() < deadline, "the compositor never took the X11 clipboard");
+        std::thread::sleep(Duration::from_millis(10));
+    }
     conn.convert_selection(window, clipboard, target, property, x11rb::CURRENT_TIME).unwrap();
     conn.flush().unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
