@@ -96,7 +96,7 @@ jobs:
         env:
           HELIX_XWM: ${{ matrix.xwm }}
         run: >
-          cargo test -p helix-comp --locked
+          cargo test -p helix-comp --locked --no-fail-fast
           --test move_unmaximize --test x11_alpha --test x11_clipboard
           --test x11_configure --test x11_dnd --test x11_focus --test x11_map
           --test x11_props --test x11_selection --test x11_shell
