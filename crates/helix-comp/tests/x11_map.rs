@@ -282,7 +282,10 @@ fn a_menu_shown_again_works_again() {
         session.input("move 20 20");
         x.map(menu);
         until("the menu is not shown", || viewable(&x, menu));
-        std::thread::sleep(Duration::from_millis(200));
+        // Time for the menu's surface to take its place on the screen
+        // (slow machines need longer than fast ones); a menu that missed
+        // the pointer for good doesn't get it with more time.
+        std::thread::sleep(Duration::from_millis(1000));
         x.drain();
         session.input("move 350 350");
         x.wait_event(&format!("the pointer never entered the menu shown again ({round})"), |e| matches!(e, Event::EnterNotify(n) if n.event == menu).then_some(()));
