@@ -6,7 +6,8 @@
 //!
 //!
 //! And an X11 client reads the clipboard whatever has focus, as in GNOME:
-//! `xclip -o` run from a Wayland terminal (#172).
+//! `xclip -o` run from a Wayland terminal (#172), and as often as it
+//! asks: an app pasting again with the same window (#160).
 //!
 //! Runs the real `helix-comp` headless; needs `dbus-daemon` and Xwayland
 //! (as every headless session), skipped otherwise.
@@ -93,9 +94,10 @@ fn an_x11_image_pastes_into_a_wayland_app() {
     assert!(image == picture(), "the image arrived whole: {} of {} bytes", image.len(), picture().len());
 }
 
-/// The CLIPBOARD's `target` as an X11 client that has no focused window
-/// reads it (as `xclip -o`); `None` when refused.
-fn x11_read(session: &HeadlessSession, target: &str) -> Option<Vec<u8>> {
+/// The CLIPBOARD's `target`, read `times` over by one X11 client that has
+/// no focused window (as `xclip -o`, or an app pasting again); `None`
+/// where refused.
+fn x11_reads(session: &HeadlessSession, target: &str, times: usize) -> Vec<Option<Vec<u8>>> {
     std::env::set_var("XAUTHORITY", &session.x_authority);
     let (conn, screen_num) = x11rb::connect(Some(&session.x_display)).expect("connect to Xwayland");
     let root = conn.setup().roots[screen_num].root;
@@ -109,22 +111,43 @@ fn x11_read(session: &HeadlessSession, target: &str) -> Option<Vec<u8>> {
         assert!(std::time::Instant::now() < deadline, "the compositor never took the X11 clipboard");
         std::thread::sleep(Duration::from_millis(10));
     }
-    conn.convert_selection(window, clipboard, target, property, x11rb::CURRENT_TIME).unwrap();
-    conn.flush().unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        assert!(std::time::Instant::now() < deadline, "no answer to the X11 clipboard request");
-        let Some(event) = conn.poll_for_event().unwrap() else {
-            std::thread::sleep(Duration::from_millis(10));
-            continue;
-        };
-        let Event::SelectionNotify(notify) = event else { continue };
-        if notify.property == x11rb::NONE {
-            return None;
+    let read = || {
+        conn.convert_selection(window, clipboard, target, property, x11rb::CURRENT_TIME).unwrap();
+        conn.flush().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(std::time::Instant::now() < deadline, "no answer to the X11 clipboard request");
+            let Some(event) = conn.poll_for_event().unwrap() else {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            };
+            let Event::SelectionNotify(notify) = event else { continue };
+            if notify.property == x11rb::NONE {
+                return None;
+            }
+            let reply = conn.get_property(true, window, property, AtomEnum::ANY, 0, u32::MAX / 4).unwrap().reply().unwrap();
+            return Some(reply.value);
         }
-        let reply = conn.get_property(true, window, property, AtomEnum::ANY, 0, u32::MAX / 4).unwrap().reply().unwrap();
-        return Some(reply.value);
-    }
+    };
+    (0..times).map(|_| read()).collect()
+}
+
+/// A focused Wayland app copies `text`; an X11 client reads it `times`.
+fn wayland_copy_x11_reads(session: &HeadlessSession, text: &[u8], times: usize) -> Vec<Option<Vec<u8>>> {
+    let mut app = common::connect(session);
+    let (window, ()) = app.toplevel((200, 100), |_, _| {});
+    let surface = window.surface.clone();
+    app.until("the window has no focus", |s| s.keyboard.as_ref() == Some(&surface));
+    app.copy("text/plain;charset=utf-8", text);
+    // Read on another thread: the Wayland app answers on this one.
+    std::thread::scope(|scope| {
+        let reading = scope.spawn(|| x11_reads(session, "UTF8_STRING", times));
+        while !reading.is_finished() {
+            app.roundtrip();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        reading.join().unwrap()
+    })
 }
 
 #[test]
@@ -135,22 +158,19 @@ fn an_x11_client_reads_the_clipboard_without_focus() {
         eprintln!("no Xwayland; skipped");
         return;
     }
+    // No X11 window exists, let alone has focus.
+    assert_eq!(wayland_copy_x11_reads(&session, b"from wayland", 1), [Some(b"from wayland".to_vec())]);
+}
 
-    // A Wayland app has focus and copies; no X11 window exists.
-    let mut app = common::connect(&session);
-    let (window, ()) = app.toplevel((200, 100), |_, _| {});
-    let surface = window.surface.clone();
-    app.until("the window has no focus", |s| s.keyboard.as_ref() == Some(&surface));
-    app.copy("text/plain;charset=utf-8", b"from wayland");
-
-    // Read on another thread: the Wayland app answers on this one.
-    let reader = std::thread::scope(|scope| {
-        let reading = scope.spawn(|| x11_read(&session, "UTF8_STRING"));
-        while !reading.is_finished() {
-            app.roundtrip();
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        reading.join().unwrap()
-    });
-    assert_eq!(reader.as_deref(), Some(&b"from wayland"[..]));
+/// GTK 3, Qt and Java apps paste with one window over and over (#160).
+#[test]
+fn an_x11_app_pastes_more_than_once() {
+    let comp = std::path::PathBuf::from(env!("CARGO_BIN_EXE_helix-comp"));
+    let Some(session) = HeadlessSession::start(Options { comp: &comp, shell: None, size: (800, 600), settings: "", env: Vec::new() }) else { return };
+    if session.x_display.is_empty() {
+        eprintln!("no Xwayland; skipped");
+        return;
+    }
+    let text = b"again".to_vec();
+    assert_eq!(wayland_copy_x11_reads(&session, &text, 3), [Some(text.clone()), Some(text.clone()), Some(text)]);
 }
