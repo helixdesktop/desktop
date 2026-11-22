@@ -295,6 +295,12 @@ fn an_app_moves_its_window_from_its_own_title_bar() {
 /// on where things are, both ways.
 #[test]
 fn coordinates_at_an_xwayland_scale_of_two() {
+    // Older Xwayland (23.2, as on Ubuntu 24.04) doesn't scale its screen
+    // for the compositor.
+    if !xwm::xwayland_at_least(24, 1) {
+        eprintln!("Xwayland older than 24.1; skipped");
+        return;
+    }
     let comp = std::path::PathBuf::from(env!("CARGO_BIN_EXE_helix-comp"));
     let settings = "[org/gnome/mutter/wayland]\nxwayland-scaling-factor=2.0\n";
     let options = helix_test_support::headless::Options { comp: &comp, shell: None, size: (u32::from(xwm::SCREEN.0), u32::from(xwm::SCREEN.1)), settings, env: Vec::new() };

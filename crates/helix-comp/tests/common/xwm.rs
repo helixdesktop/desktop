@@ -55,6 +55,16 @@ pub fn session_with_shell(name: &str) -> Option<(HeadlessSession, Shell)> {
     Some((session, shell))
 }
 
+/// Whether the `Xwayland` on `PATH` is at least `major.minor` (from
+/// `Xwayland -version`); unknown counts as no.
+pub fn xwayland_at_least(major: u32, minor: u32) -> bool {
+    let Ok(out) = std::process::Command::new("Xwayland").arg("-version").output() else { return false };
+    let text = String::from_utf8_lossy(&out.stderr).into_owned() + &String::from_utf8_lossy(&out.stdout);
+    let Some(version) = text.split("Xwayland Version ").nth(1).and_then(|v| v.split_whitespace().next()) else { return false };
+    let mut parts = version.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+    (parts.next().unwrap_or(0), parts.next().unwrap_or(0)) >= (major, minor)
+}
+
 /// Wait until `done` holds (polling), or fail with `what`.
 pub fn until(what: &str, mut done: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(5);
