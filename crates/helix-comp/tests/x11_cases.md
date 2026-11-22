@@ -153,7 +153,7 @@ Apps are the ones the upstream reports name.
 
 | ID | Sources | Scenario | Apps | Status |
 |---|---|---|---|---|
-| X61 | S42, W67 | A large Wayland copy reaches an X11 app whole, incrementally, ending with an empty chunk; also to an InputOnly requestor window | Discord, GIMP, Element | `x11_selection::a_large_wayland_copy_reaches_x11_whole` (ignored), `x11_selection::a_large_wayland_copy_reaches_an_input_only_requestor` (ignored) |
+| X61 | S42, W67 | A large Wayland copy reaches an X11 app whole, incrementally, ending with an empty chunk; also to an InputOnly requestor window | Discord, GIMP, Element | `x11_selection::a_large_wayland_copy_reaches_x11_whole`, `x11_selection::a_large_wayland_copy_reaches_an_input_only_requestor` (fixed in #193) |
 | X62 | S43 | One answer per request, no stray refusal after | | `x11_selection::each_request_gets_one_answer`, `x11_clipboard::an_x11_app_pastes_more_than_once` |
 | X63 | S44 | A Wayland app pastes an X11 copy again and again | | `x11_selection::a_wayland_app_pastes_an_x11_copy_again_and_again` |
 | X64 | W67 | A large X11 copy pasted twice in a row | | `x11_selection::a_large_x11_copy_pastes_whole_twice` |

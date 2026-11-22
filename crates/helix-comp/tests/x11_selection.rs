@@ -234,7 +234,6 @@ fn while_serving<T: Send>(app: &mut common::Client, x11: impl FnOnce() -> T + Se
 /// X61: a large Wayland copy reaches an X11 app whole, incrementally,
 /// ending with an empty chunk (pasted images were cut or zeroed).
 #[test]
-#[ignore = "fails on Smithay's xwm: a large Wayland copy ends after its first 64 KiB chunk (an empty chunk sent before the rest is read) (#191)"]
 fn a_large_wayland_copy_reaches_x11_whole() {
     let Some(session) = xwm::session() else { return };
     let mut app = wayland_app(&session);
@@ -252,7 +251,6 @@ fn a_large_wayland_copy_reaches_x11_whole() {
 /// X61: the same with an InputOnly window asking (ICCCM: the owner
 /// listens for the requestor's property changes itself).
 #[test]
-#[ignore = "fails on Smithay's xwm: an incremental transfer to an InputOnly requestor window never starts (no PropertyChange selected on it) (#191)"]
 fn a_large_wayland_copy_reaches_an_input_only_requestor() {
     let Some(session) = xwm::session() else { return };
     let mut app = wayland_app(&session);
