@@ -98,9 +98,11 @@ accesskit_atspi_common = { path = "vendor/accesskit_atspi_common" }
 # alpha channel (GTK's rounded client-side decorations) keep it
 # (vendor/smithay, src/xwayland/xwm/mod.rs, MapRequest); X11 selections
 # reach Wayland apps in every type, not only plain text (send_selection
-# takes the type's atom by name, as upstream Smithay does); a layer surface's
-# exclusive zone counts only where the protocol says (anchored to one edge,
-# or one edge and both perpendicular ones; src/desktop/wayland/layer.rs).
+# takes the type's atom by name, as upstream Smithay does); X11 apps
+# paste from Wayland apps more than once (a finished transfer is removed,
+# upstream ae6c51ba); a layer surface's exclusive zone counts only where
+# the protocol says (anchored to one edge, or one edge and both
+# perpendicular ones; src/desktop/wayland/layer.rs).
 smithay = { path = "vendor/smithay" }
 # Also patched: page flips may be asynchronous (tearing, wp_tearing_control_v1),
 # falling back to a vsynced flip (src/backend/drm/surface/*.rs, set_async_flip);
