@@ -3,7 +3,7 @@
 //! and hiding ("parking") windows that are not on the active one.
 
 use helix_comp::workspaces::{self, Config};
-use smithay::desktop::Window;
+use super::window::Window;
 use smithay::utils::{Logical, Point};
 
 use super::wm::is_override_redirect;

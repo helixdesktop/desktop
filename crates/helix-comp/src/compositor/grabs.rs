@@ -1,7 +1,7 @@
 //! Interactive move and resize pointer grabs (started by xdg_toplevel
 //! move/resize requests). Modeled on Smithay's `smallvil` example (MIT).
 
-use smithay::desktop::Window;
+use super::window::Window;
 use smithay::input::pointer::{
     AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
     GesturePinchEndEvent, GesturePinchUpdateEvent, GestureSwipeBeginEvent, GestureSwipeEndEvent,

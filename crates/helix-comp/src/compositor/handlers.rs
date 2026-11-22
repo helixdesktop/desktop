@@ -1,11 +1,8 @@
 //! Wayland protocol handlers.
 
 use smithay::backend::renderer::utils::on_commit_buffer_handler;
-use smithay::desktop::{
-    find_popup_root_surface, get_popup_toplevel_coords, layer_map_for_output, LayerSurface,
-    PopupKeyboardGrab, PopupKind, PopupPointerGrab, PopupUngrabStrategy, Window,
-    WindowSurfaceType,
-};
+use smithay::desktop::{find_popup_root_surface, get_popup_toplevel_coords, layer_map_for_output, LayerSurface, PopupKeyboardGrab, PopupKind, PopupPointerGrab, PopupUngrabStrategy, WindowSurfaceType};
+use super::window::Window;
 use smithay::input::pointer::{CursorImageStatus, Focus};
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;

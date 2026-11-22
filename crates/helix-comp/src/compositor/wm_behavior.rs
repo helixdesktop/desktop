@@ -6,7 +6,7 @@
 use std::time::{Duration, Instant};
 
 use helix_comp::wm_settings::FocusMode;
-use smithay::desktop::Window;
+use super::window::Window;
 use smithay::input::keyboard::xkb;
 use smithay::input::pointer::{Focus, GrabStartData};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
@@ -290,7 +290,7 @@ impl Helix {
             let parent = toplevel.parent()?;
             return self.window_for_surface(&parent);
         }
-        let transient_for = window.x11_surface()?.is_transient_for()?;
+        let transient_for = window.x11_surface()?.transient_for()?;
         self.space.elements().find(|w| w.x11_surface().is_some_and(|x| x.window_id() == transient_for)).cloned()
     }
 

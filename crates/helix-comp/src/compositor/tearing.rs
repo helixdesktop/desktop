@@ -5,7 +5,8 @@
 //! keep the hint and always wait for vblank (or have none).
 
 use helix_comp::tearing_control::{current_hint, Frame, Hint, TearingCachedState, TearingControl};
-use smithay::desktop::{layer_map_for_output, Window};
+use smithay::desktop::{layer_map_for_output};
+use super::window::Window;
 use smithay::input::pointer::CursorImageStatus;
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols::wp::tearing_control::v1::server::wp_tearing_control_manager_v1::WpTearingControlManagerV1;

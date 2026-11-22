@@ -4,7 +4,7 @@
 //! window menu event.
 
 use helix_protocols::server::helix_window_list_v1::{Action, MenuState};
-use smithay::desktop::Window;
+use super::window::Window;
 use smithay::input::pointer::{Focus, GrabStartData};
 use smithay::output::Output;
 use smithay::reexports::wayland_server::Resource;

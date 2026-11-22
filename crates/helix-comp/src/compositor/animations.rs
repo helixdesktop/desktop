@@ -16,7 +16,7 @@ use smithay::backend::renderer::element::{Id, Kind as ElementKind};
 use smithay::backend::renderer::gles::GlesTexture;
 use smithay::backend::renderer::utils::RendererSurfaceStateUserData;
 use smithay::backend::renderer::ContextId;
-use smithay::desktop::Window;
+use super::window::Window;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::IsAlive;

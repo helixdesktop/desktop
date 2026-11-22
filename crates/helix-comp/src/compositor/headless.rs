@@ -21,7 +21,8 @@ use std::time::Duration;
 
 use helix_comp::display_config::{Mode as MonitorMode, Monitor, MonitorsConfig};
 use smithay::backend::renderer::utils::RendererSurfaceStateUserData;
-use smithay::desktop::{layer_map_for_output, Window};
+use smithay::desktop::{layer_map_for_output};
+use super::window::Window;
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::calloop::EventLoop;

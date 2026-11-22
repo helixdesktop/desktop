@@ -90,7 +90,7 @@ impl Helix {
             return Source::of(Kind::Shell);
         }
         let pid = client.get_credentials(&self.display_handle).map_or(0, |c| c.pid.max(0) as u32);
-        let of_client = |w: &smithay::desktop::Window| {
+        let of_client = |w: &super::window::Window| {
             w.x11_surface().is_none() && smithay::wayland::seat::WaylandFocus::wl_surface(w).and_then(|s| s.client()).is_some_and(|c| c == *client)
         };
         let focused = self.focused_window().filter(|w| of_client(w));

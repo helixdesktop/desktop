@@ -3,7 +3,7 @@
 //! monitor's left, right or top edge previews the half (or the whole work
 //! area) it would fill; releasing there tiles (or maximizes) it.
 
-use smithay::desktop::Window;
+use super::window::Window;
 use smithay::utils::{Logical, Point, Rectangle};
 
 use super::wm::{half, Takeover};

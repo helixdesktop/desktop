@@ -12,7 +12,7 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use smithay::desktop::Window;
+use super::window::Window;
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{IsAlive, SERIAL_COUNTER};
 use smithay::wayland::shell::xdg::ShellClient;

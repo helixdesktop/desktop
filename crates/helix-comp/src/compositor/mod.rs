@@ -53,6 +53,7 @@ mod headless_input;
 pub mod udev;
 pub mod winit;
 mod wm;
+pub mod window;
 mod workspaces;
 #[cfg(test)]
 mod placement_tests;
@@ -65,7 +66,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use helix_comp::Event;
-use smithay::desktop::{layer_map_for_output, PopupManager, Space, Window, WindowSurfaceType};
+use smithay::desktop::{layer_map_for_output, PopupManager, Space, WindowSurfaceType};
+use self::window::Window;
 use smithay::input::pointer::{CursorIcon, CursorImageStatus};
 use smithay::input::{Seat, SeatState};
 use smithay::reexports::calloop::generic::Generic;

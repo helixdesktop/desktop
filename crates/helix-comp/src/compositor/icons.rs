@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use helix_comp::toplevel_icon::{Icon, IconBuilder, IconCachedState, ToplevelIconHandler, ToplevelIcons};
 use helix_protocols::server::helix_window_list_v1::HelixWindowListV1;
-use smithay::desktop::Window;
+use super::window::Window;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::XdgToplevel;
 use smithay::reexports::wayland_protocols::xdg::toplevel_icon::v1::server::xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1;
 use smithay::reexports::wayland_protocols::xdg::toplevel_icon::v1::server::xdg_toplevel_icon_v1::XdgToplevelIconV1;
