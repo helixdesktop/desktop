@@ -20,6 +20,9 @@
 //!   made modal before or after it is shown, fullscreen asked for before
 //!   mapping, and helper windows left out of the window list
 //!   (`SKIP_TASKBAR`) (#167).
+//! - Splash screens, notifications and docks (`_NET_WM_WINDOW_TYPE`) get
+//!   no title bar and no focus: splash screens centered, the others where
+//!   they ask (#168).
 //! - The compositor gives its X display back when it exits: no lock is
 //!   left for the next X server to take over (#181).
 //!
@@ -154,6 +157,31 @@ impl X11 {
         self.conn.flush().unwrap();
         self.until("the window manager never managed the window", |x| x.wm_state(window) == Some(1));
         window
+    }
+
+    /// A `width`×`height` window at (`x`, `y`) of `_NET_WM_WINDOW_TYPE`
+    /// `kind`, asking for that position (`USPosition`); mapped and managed.
+    fn mapped_typed(&self, title: &str, kind: &str, (x, y): (i16, i16), (width, height): (u16, u16)) -> Window {
+        let screen = &self.conn.setup().roots[0];
+        let window = self.conn.generate_id().unwrap();
+        let aux = CreateWindowAux::new().background_pixel(screen.white_pixel).event_mask(EventMask::STRUCTURE_NOTIFY | EventMask::PROPERTY_CHANGE);
+        self.conn.create_window(0, window, self.root, x, y, width, height, 0, WindowClass::INPUT_OUTPUT, 0, &aux).unwrap();
+        self.conn.change_property8(PropMode::REPLACE, window, AtomEnum::WM_NAME, AtomEnum::STRING, title.as_bytes()).unwrap();
+        let (types, kind) = (self.atom("_NET_WM_WINDOW_TYPE"), self.atom(kind));
+        self.conn.change_property32(PropMode::REPLACE, window, types, AtomEnum::ATOM, &[kind]).unwrap();
+        let mut hints = x11rb::properties::WmSizeHints::new();
+        hints.position = Some((x11rb::properties::WmSizeHintsSpecification::UserSpecified, i32::from(x), i32::from(y)));
+        hints.set_normal_hints(&self.conn, window).unwrap();
+        self.conn.map_window(window).unwrap();
+        self.conn.flush().unwrap();
+        self.until("the window manager never managed the window", |x| x.wm_state(window) == Some(1));
+        window
+    }
+
+    /// Where the window is on the root window.
+    fn position(&self, window: Window) -> (i16, i16) {
+        let t = self.conn.translate_coordinates(window, self.root, 0, 0).unwrap().reply().unwrap();
+        (t.dst_x, t.dst_y)
     }
 
     /// Wait until `done` holds, or fail with `what`.
@@ -374,6 +402,29 @@ fn fullscreen_asked_for_before_mapping() {
     assert!(x.net_states(window).contains(&fullscreen));
 }
 
+#[test]
+fn splash_screens_notifications_and_docks() {
+    let Some(session) = session() else { return };
+    let x = X11::new(&session);
+    let app = x.mapped();
+    x.until("the app window has no focus", |x| x.active() == Some(app));
+
+    let splash = x.mapped_typed("splash", "_NET_WM_WINDOW_TYPE_SPLASH", (10, 10), (300, 150));
+    x.until("the splash screen is not centered without a frame", |x| x.position(splash) == (250, 225));
+    let notification = x.mapped_typed("toast", "_NET_WM_WINDOW_TYPE_NOTIFICATION", (480, 20), (300, 80));
+    x.until("the notification is not where it asked", |x| x.position(notification) == (480, 20));
+    // Kept on the output.
+    let dock = x.mapped_typed("dock", "_NET_WM_WINDOW_TYPE_DOCK", (0, 590), (800, 40));
+    x.until("the dock is not kept on the output", |x| x.position(dock) == (0, 560));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(x.active(), Some(app), "a splash screen, notification or dock took focus");
+
+    // A notification moves itself.
+    x.conn.configure_window(notification, &ConfigureWindowAux::new().x(480).y(120)).unwrap();
+    x.conn.flush().unwrap();
+    x.until("the notification did not move where it asked", |x| x.position(notification) == (480, 120));
+}
+
 // ---- the window list, as the shell sees it ----
 
 mod shell {
@@ -473,6 +524,7 @@ fn helper_windows_stay_out_of_the_window_list() {
     let x = X11::new(&session);
     x.mapped_with("listed", &[], None);
     x.mapped_with("helper", &["_NET_WM_STATE_SKIP_TASKBAR"], None);
+    x.mapped_typed("toast", "_NET_WM_WINDOW_TYPE_NOTIFICATION", (480, 20), (300, 80));
     let deadline = Instant::now() + Duration::from_secs(5);
     while !listed.windows.iter().any(|(_, t)| t == "listed") {
         assert!(Instant::now() < deadline, "the window never showed in the list: {:?}", listed.windows);
@@ -480,7 +532,7 @@ fn helper_windows_stay_out_of_the_window_list() {
         std::thread::sleep(Duration::from_millis(20));
     }
     queue.roundtrip(&mut listed).unwrap();
-    assert!(!listed.windows.iter().any(|(_, t)| t == "helper"), "the helper window is listed: {:?}", listed.windows);
+    assert!(!listed.windows.iter().any(|(_, t)| t == "helper" || t == "toast"), "a helper or notification window is listed: {:?}", listed.windows);
     drop(session);
     let _ = std::fs::remove_dir_all(&dir);
 }

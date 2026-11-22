@@ -117,6 +117,7 @@ accesskit_atspi_common = { path = "vendor/accesskit_atspi_common" }
 #   mapping go to the compositor (upstream 5b299688, ba0063fb); the states
 #   a client set before mapping are read (ABOVE, MODAL, SKIP_TASKBAR,
 #   SKIP_PAGER kept, fullscreen and maximized left to the compositor).
+# - The COMBO, DESKTOP, DND and DOCK window types (upstream 01f3f4bd).
 # - A stale X display lock is taken over by one X server only (a
 #   takeover guard; src/xwayland/x11_sockets.rs; upstream still races).
 # - A layer surface's exclusive zone counts only where the protocol says
