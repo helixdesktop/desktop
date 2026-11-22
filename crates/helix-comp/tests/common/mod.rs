@@ -1,6 +1,7 @@
 //! A Wayland client for headless focus tests: toplevels with plain
 //! buffers, the keyboard and pointer focus it is told about, the serial
-//! of the last key or button press it got, and activation tokens.
+//! of the last key or button press it got, activation tokens, and the
+//! clipboard selection it is offered.
 
 #![allow(dead_code)]
 
@@ -11,7 +12,7 @@ use std::time::{Duration, Instant};
 use helix_protocols::gtk_shell_client::{gtk_shell1, gtk_surface1};
 use helix_test_support::headless::HeadlessSession;
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
-use wayland_client::protocol::{wl_buffer, wl_compositor, wl_keyboard, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface};
+use wayland_client::protocol::{wl_buffer, wl_compositor, wl_data_device, wl_data_device_manager, wl_data_offer, wl_keyboard, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface};
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
 use wayland_protocols::xdg::activation::v1::client::{xdg_activation_token_v1, xdg_activation_v1};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
@@ -29,6 +30,10 @@ pub struct State {
     pub press: Option<u32>,
     /// Whether the last toplevel configure said maximized.
     pub maximized: bool,
+    /// The clipboard selection offered (while focused) and its types.
+    pub selection: Option<(wl_data_offer::WlDataOffer, Vec<String>)>,
+    /// Types of offers announced but not yet made the selection.
+    offers: Vec<(wl_data_offer::WlDataOffer, Vec<String>)>,
 }
 
 macro_rules! quiet {
@@ -38,7 +43,7 @@ macro_rules! quiet {
         }
     )*};
 }
-quiet!(wl_compositor::WlCompositor, wl_surface::WlSurface, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_buffer::WlBuffer, wl_seat::WlSeat, xdg_activation_v1::XdgActivationV1, gtk_shell1::GtkShell1, gtk_surface1::GtkSurface1);
+quiet!(wl_data_device_manager::WlDataDeviceManager, wl_compositor::WlCompositor, wl_surface::WlSurface, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_buffer::WlBuffer, wl_seat::WlSeat, xdg_activation_v1::XdgActivationV1, gtk_shell1::GtkShell1, gtk_surface1::GtkSurface1);
 
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
     fn event(_: &mut Self, _: &wl_registry::WlRegistry, _: wl_registry::Event, _: &GlobalListContents, _: &Connection, _: &QueueHandle<Self>) {}
@@ -93,6 +98,35 @@ impl Dispatch<xdg_activation_token_v1::XdgActivationTokenV1, ()> for State {
     }
 }
 
+impl Dispatch<wl_data_device::WlDataDevice, ()> for State {
+    fn event(state: &mut Self, _: &wl_data_device::WlDataDevice, event: wl_data_device::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+        match event {
+            wl_data_device::Event::DataOffer { id } => state.offers.push((id, Vec::new())),
+            wl_data_device::Event::Selection { id } => {
+                state.selection = id.map(|id| {
+                    let types = state.offers.iter().find(|(o, _)| o == &id).map(|(_, t)| t.clone()).unwrap_or_default();
+                    (id, types)
+                });
+                state.offers.clear();
+            }
+            _ => {}
+        }
+    }
+
+    wayland_client::event_created_child!(State, wl_data_device::WlDataDevice, [
+        wl_data_device::EVT_DATA_OFFER_OPCODE => (wl_data_offer::WlDataOffer, ()),
+    ]);
+}
+impl Dispatch<wl_data_offer::WlDataOffer, ()> for State {
+    fn event(state: &mut Self, offer: &wl_data_offer::WlDataOffer, event: wl_data_offer::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+        if let wl_data_offer::Event::Offer { mime_type } = event {
+            if let Some((_, types)) = state.offers.iter_mut().find(|(o, _)| o == offer) {
+                types.push(mime_type);
+            }
+        }
+    }
+}
+
 fn filled(shm: &wl_shm::WlShm, qh: &QueueHandle<State>, (w, h): (i32, i32)) -> wl_buffer::WlBuffer {
     let bytes: Vec<u8> = std::iter::repeat_n(0xFF80_8080u32.to_le_bytes(), (w * h) as usize).flatten().collect();
     // SAFETY: memfd_create returns a new fd we own (or -1).
@@ -117,6 +151,7 @@ pub struct Client {
     activation: xdg_activation_v1::XdgActivationV1,
     pub gtk_shell: gtk_shell1::GtkShell1,
     pub seat: wl_seat::WlSeat,
+    pub data_device: wl_data_device::WlDataDevice,
 }
 
 pub struct Toplevel {
@@ -201,6 +236,26 @@ impl Client {
         self.roundtrip();
         self.state.keyboard.clone()
     }
+
+    /// The clipboard selection's data as `mime`, read to the end.
+    pub fn paste(&mut self, mime: &str) -> Vec<u8> {
+        let (offer, _) = self.state.selection.clone().expect("no clipboard selection offered");
+        let (read, write) = std::io::pipe().unwrap();
+        offer.receive(mime.to_owned(), write.as_fd());
+        drop(write);
+        self.roundtrip();
+        let reader = std::thread::spawn(move || {
+            let mut data = Vec::new();
+            std::io::Read::read_to_end(&mut { read }, &mut data).map(|_| data)
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !reader.is_finished() {
+            assert!(Instant::now() < deadline, "the clipboard data never ended");
+            self.roundtrip();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        reader.join().unwrap().unwrap()
+    }
 }
 
 
@@ -212,6 +267,8 @@ pub fn connect(session: &HeadlessSession) -> Client {
     let seat: wl_seat::WlSeat = globals.bind(&qh, 5..=9, ()).unwrap();
     seat.get_keyboard(&qh, ());
     seat.get_pointer(&qh, ());
+    let manager: wl_data_device_manager::WlDataDeviceManager = globals.bind(&qh, 3..=3, ()).unwrap();
+    let data_device = manager.get_data_device(&seat, &qh, ());
     Client {
         compositor: globals.bind(&qh, 4..=6, ()).unwrap(),
         shm: globals.bind(&qh, 1..=1, ()).unwrap(),
@@ -219,6 +276,7 @@ pub fn connect(session: &HeadlessSession) -> Client {
         activation: globals.bind(&qh, 1..=1, ()).unwrap(),
         gtk_shell: globals.bind(&qh, 1..=7, ()).expect("helix-comp offers gtk_shell1"),
         seat,
+        data_device,
         queue,
         qh,
         state: State::default(),
