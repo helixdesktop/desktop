@@ -318,3 +318,13 @@ pub fn point_over(session: &mut HeadlessSession, c: &mut Client, surface: &wl_su
     });
     over.expect("the pointer is never over the surface")
 }
+
+/// A connection to `session`'s Xwayland. x11rb reads its authority from
+/// `XAUTHORITY`, which is the whole process's: tests running at once
+/// (each with its own session) take turns.
+pub fn x11(session: &HeadlessSession) -> (x11rb::rust_connection::RustConnection, usize) {
+    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _turn = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("XAUTHORITY", &session.x_authority);
+    x11rb::connect(Some(&session.x_display)).expect("connect to Xwayland")
+}
