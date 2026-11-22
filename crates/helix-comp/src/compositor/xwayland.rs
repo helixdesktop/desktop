@@ -366,13 +366,13 @@ impl XwmHandler for Helix {
 
     // ----- Clipboard and primary selection between X11 and Wayland -------
 
-    fn allow_selection_access(&mut self, xwm: XwmId, _selection: SelectionTarget) -> bool {
-        // Only while an X11 window of this Xwayland has keyboard focus.
-        let focus = self.seat.get_keyboard().and_then(|k| k.current_focus());
-        focus
-            .and_then(|focus| self.window_for_focus(&focus))
-            .and_then(|w| w.x11_surface().and_then(|x| x.xwm_id()))
-            .is_some_and(|id| id == xwm)
+    fn allow_selection_access(&mut self, _xwm: XwmId, _selection: SelectionTarget) -> bool {
+        // Any X11 client, whatever has focus, as in GNOME (Mutter serves
+        // every request): X11 clients can already read one another's
+        // input and windows, so a focus rule protected little and broke
+        // xclip/xsel run from Wayland terminals and X11 clipboard
+        // managers (#172).
+        true
     }
 
     fn send_selection(&mut self, _xwm: XwmId, selection: SelectionTarget, mime_type: String, fd: OwnedFd) {
