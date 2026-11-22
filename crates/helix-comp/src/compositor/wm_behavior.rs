@@ -131,6 +131,7 @@ impl Helix {
         self.cursors.set_theme(&settings.cursor_theme, settings.cursor_size);
         let luminance_changed = settings.output_luminance != self.wm_settings.output_luminance;
         self.wm_settings = settings;
+        self.set_x11_root_cursor();
         if luminance_changed {
             self.apply_luminance();
         }
