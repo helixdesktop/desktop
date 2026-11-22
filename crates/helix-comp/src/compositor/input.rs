@@ -25,8 +25,8 @@ impl Helix {
         let serial = SERIAL_COUNTER.next_serial();
         let pointer = self.seat.get_pointer().unwrap();
         let frame = if pointer.is_grabbed() { None } else { self.frame_under(pos) };
-        let under = if self.frame_hover(frame.as_ref()) { None } else { self.surface_under(pos) };
-        let under_client = under.as_ref().and_then(|(s, _)| smithay::reexports::wayland_server::Resource::client(s)).map(|c| c.id());
+        let under = if self.frame_hover(frame.as_ref()) { None } else { self.pointer_focus_under(pos) };
+        let under_client = under.as_ref().and_then(|(s, _)| s.surface().and_then(|s| smithay::reexports::wayland_server::Resource::client(&*s))).map(|c| c.id());
         pointer.motion(self, under, &MotionEvent { location: pos, serial, time: smithay::backend::input::InputTime::from_millis(time) });
         pointer.frame(self);
         self.locate_pointer_for_a11y(pos, under_client);
@@ -52,12 +52,12 @@ impl Helix {
         let pos = pointer.current_location();
         // Over a window's title bar the pointer is on no surface (as in
         // `pointer_to`).
-        let under = if self.frame_under(pos).is_some() { None } else { self.surface_under(pos) };
+        let under = if self.frame_under(pos).is_some() { None } else { self.pointer_focus_under(pos) };
         let current = pointer.current_focus();
         if under.as_ref().map(|(s, _)| s) == current.as_ref() {
             return false;
         }
-        tracing::trace!(from = ?current.as_ref().map(|s| s.id()), to = ?under.as_ref().map(|(s, _)| s.id()), "pointer focus synced");
+        tracing::trace!(from = ?current.as_ref().and_then(|s| s.surface().map(|s| s.id())), to = ?under.as_ref().and_then(|(s, _)| s.surface().map(|s| s.id())), "pointer focus synced");
         let time = self.now_ms();
         pointer.motion(self, under, &MotionEvent { location: pos, serial: SERIAL_COUNTER.next_serial(), time: smithay::backend::input::InputTime::from_millis(time) });
         pointer.frame(self);
@@ -134,7 +134,7 @@ impl Helix {
     /// Bytes the shell under the pointer has not read (None for others).
     fn pointer_focus_unread(&self) -> Option<usize> {
         use smithay::reexports::wayland_server::Resource;
-        let client = self.seat.get_pointer()?.current_focus()?.client()?;
+        let client = self.seat.get_pointer()?.current_focus()?.into_surface()?.client()?;
         client.get_data::<super::ClientState>().filter(|d| d.privileged)?.unread()
     }
 
@@ -503,7 +503,7 @@ impl Helix {
                 }
                 pointer.button(self, &ButtonEvent { button, state, serial, time: smithay::backend::input::InputTime::from_millis(time) });
                 pointer.frame(self);
-                self.note_press(serial, pointer.current_focus().as_ref());
+                self.note_press(serial, pointer.current_focus().and_then(|f| f.into_surface()).as_ref());
                 return;
             }
             if self.over_panel(pos) {
@@ -528,7 +528,7 @@ impl Helix {
         pointer.button(self, &ButtonEvent { button, state, serial, time: smithay::backend::input::InputTime::from_millis(time) });
         pointer.frame(self);
         if state == ButtonState::Pressed {
-            self.note_press(serial, pointer.current_focus().as_ref());
+            self.note_press(serial, pointer.current_focus().and_then(|f| f.into_surface()).as_ref());
         }
     }
 
@@ -581,10 +581,10 @@ impl Helix {
                 self.focus_window(&window);
             }
         }
-        let under = self.surface_under(pos);
+        let under = self.pointer_focus_under(pos);
         let touch = self.seat.get_touch().unwrap();
         let down = smithay::input::touch::DownEvent { slot, location: pos, serial: SERIAL_COUNTER.next_serial(), time: smithay::backend::input::InputTime::from_millis(time) };
-        let pressed = under.as_ref().map(|(s, _)| s.clone());
+        let pressed = under.as_ref().and_then(|(s, _)| s.clone().into_surface());
         touch.down(self, under, &down);
         self.note_press(down.serial, pressed.as_ref());
     }
@@ -594,7 +594,7 @@ impl Helix {
         if self.touch_gesture(verdict) {
             return;
         }
-        let under = self.surface_under(pos);
+        let under = self.pointer_focus_under(pos);
         let touch = self.seat.get_touch().unwrap();
         touch.motion(self, under, &smithay::input::touch::MotionEvent { slot, location: pos, time: smithay::backend::input::InputTime::from_millis(time) });
     }

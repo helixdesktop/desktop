@@ -9,7 +9,6 @@ use smithay::input::pointer::{
     RelativeMotionEvent,
 };
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
-use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::xdg::SurfaceCachedState;
@@ -25,7 +24,7 @@ macro_rules! forward_passthrough {
             &mut self,
             data: &mut Helix,
             handle: &mut PointerInnerHandle<'_, Helix>,
-            focus: Option<(WlSurface, Point<f64, Logical>)>,
+            focus: Option<(super::focus::PointerFocusTarget, Point<f64, Logical>)>,
             event: &RelativeMotionEvent,
         ) {
             handle.relative_motion(data, focus, event);
@@ -84,7 +83,7 @@ impl PointerGrab<Helix> for MoveGrab {
         &mut self,
         data: &mut Helix,
         handle: &mut PointerInnerHandle<'_, Helix>,
-        _focus: Option<(WlSurface, Point<f64, Logical>)>,
+        _focus: Option<(super::focus::PointerFocusTarget, Point<f64, Logical>)>,
         event: &MotionEvent,
     ) {
         handle.motion(data, None, event);
@@ -223,7 +222,7 @@ impl PointerGrab<Helix> for ResizeGrab {
         &mut self,
         data: &mut Helix,
         handle: &mut PointerInnerHandle<'_, Helix>,
-        _focus: Option<(WlSurface, Point<f64, Logical>)>,
+        _focus: Option<(super::focus::PointerFocusTarget, Point<f64, Logical>)>,
         event: &MotionEvent,
     ) {
         handle.motion(data, None, event);
