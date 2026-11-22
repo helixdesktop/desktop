@@ -93,39 +93,9 @@ opt-level = 2
 [patch.crates-io]
 accesskit_unix = { path = "vendor/accesskit_unix" }
 accesskit_atspi_common = { path = "vendor/accesskit_atspi_common" }
-# Smithay 0.7.0 (MIT), patched (vendor/smithay; changes marked "Helix:"):
-# - Xwayland window frames take the window's own depth and visual, so X11
-#   windows with an alpha channel (GTK's rounded client-side decorations)
-#   keep it (src/xwayland/xwm/mod.rs, MapRequest).
-# - X11 selections reach Wayland apps in every type, not only plain text
-#   (send_selection takes the type's atom by name, as upstream does).
-# - X11 apps paste from Wayland apps more than once (a finished transfer
-#   is removed; upstream ae6c51ba).
-# - Large X11 copies (INCR) arrive whole: without the 4-byte size hint in
-#   front (upstream d5437114), and with no chunk deleted unread
-#   (write_selection_callback; upstream still has this).
-# - A hidden X11 window's WM_STATE is Withdrawn (UnmapNotify; upstream
-#   eea66710).
-# - An X11 window shown and hidden at once stays hidden instead of
-#   looping: synthetic UnmapNotifys (ICCCM 4.1.4 withdraw) are ignored
-#   once the window left its frame, and a window is unmapped before it is
-#   reparented to the root (upstream 3a08ff96, e592965a).
-# - Keys reach Xwayland for X11 windows that take no input (WM_HINTS
-#   input false), for the window with the X focus (src/xwayland/xwm/
-#   surface.rs; upstream 211c19d7).
-# - EWMH window states: ABOVE (always on top) and MODAL asked for after
-#   mapping go to the compositor (upstream 5b299688, ba0063fb); the states
-#   a client set before mapping are read (ABOVE, MODAL, SKIP_TASKBAR,
-#   SKIP_PAGER kept, fullscreen and maximized left to the compositor).
-# - The COMBO, DESKTOP, DND and DOCK window types (upstream 01f3f4bd).
-# - A stale X display lock is taken over by one X server only (a
-#   takeover guard; src/xwayland/x11_sockets.rs; upstream still races).
-# - A layer surface's exclusive zone counts only where the protocol says
-#   (anchored to one edge, or one edge and both perpendicular ones;
-#   src/desktop/wayland/layer.rs).
-# - Page flips may be asynchronous (tearing, wp_tearing_control_v1),
-#   falling back to a vsynced flip (src/backend/drm/surface/*.rs,
-#   set_async_flip).
-# - A selection says which client offers it (src/wayland/selection/
-#   source.rs, SelectionSource::client), for Agent Access's clipboard rules.
-smithay = { path = "vendor/smithay" }
+# Smithay (MIT), from Helix's fork: upstream plus Helix's changes, one
+# commit each ("Helix: ..."), listed at
+# https://github.com/helixdesktop/smithay/commits/helix-0.7.0. Moving the
+# pin: rebase those commits onto a newer upstream commit, push, and change
+# rev here (helixdesktop/desktop#187).
+smithay = { git = "https://github.com/helixdesktop/smithay", rev = "b47fc6bf39c454fa3592c34092cbe3e785ac5efe" }

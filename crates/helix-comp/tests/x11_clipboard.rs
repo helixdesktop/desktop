@@ -2,7 +2,7 @@
 //! not only plain text: an image copied in Krita (X11 through Xwayland)
 //! pasted into a GTK 4 app. Smithay 0.7.0 looked a type's atom up in a
 //! property that was never there, so every type but text failed
-//! (vendor/smithay, `send_selection`); and large ones, sent
+//! (Smithay's `send_selection`); and large ones, sent
 //! incrementally, came with 4 bytes of size hint in front (#161).
 //!
 //! And an X11 client reads the clipboard whatever has focus, as in GNOME:
