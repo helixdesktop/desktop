@@ -252,6 +252,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // After whatever ran (clients' requests, input, timers): the pointer
     // goes onto what is under it now if that changed without it moving.
     let result = event_loop.run(None, &mut state, |state| {
+        // X events read while waiting for a reply are handled too.
+        state.dispatch_helix_xwm();
         if state.sync_pointer_focus() {
             let _ = state.display_handle.flush_clients();
         }

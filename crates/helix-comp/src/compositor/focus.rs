@@ -33,6 +33,8 @@ use super::Helix;
 pub enum KeyboardFocusTarget {
     Surface(WlSurface),
     X11(X11Surface),
+    /// A window of Helix's own X11 window manager (#191).
+    XHelix(super::xwm::XWin),
 }
 
 impl IsAlive for KeyboardFocusTarget {
@@ -40,6 +42,7 @@ impl IsAlive for KeyboardFocusTarget {
         match self {
             Self::Surface(s) => s.alive(),
             Self::X11(x) => x.alive(),
+            Self::XHelix(x) => x.alive(),
         }
     }
 }
@@ -49,6 +52,7 @@ impl WaylandFocus for KeyboardFocusTarget {
         match self {
             Self::Surface(s) => Some(Cow::Borrowed(s)),
             Self::X11(x) => x.wl_surface().map(Cow::Owned),
+            Self::XHelix(x) => x.wl_surface().map(Cow::Owned),
         }
     }
 }
@@ -67,6 +71,7 @@ impl From<KeyboardFocusTarget> for WlSurface {
         match focus {
             KeyboardFocusTarget::Surface(s) => s,
             KeyboardFocusTarget::X11(x) => x.wl_surface().expect("an X11 window in a popup grab has a surface"),
+            KeyboardFocusTarget::XHelix(x) => x.wl_surface().expect("an X11 window in a popup grab has a surface"),
         }
     }
 }
@@ -82,6 +87,7 @@ impl KeyboardTarget<Helix> for KeyboardFocusTarget {
         match self {
             Self::Surface(s) => KeyboardTarget::enter(s, seat, data, keys, serial),
             Self::X11(x) => KeyboardTarget::enter(x, seat, data, keys, serial),
+            Self::XHelix(x) => KeyboardTarget::enter(x, seat, data, keys, serial),
         }
     }
 
@@ -89,6 +95,7 @@ impl KeyboardTarget<Helix> for KeyboardFocusTarget {
         match self {
             Self::Surface(s) => KeyboardTarget::leave(s, seat, data, serial),
             Self::X11(x) => KeyboardTarget::leave(x, seat, data, serial),
+            Self::XHelix(x) => KeyboardTarget::leave(x, seat, data, serial),
         }
     }
 
@@ -96,6 +103,7 @@ impl KeyboardTarget<Helix> for KeyboardFocusTarget {
         match self {
             Self::Surface(s) => KeyboardTarget::key(s, seat, data, key, state, serial, time),
             Self::X11(x) => KeyboardTarget::key(x, seat, data, key, state, serial, time),
+            Self::XHelix(x) => KeyboardTarget::key(x, seat, data, key, state, serial, time),
         }
     }
 
@@ -103,6 +111,7 @@ impl KeyboardTarget<Helix> for KeyboardFocusTarget {
         match self {
             Self::Surface(s) => KeyboardTarget::modifiers(s, seat, data, modifiers, serial),
             Self::X11(x) => KeyboardTarget::modifiers(x, seat, data, modifiers, serial),
+            Self::XHelix(x) => KeyboardTarget::modifiers(x, seat, data, modifiers, serial),
         }
     }
 }
@@ -110,7 +119,8 @@ impl KeyboardTarget<Helix> for KeyboardFocusTarget {
 /// What gets keyboard focus for `window`: its X11 window, or its surface.
 pub fn focus_target(window: &super::window::Window) -> Option<KeyboardFocusTarget> {
     match window.x11_surface() {
-        Some(x11) => Some(KeyboardFocusTarget::X11(x11.smithay().clone())),
+        Some(super::window::X11Window::Smithay(x11)) => Some(KeyboardFocusTarget::X11(x11.clone())),
+        Some(super::window::X11Window::Helix(x11)) => Some(KeyboardFocusTarget::XHelix(x11.clone())),
         None => window.wl_surface().map(|s| KeyboardFocusTarget::Surface(s.into_owned())),
     }
 }
@@ -130,7 +140,14 @@ impl Helix {
                 .elements()
                 .chain(self.minimized.iter())
                 .chain(self.workspaces.parked())
-                .find(|w| w.x11_surface().is_some_and(|x| x.smithay() == x11))
+                .find(|w| w.x11_surface().is_some_and(|x| x.smithay() == Some(x11)))
+                .cloned(),
+            KeyboardFocusTarget::XHelix(x11) => self
+                .space
+                .elements()
+                .chain(self.minimized.iter())
+                .chain(self.workspaces.parked())
+                .find(|w| w.x11_surface().is_some_and(|x| x.helix() == Some(x11)))
                 .cloned(),
             KeyboardFocusTarget::Surface(surface) => self.window_for_surface(surface),
         }
@@ -153,6 +170,9 @@ impl Helix {
 pub enum PointerFocusTarget {
     Surface(WlSurface),
     X11(X11Surface),
+    /// A window of Helix's own X11 window manager: events go to its
+    /// surface (no drag and drop yet, #191 step 5).
+    XHelix(super::xwm::XWin),
 }
 
 impl PointerFocusTarget {
@@ -166,6 +186,7 @@ impl PointerFocusTarget {
         match self {
             Self::Surface(s) => Some(s),
             Self::X11(x) => x.wl_surface(),
+            Self::XHelix(x) => x.wl_surface(),
         }
     }
 }
@@ -175,6 +196,7 @@ impl IsAlive for PointerFocusTarget {
         match self {
             Self::Surface(s) => s.alive(),
             Self::X11(x) => x.alive(),
+            Self::XHelix(x) => x.alive(),
         }
     }
 }
@@ -184,6 +206,7 @@ impl WaylandFocus for PointerFocusTarget {
         match self {
             Self::Surface(s) => Some(Cow::Borrowed(s)),
             Self::X11(x) => x.wl_surface().map(Cow::Owned),
+            Self::XHelix(x) => x.wl_surface().map(Cow::Owned),
         }
     }
 }
@@ -206,6 +229,7 @@ impl From<PointerFocusTarget> for KeyboardFocusTarget {
         match focus {
             PointerFocusTarget::Surface(s) => Self::Surface(s),
             PointerFocusTarget::X11(x) => Self::X11(x),
+            PointerFocusTarget::XHelix(x) => Self::XHelix(x),
         }
     }
 }
@@ -216,6 +240,7 @@ impl From<KeyboardFocusTarget> for PointerFocusTarget {
         match focus {
             KeyboardFocusTarget::Surface(s) => Self::Surface(s),
             KeyboardFocusTarget::X11(x) => Self::X11(x),
+            KeyboardFocusTarget::XHelix(x) => Self::XHelix(x),
         }
     }
 }
@@ -225,6 +250,13 @@ macro_rules! each {
         match $self {
             PointerFocusTarget::Surface($t) => $e,
             PointerFocusTarget::X11($t) => $e,
+            PointerFocusTarget::XHelix(x) => match x.wl_surface() {
+                Some(surface) => {
+                    let $t = &surface;
+                    $e
+                }
+                None => Default::default(),
+            },
         }
     };
 }
@@ -341,6 +373,7 @@ impl DndFocus<Helix> for PointerFocusTarget {
         match self {
             Self::Surface(s) => DndFocus::enter(s, data, dh, source, seat, location, serial).map(OfferTo::Wayland),
             Self::X11(x) => DndFocus::enter(x, data, dh, source, seat, location, serial).map(OfferTo::X11),
+            Self::XHelix(_) => None,
         }
     }
 
@@ -384,9 +417,13 @@ impl Helix {
             .elements()
             .filter_map(|w| w.x11_surface())
             .find(|x| x.wl_surface().as_ref() == Some(&surface))
-            .map(|x| x.smithay().clone());
+            .cloned();
         match x11 {
-            Some(x) => PointerFocusTarget::X11(x),
+            Some(super::window::X11Window::Smithay(x)) => PointerFocusTarget::X11(x),
+            // By its surface: a window shown again (GTK reuses one for
+            // each popup menu) has a new one, and the pointer enters it
+            // anew. (Drag and drop to Helix's windows comes in #191 step 5.)
+            Some(super::window::X11Window::Helix(_)) => PointerFocusTarget::Surface(surface),
             None => PointerFocusTarget::Surface(surface),
         }
     }

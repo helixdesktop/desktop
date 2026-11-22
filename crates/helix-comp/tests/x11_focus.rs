@@ -137,6 +137,9 @@ fn focus_on_a_child_keeps_the_window_active() {
 /// window is active (Wine locks the mouse on the active window).
 #[test]
 fn focus_on_nothing_clears_the_active_window() {
+    if common::not_yet("#191 step 3, next part: focus events and input models") {
+        return;
+    }
     let Some(session) = xwm::session() else { return };
     let x = X::new(&session);
     let window = x.mapped();
@@ -156,6 +159,9 @@ fn focus_on_nothing_clears_the_active_window() {
 /// activation (VSCode's keys went to the wrong window).
 #[test]
 fn the_pointers_window_is_not_activated() {
+    if common::not_yet("#191 step 3, next part: focus events and input models") {
+        return;
+    }
     let Some(mut session) = xwm::session() else { return };
     let x = X::new(&session);
     let window = x.mapped();
@@ -252,6 +258,9 @@ fn the_focused_window_destroyed_at_once() {
 /// popups): it stays there.
 #[test]
 fn an_app_focusing_its_own_window_keeps_it() {
+    if common::not_yet("#191 step 3, next part: focus events and input models") {
+        return;
+    }
     let Some(session) = xwm::session() else { return };
     let x = X::new(&session);
     let a = x.mapped();
@@ -347,8 +356,10 @@ fn focus_changes_reach_x11_apps_at_once() {
 /// launcher): the pointer outside it goes through to the window below,
 /// inside it reaches the X11 window.
 #[test]
-#[ignore = "fails today: X11 input shapes aren't honored; the pointer outside the shape still goes to the X11 window (#191)"]
 fn the_pointer_outside_an_input_shape_goes_through() {
+    if common::known_failure(&[common::Xwm::Smithay], "X11 input shapes aren't honored; the pointer outside the shape still goes to the X11 window (#191)") {
+        return;
+    }
     use x11rb::protocol::shape::{ConnectionExt as _, SK, SO};
     use x11rb::protocol::xproto::{ClipOrdering, Rectangle};
     let Some(mut session) = xwm::session() else { return };

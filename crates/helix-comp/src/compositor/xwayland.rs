@@ -94,7 +94,7 @@ impl Helix {
     /// A splash screen (centered on the output under the pointer) or a
     /// window placing itself (where it asked, kept on its output): shown
     /// without a frame, and focus stays where it is.
-    fn map_unfocused_x11(&mut self, window: &Window, surface: &X11Surface, kind: X11Kind) {
+    fn map_unfocused_x11(&mut self, window: &Window, surface: &X11Window, kind: X11Kind) {
         let size = surface.last_configure().size;
         let asked = surface.last_configure().loc;
         let output = match kind {
@@ -194,36 +194,24 @@ impl Helix {
                     if let Some(dir) = wrapper_dir() {
                         let _ = std::fs::remove_dir_all(dir);
                     }
-                    match X11Wm::start_wm(state.loop_handle.clone(), &state.display_handle.clone(), x11_socket, client.clone()) {
-                        Ok(wm) => {
-                            state.xwm = Some(wm);
+                    let started = if super::xwm::helix_selected() {
+                        state.start_helix_xwm(x11_socket, client.clone())
+                    } else {
+                        match X11Wm::start_wm(state.loop_handle.clone(), &state.display_handle.clone(), x11_socket, client.clone()) {
+                            Ok(wm) => {
+                                state.xwm = Some(wm);
+                                Ok(())
+                            }
+                            Err(err) => Err(err.to_string()),
+                        }
+                    };
+                    match started {
+                        Ok(()) => {
                             state.xdisplay = Some(display_number);
                             state.xwayland_client = Some(client.clone());
                             state.start_x11_settings(display_number);
                             state.set_x11_root_cursor();
-                            let (answers, received) = smithay::reexports::calloop::channel::channel::<super::x11ping::X11Note>();
-                            match super::x11ping::X11Ping::start(display_number, answers) {
-                                Ok(ping) => {
-                                    state.x11ping = Some(ping);
-                                    let _ = state.loop_handle.insert_source(received, |event, _, state| {
-                                        match event {
-                                            smithay::reexports::calloop::channel::Event::Msg(super::x11ping::X11Note::Pong(id)) => state.x11_pong(id),
-                                            smithay::reexports::calloop::channel::Event::Msg(super::x11ping::X11Note::IconChanged(id)) => state.x11_icon_changed(id),
-                                            smithay::reexports::calloop::channel::Event::Msg(super::x11ping::X11Note::Bell(id)) => state.x11_bell(id),
-                                            smithay::reexports::calloop::channel::Event::Msg(super::x11ping::X11Note::Attention(id, action)) => state.x11_demands_attention(id, action),
-                                            smithay::reexports::calloop::channel::Event::Msg(super::x11ping::X11Note::MayGrab(id, on)) => {
-                                                tracing::debug!(id, on, "an X11 window asks to be allowed keyboard grabs");
-                                                state.protocols.x11_may_grab.retain(|w| *w != id);
-                                                if on {
-                                                    state.protocols.x11_may_grab.push(id);
-                                                }
-                                            }
-                                            _ => {}
-                                        }
-                                    });
-                                }
-                                Err(err) => tracing::warn!(%err, "cannot check X11 apps are responding"),
-                            }
+                            state.start_x11_ping(display_number);
                             tracing::info!(display = display_number, "Xwayland ready");
                             Some(display_number)
                         }
@@ -248,18 +236,71 @@ impl Helix {
         }
     }
 
+    /// Helix's own window manager (#191) on the connection Xwayland gave
+    /// its window manager, and its X events in the event loop.
+    fn start_helix_xwm(&mut self, socket: std::os::unix::net::UnixStream, client: smithay::reexports::wayland_server::Client) -> Result<(), String> {
+        use smithay::reexports::calloop::generic::Generic;
+        use smithay::reexports::calloop::{Interest, Mode, PostAction};
+        let (xwm, fd) = super::xwm::Xwm::start(socket, client).map_err(|e| e.to_string())?;
+        let source = Generic::new(fd, Interest::READ, Mode::Level);
+        let token = self
+            .loop_handle
+            .insert_source(source, |_, _, state| {
+                state.dispatch_helix_xwm();
+                Ok(PostAction::Continue)
+            })
+            .map_err(|e| e.to_string())?;
+        self.hxwm = Some(xwm);
+        self.hxwm_source = Some(token);
+        self.dispatch_helix_xwm();
+        Ok(())
+    }
+
+    /// Whether X11 apps answer, ring the bell and ask for attention, on a
+    /// connection of its own.
+    fn start_x11_ping(&mut self, display_number: u32) {
+        let (answers, received) = smithay::reexports::calloop::channel::channel::<super::x11ping::X11Note>();
+        match super::x11ping::X11Ping::start(display_number, answers) {
+            Ok(ping) => {
+                self.x11ping = Some(ping);
+                let _ = self.loop_handle.insert_source(received, |event, _, state| {
+                    use smithay::reexports::calloop::channel::Event::Msg;
+                    match event {
+                        Msg(super::x11ping::X11Note::Pong(id)) => state.x11_pong(id),
+                        Msg(super::x11ping::X11Note::IconChanged(id)) => state.x11_icon_changed(id),
+                        Msg(super::x11ping::X11Note::Bell(id)) => state.x11_bell(id),
+                        Msg(super::x11ping::X11Note::Attention(id, action)) => state.x11_demands_attention(id, action),
+                        Msg(super::x11ping::X11Note::MayGrab(id, on)) => {
+                            tracing::debug!(id, on, "an X11 window asks to be allowed keyboard grabs");
+                            state.protocols.x11_may_grab.retain(|w| *w != id);
+                            if on {
+                                state.protocols.x11_may_grab.push(id);
+                            }
+                        }
+                        _ => {}
+                    }
+                });
+            }
+            Err(err) => tracing::warn!(%err, "cannot check X11 apps are responding"),
+        }
+    }
+
     /// Xwayland went away (it crashed or was killed): forget its windows
     /// and everything tied to it, and start it again on the same display
     /// (#169), at most [`XWAYLAND_RESTARTS`] times a minute.
-    fn xwayland_gone(&mut self, xwm: XwmId) {
+    fn xwayland_gone(&mut self) {
         tracing::error!("Xwayland is gone; X11 apps have closed");
-        let windows: Vec<Window> = self.space.elements().chain(self.minimized.iter()).chain(self.workspaces.parked()).filter(|w| w.x11_surface().is_some_and(|x| x.smithay().xwm_id() == Some(xwm))).cloned().collect();
+        let windows: Vec<Window> = self.space.elements().chain(self.minimized.iter()).chain(self.workspaces.parked()).filter(|w| w.x11_surface().is_some()).cloned().collect();
         for window in &windows {
             self.forget_window(window);
         }
-        self.cleared_selection(xwm, SelectionTarget::Clipboard);
-        self.cleared_selection(xwm, SelectionTarget::Primary);
+        self.x11_selection_cleared(SelectionTarget::Clipboard);
+        self.x11_selection_cleared(SelectionTarget::Primary);
         self.xwm = None;
+        self.hxwm = None;
+        if let Some(token) = self.hxwm_source.take() {
+            self.loop_handle.remove(token);
+        }
         self.xwayland_client = None;
         self.x11ping = None;
         self.xsettings = None;
@@ -291,12 +332,348 @@ impl Helix {
         });
     }
 
-    fn x11_window(&self, surface: &X11Surface) -> Option<Window> {
+    fn x11_window(&self, x11: &X11Window) -> Option<Window> {
         self.space
             .elements()
             .chain(self.minimized.iter())
-            .find(|w| w.x11_surface().is_some_and(|x| x.smithay() == surface))
+            .find(|w| w.x11_surface() == Some(x11))
             .cloned()
+    }
+
+    fn smithay_window(&self, surface: &X11Surface) -> Option<Window> {
+        self.x11_window(&X11Window::Smithay(surface.clone()))
+    }
+
+    // ----- What either X11 window manager asks of Helix ------------------
+
+    /// A client wants its window shown: placed and focused as an app
+    /// window, or shown where it asked (splash screens, notifications).
+    fn x11_map_request(&mut self, x11: X11Window) {
+        let mapped = match &x11 {
+            X11Window::Smithay(s) => s.set_mapped(true).map_err(|e| e.to_string()),
+            X11Window::Helix(w) => match self.hxwm.as_mut() {
+                Some(xwm) => xwm.set_mapped(w, true).map_err(|e| e.to_string()),
+                None => Err("no window manager".into()),
+            },
+        };
+        if let Err(err) = mapped {
+            tracing::warn!(%err, "cannot map X11 window");
+            return;
+        }
+        let window = Window::new_x11_window(x11.clone());
+        x11.set_frame_extents(super::frames::frame_top(&window));
+        let kind = x11_kind(&x11);
+        if kind != X11Kind::App {
+            self.map_unfocused_x11(&window, &x11, kind);
+            return;
+        }
+        let (x, y) = self.next_window_position();
+        // Room for the title bar Helix draws above it.
+        let location: smithay::utils::Point<i32, Logical> = (x, y + super::frames::frame_top(&window)).into();
+        let size = x11.last_configure().size;
+        let _ = x11.configure(Rectangle::new(location, size));
+        tracing::info!(title = x11.title(), class = x11.class(), ?location, ?size, "new X11 window");
+        self.map_new_window(&window, location);
+        // States the app set before mapping (EWMH; #167).
+        if x11.is_fullscreen() {
+            self.fullscreen(&window, None);
+        } else if x11.is_maximized() {
+            self.maximize(&window);
+        }
+        self.place_new_window(&window);
+        if x11.is_above() {
+            self.set_above(&window, true);
+        }
+    }
+
+    fn x11_mapped_override(&mut self, x11: X11Window) {
+        let location = x11.last_configure().loc;
+        self.space.map_element(Window::new_x11_window(x11), location, false);
+    }
+
+    fn x11_unmapped(&mut self, x11: X11Window) {
+        if let Some(window) = self.x11_window(&x11) {
+            self.forget_window(&window);
+        }
+        if let X11Window::Smithay(s) = &x11 {
+            if !s.is_override_redirect() {
+                let _ = s.set_mapped(false);
+            }
+        }
+    }
+
+    fn x11_destroyed(&mut self, x11: X11Window) {
+        if let Some(window) = self.x11_window(&x11) {
+            self.forget_window(&window);
+        }
+    }
+
+    fn x11_configure_request(&mut self, x11: X11Window, x: Option<i32>, y: Option<i32>, w: Option<i32>, h: Option<i32>) {
+        // Windows that place themselves (notifications, docks) move too.
+        if x11_kind(&x11) == X11Kind::Placed {
+            let mut geo = x11.last_configure();
+            geo.loc = (x.unwrap_or(geo.loc.x), y.unwrap_or(geo.loc.y)).into();
+            geo.size = (w.unwrap_or(geo.size.w), h.unwrap_or(geo.size.h)).into();
+            let _ = x11.configure(geo);
+            if let Some(window) = self.x11_window(&x11) {
+                self.space.map_element(window, geo.loc, false);
+            }
+            return;
+        }
+        // Apps may resize themselves; Helix keeps deciding where they go.
+        let mut geo = x11.last_configure();
+        if let Some(w) = w {
+            geo.size.w = w;
+        }
+        if let Some(h) = h {
+            geo.size.h = h;
+        }
+        // Not while fullscreen, maximized or tiled (games set their video
+        // mode's size after going fullscreen; as mutter, #165): the app is
+        // told its size again, and gets the one it asked for when restored.
+        if let Some(window) = self.x11_window(&x11) {
+            if let Some((_, restore, _)) = self.restore.iter_mut().find(|(w, _, _)| *w == window) {
+                restore.size = geo.size;
+                let _ = x11.configure(x11.last_configure());
+                return;
+            }
+        }
+        // Within the window's own limits (WM_NORMAL_HINTS).
+        if let Some(min) = x11.min_size() {
+            geo.size.w = geo.size.w.max(min.w);
+            geo.size.h = geo.size.h.max(min.h);
+        }
+        if let Some(max) = x11.max_size() {
+            if max.w > 0 {
+                geo.size.w = geo.size.w.min(max.w);
+            }
+            if max.h > 0 {
+                geo.size.h = geo.size.h.min(max.h);
+            }
+        }
+        let _ = x11.configure(geo);
+    }
+
+    /// Override-redirect windows place themselves; follow them.
+    fn x11_override_configured(&mut self, x11: X11Window, geometry: Rectangle<i32, Logical>) {
+        tracing::debug!(?geometry, "X11 override-redirect window moved");
+        if let Some(window) = self.x11_window(&x11) {
+            self.space.map_element(window, geometry.loc, false);
+        }
+    }
+
+    /// A dialog made modal after it was shown (`gtk_window_set_modal`,
+    /// Qt's `setWindowModality`): as a Wayland dialog's, focus goes to it
+    /// when its parent has it.
+    fn x11_modal(&mut self, x11: X11Window, modal: bool) {
+        let _ = x11.set_modal(modal);
+        if modal {
+            if let Some(window) = self.x11_window(&x11) {
+                self.modal_window_changed(&window);
+            }
+        }
+    }
+
+    /// An X11 app asks for its window to be activated (`_NET_ACTIVE_WINDOW`,
+    /// as `xdg_activation_v1` on Wayland): granted for a pager (`wmctrl -a`,
+    /// `xdotool windowactivate`) and for an app moving between its own
+    /// windows (the request names the focused window as its active one);
+    /// otherwise the window wants attention, as for an activation token
+    /// Helix does not grant (`Windows wanting attention`).
+    fn x11_activate(&mut self, x11: X11Window, source: u32, current: Option<X11Window>) {
+        let Some(window) = self.x11_window(&x11) else { return };
+        let focused = self.seat.get_keyboard().and_then(|k| k.current_focus()).and_then(|f| self.window_for_focus(&f));
+        let from_focused = current.is_some_and(|active| focused.as_ref().and_then(|w| w.x11_surface()) == Some(&active));
+        let pager = source == 2;
+        tracing::debug!(pager, from_focused, "X11 activation request");
+        if pager || from_focused {
+            self.focus_window(&window);
+        } else {
+            self.set_attention(&window, true);
+        }
+    }
+
+    fn x11_move(&mut self, x11: X11Window) {
+        let Some(window) = self.x11_window(&x11) else { return };
+        let pointer = self.seat.get_pointer().unwrap();
+        let Some(start_data) = pointer.grab_start_data() else { return };
+        // Restored under the pointer once it really moves.
+        let unmaximize = self.is_any_taken_over(&window);
+        let initial_location = self.space.element_location(&window).unwrap_or_default();
+        pointer.set_grab(
+            self,
+            MoveGrab {
+                start_data,
+                window,
+                initial_location,
+                follow: false,
+                unmaximize,
+            },
+            SERIAL_COUNTER.next_serial(),
+            Focus::Clear,
+        );
+    }
+
+    fn x11_resize(&mut self, x11: X11Window, edges: Edges) {
+        let Some(window) = self.x11_window(&x11) else { return };
+        let pointer = self.seat.get_pointer().unwrap();
+        let Some(start_data) = pointer.grab_start_data() else { return };
+        let location = self.space.element_location(&window).unwrap_or_default();
+        let initial = Rectangle::new(location, window.geometry().size);
+        self.resize = Some(ResizeTracking {
+            window: window.clone(),
+            edges,
+            initial,
+            finished: false,
+        });
+        pointer.set_grab(
+            self,
+            ResizeGrab {
+                start_data,
+                window,
+                edges,
+                initial,
+                last_size: initial.size,
+                follow: false,
+            },
+            SERIAL_COUNTER.next_serial(),
+            Focus::Clear,
+        );
+    }
+
+    /// The window got its surface: if it was focused when it was mapped
+    /// (before it had one), give it the keyboard (properly) now.
+    fn x11_associated(&mut self, x11: X11Window) {
+        if x11.is_override_redirect() || !x11.is_activated() || self.lock.locked {
+            return;
+        }
+        // It got focus while it had no surface: enter again, now with it
+        // (the X input focus stays on it).
+        let target = match x11 {
+            X11Window::Smithay(s) => super::focus::KeyboardFocusTarget::X11(s),
+            X11Window::Helix(w) => super::focus::KeyboardFocusTarget::XHelix(w),
+        };
+        let keyboard = self.seat.get_keyboard().unwrap();
+        let focus = keyboard.current_focus();
+        if focus.is_none() || focus.as_ref() == Some(&target) {
+            keyboard.set_focus(self, Option::<super::focus::KeyboardFocusTarget>::None, SERIAL_COUNTER.next_serial());
+            keyboard.set_focus(self, Some(target), SERIAL_COUNTER.next_serial());
+        }
+    }
+
+    /// An X11 selection owner went away (or Xwayland did): the Wayland
+    /// side stops offering what it had.
+    fn x11_selection_cleared(&mut self, selection: SelectionTarget) {
+        tracing::info!(?selection, "X11 selection cleared");
+        match selection {
+            SelectionTarget::Clipboard => {
+                let x11 = matches!(current_data_device_selection_userdata(&self.seat).as_deref(), Some(super::ServerSelection::X11));
+                if x11 {
+                    clear_data_device_selection(&self.display_handle, &self.seat);
+                    self.clipboard_changed(Vec::new(), super::clipboard::Source::default());
+                }
+            }
+            SelectionTarget::Primary => {
+                let x11 = matches!(current_primary_selection_userdata(&self.seat).as_deref(), Some(super::ServerSelection::X11));
+                if x11 {
+                    clear_primary_selection(&self.display_handle, &self.seat);
+                }
+            }
+        }
+    }
+
+    // ----- Helix's own window manager (HELIX_XWM=helix, #191) -------------
+
+    /// Run what Helix's window manager has waiting: X events, turned into
+    /// what they ask of Helix.
+    pub fn dispatch_helix_xwm(&mut self) {
+        loop {
+            let Some(xwm) = self.hxwm.as_mut() else { return };
+            let events = match xwm.poll() {
+                Ok(events) => events,
+                Err(err) => {
+                    tracing::warn!(%err, "lost the connection to Xwayland");
+                    self.xwayland_gone();
+                    return;
+                }
+            };
+            if events.is_empty() {
+                return;
+            }
+            for event in events {
+                let actions = self.hxwm.as_mut().map(|x| x.handle(event)).unwrap_or_default();
+                for action in actions {
+                    self.helix_xwm_action(action);
+                }
+            }
+        }
+    }
+
+    /// A surface committed: if it is Xwayland's and carries an
+    /// `xwayland_shell_v1` serial, Helix's window manager pairs it.
+    pub fn helix_xwm_commit(&mut self, surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface) {
+        use smithay::wayland::compositor;
+        use smithay::wayland::xwayland_shell::{XWaylandShellCachedState, XWAYLAND_SHELL_ROLE};
+        let Some(xwm) = self.hxwm.as_mut() else { return };
+        if compositor::get_role(surface) != Some(XWAYLAND_SHELL_ROLE) {
+            return;
+        }
+        let serial = compositor::with_states(surface, |states| states.cached_state.get::<XWaylandShellCachedState>().current().serial);
+        let Some(serial) = serial else { return };
+        for action in xwm.surface_serial(surface, serial) {
+            self.helix_xwm_action(action);
+        }
+    }
+
+    fn helix_xwm_action(&mut self, action: super::xwm::Action) {
+        use super::xwm::Action as A;
+        let x = X11Window::Helix;
+        match action {
+            A::MapRequest(w) => self.x11_map_request(x(w)),
+            A::MappedOverride(w) => self.x11_mapped_override(x(w)),
+            A::Unmapped(w) => self.x11_unmapped(x(w)),
+            A::Destroyed(w) => self.x11_destroyed(x(w)),
+            A::ConfigureRequest { window, x: cx, y, w, h } => self.x11_configure_request(x(window), cx, y, w, h),
+            A::OverrideConfigured(w, rect) => self.x11_override_configured(x(w), rect),
+            A::HintsChanged(w) => self.x11_hints_changed(&x(w)),
+            A::Associated(w) => self.x11_associated(x(w)),
+            A::Fullscreen(w, on) | A::Maximize(w, on) if self.x11_window(&x(w.clone())).is_none() => {
+                let _ = on;
+            }
+            A::Fullscreen(w, on) => {
+                let window = self.x11_window(&x(w)).unwrap();
+                if on {
+                    self.fullscreen(&window, None);
+                } else {
+                    self.restore_window(&window);
+                }
+            }
+            A::Maximize(w, on) => {
+                let window = self.x11_window(&x(w)).unwrap();
+                if on {
+                    self.maximize(&window);
+                } else {
+                    self.restore_window(&window);
+                }
+            }
+            A::Above(w, on) => {
+                if let Some(window) = self.x11_window(&x(w)) {
+                    self.set_above(&window, on);
+                }
+            }
+            A::Modal(w, on) => self.x11_modal(x(w), on),
+            A::Activate { window, source, current } => self.x11_activate(x(window), source, current.map(x)),
+            A::Minimize(w) => {
+                if let Some(window) = self.x11_window(&x(w)) {
+                    self.minimize(&window);
+                }
+            }
+            A::Move(w) => self.x11_move(x(w)),
+            A::Resize(w, edges) => self.x11_resize(x(w), Edges::from_bits(edges)),
+            A::Close(w) => {
+                let _ = w.close();
+            }
+        }
     }
 }
 
@@ -305,22 +682,8 @@ impl XWaylandShellHandler for Helix {
         &mut self.xwayland_shell_state
     }
 
-    /// The window got its surface: if it was focused when it was mapped
-    /// (before it had one), give it the keyboard (properly) now.
-    fn surface_associated(&mut self, _xwm: XwmId, wl_surface: smithay::reexports::wayland_server::protocol::wl_surface::WlSurface, surface: X11Surface) {
-        if surface.is_override_redirect() || !surface.is_activated() || self.lock.locked {
-            return;
-        }
-        // It got focus while it had no surface: enter again, now with it
-        // (the X input focus stays on it).
-        let _ = wl_surface;
-        let target = super::focus::KeyboardFocusTarget::X11(surface);
-        let keyboard = self.seat.get_keyboard().unwrap();
-        let focus = keyboard.current_focus();
-        if focus.is_none() || focus.as_ref() == Some(&target) {
-            keyboard.set_focus(self, Option::<super::focus::KeyboardFocusTarget>::None, SERIAL_COUNTER.next_serial());
-            keyboard.set_focus(self, Some(target), SERIAL_COUNTER.next_serial());
-        }
+    fn surface_associated(&mut self, _xwm: XwmId, _wl_surface: smithay::reexports::wayland_server::protocol::wl_surface::WlSurface, surface: X11Surface) {
+        self.x11_associated(X11Window::Smithay(surface));
     }
 }
 
@@ -355,54 +718,19 @@ impl XwmHandler for Helix {
     fn new_override_redirect_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
 
     fn map_window_request(&mut self, _xwm: XwmId, surface: X11Surface) {
-        if let Err(err) = surface.set_mapped(true) {
-            tracing::warn!(%err, "cannot map X11 window");
-            return;
-        }
-        let x11 = X11Window::new(surface.clone());
-        let window = Window::new_x11_window(x11.clone());
-        let kind = x11_kind(&x11);
-        if kind != X11Kind::App {
-            self.map_unfocused_x11(&window, &surface, kind);
-            return;
-        }
-        let (x, y) = self.next_window_position();
-        // Room for the title bar Helix draws above it.
-        let location: smithay::utils::Point<i32, Logical> = (x, y + super::frames::frame_top(&window)).into();
-        let size = surface.last_configure().size;
-        let _ = surface.configure(Rectangle::new(location, size));
-        tracing::info!(title = surface.title(), class = surface.class(), ?location, ?size, "new X11 window");
-        self.map_new_window(&window, location);
-        // States the app set before mapping (EWMH; #167).
-        if surface.is_fullscreen() {
-            self.fullscreen(&window, None);
-        } else if surface.is_maximized() {
-            self.maximize(&window);
-        }
-        self.place_new_window(&window);
-        if surface.is_above() {
-            self.set_above(&window, true);
-        }
+        self.x11_map_request(X11Window::Smithay(surface));
     }
 
     fn mapped_override_redirect_window(&mut self, _xwm: XwmId, surface: X11Surface) {
-        let location = surface.last_configure().loc;
-        self.space.map_element(Window::new_x11_window(X11Window::new(surface)), location, false);
+        self.x11_mapped_override(X11Window::Smithay(surface));
     }
 
     fn unmapped_window(&mut self, _xwm: XwmId, surface: X11Surface) {
-        if let Some(window) = self.x11_window(&surface) {
-            self.forget_window(&window);
-        }
-        if !surface.is_override_redirect() {
-            let _ = surface.set_mapped(false);
-        }
+        self.x11_unmapped(X11Window::Smithay(surface));
     }
 
     fn destroyed_window(&mut self, _xwm: XwmId, surface: X11Surface) {
-        if let Some(window) = self.x11_window(&surface) {
-            self.forget_window(&window);
-        }
+        self.x11_destroyed(X11Window::Smithay(surface));
     }
 
     fn configure_request(
@@ -415,49 +743,7 @@ impl XwmHandler for Helix {
         h: Option<u32>,
         _reorder: Option<Reorder>,
     ) {
-        // Windows that place themselves (notifications, docks) move too.
-        if x11_kind(&X11Window::new(surface.clone())) == X11Kind::Placed {
-            let mut geo = surface.last_configure();
-            geo.loc = (x.unwrap_or(geo.loc.x), y.unwrap_or(geo.loc.y)).into();
-            geo.size = (w.map_or(geo.size.w, |w| w as i32), h.map_or(geo.size.h, |h| h as i32)).into();
-            let _ = surface.configure(geo);
-            if let Some(window) = self.x11_window(&surface) {
-                self.space.map_element(window, geo.loc, false);
-            }
-            return;
-        }
-        // Apps may resize themselves; Helix keeps deciding where they go.
-        let mut geo = surface.last_configure();
-        if let Some(w) = w {
-            geo.size.w = w as i32;
-        }
-        if let Some(h) = h {
-            geo.size.h = h as i32;
-        }
-        // Not while fullscreen, maximized or tiled (games set their video
-        // mode's size after going fullscreen; as mutter, #165): the app is
-        // told its size again, and gets the one it asked for when restored.
-        if let Some(window) = self.x11_window(&surface) {
-            if let Some((_, restore, _)) = self.restore.iter_mut().find(|(w, _, _)| *w == window) {
-                restore.size = geo.size;
-                let _ = surface.configure(surface.last_configure());
-                return;
-            }
-        }
-        // Within the window's own limits (WM_NORMAL_HINTS).
-        if let Some(min) = surface.min_size() {
-            geo.size.w = geo.size.w.max(min.w);
-            geo.size.h = geo.size.h.max(min.h);
-        }
-        if let Some(max) = surface.max_size() {
-            if max.w > 0 {
-                geo.size.w = geo.size.w.min(max.w);
-            }
-            if max.h > 0 {
-                geo.size.h = geo.size.h.min(max.h);
-            }
-        }
-        let _ = surface.configure(geo);
+        self.x11_configure_request(X11Window::Smithay(surface), x, y, w.map(|w| w as i32), h.map(|h| h as i32));
     }
 
     fn configure_notify(
@@ -468,136 +754,71 @@ impl XwmHandler for Helix {
         _above: Option<u32>,
     ) {
         tracing::debug!(?geometry, or = surface.is_override_redirect(), "X11 configure notify");
-        // Override-redirect windows place themselves; follow them.
-        if let Some(window) = self.x11_window(&surface) {
-            if surface.is_override_redirect() {
-                self.space.map_element(window, geometry.loc, false);
-            }
+        if surface.is_override_redirect() {
+            self.x11_override_configured(X11Window::Smithay(surface), geometry);
         }
     }
 
     fn maximize_request(&mut self, _xwm: XwmId, surface: X11Surface) {
-        if let Some(window) = self.x11_window(&surface) {
+        if let Some(window) = self.smithay_window(&surface) {
             self.maximize(&window);
         }
     }
 
     fn unmaximize_request(&mut self, _xwm: XwmId, surface: X11Surface) {
-        if let Some(window) = self.x11_window(&surface) {
+        if let Some(window) = self.smithay_window(&surface) {
             self.restore_window(&window);
         }
     }
 
     fn fullscreen_request(&mut self, _xwm: XwmId, surface: X11Surface) {
-        if let Some(window) = self.x11_window(&surface) {
+        if let Some(window) = self.smithay_window(&surface) {
             self.fullscreen(&window, None);
         }
     }
 
     fn unfullscreen_request(&mut self, _xwm: XwmId, surface: X11Surface) {
-        if let Some(window) = self.x11_window(&surface) {
+        if let Some(window) = self.smithay_window(&surface) {
             self.restore_window(&window);
         }
     }
 
     fn above_request(&mut self, _xwm: XwmId, surface: X11Surface) {
-        if let Some(window) = self.x11_window(&surface) {
+        if let Some(window) = self.smithay_window(&surface) {
             self.set_above(&window, true);
         }
     }
 
     fn unabove_request(&mut self, _xwm: XwmId, surface: X11Surface) {
-        if let Some(window) = self.x11_window(&surface) {
+        if let Some(window) = self.smithay_window(&surface) {
             self.set_above(&window, false);
         }
     }
 
-    /// A dialog made modal after it was shown (`gtk_window_set_modal`,
-    /// Qt's `setWindowModality`): as a Wayland dialog's, focus goes to it
-    /// when its parent has it.
     fn modal_request(&mut self, _xwm: XwmId, surface: X11Surface) {
-        let _ = surface.set_modal(true);
-        if let Some(window) = self.x11_window(&surface) {
-            self.modal_window_changed(&window);
-        }
+        self.x11_modal(X11Window::Smithay(surface), true);
     }
 
     fn unmodal_request(&mut self, _xwm: XwmId, surface: X11Surface) {
-        let _ = surface.set_modal(false);
+        self.x11_modal(X11Window::Smithay(surface), false);
     }
 
     fn minimize_request(&mut self, _xwm: XwmId, surface: X11Surface) {
-        if let Some(window) = self.x11_window(&surface) {
+        if let Some(window) = self.smithay_window(&surface) {
             self.minimize(&window);
         }
     }
 
-    /// An X11 app asks for its window to be activated (`_NET_ACTIVE_WINDOW`,
-    /// as `xdg_activation_v1` on Wayland): granted for a pager (`wmctrl -a`,
-    /// `xdotool windowactivate`) and for an app moving between its own
-    /// windows (the request names the focused window as its active one);
-    /// otherwise the window wants attention, as for an activation token
-    /// Helix does not grant (`Windows wanting attention`).
     fn active_window_request(&mut self, _xwm: XwmId, surface: X11Surface, source: u32, _timestamp: u32, currently_active: Option<X11Surface>) {
-        let Some(window) = self.x11_window(&surface) else { return };
-        let focused = self.seat.get_keyboard().and_then(|k| k.current_focus()).and_then(|f| self.window_for_focus(&f));
-        let from_focused = currently_active.is_some_and(|active| focused.as_ref().and_then(|w| w.x11_surface()).is_some_and(|x| x.smithay() == &active));
-        let pager = source == 2;
-        tracing::debug!(pager, from_focused, "X11 activation request");
-        if pager || from_focused {
-            self.focus_window(&window);
-        } else {
-            self.set_attention(&window, true);
-        }
+        self.x11_activate(X11Window::Smithay(surface), source, currently_active.map(X11Window::Smithay));
     }
 
     fn move_request(&mut self, _xwm: XwmId, surface: X11Surface, _button: u32) {
-        let Some(window) = self.x11_window(&surface) else { return };
-        let pointer = self.seat.get_pointer().unwrap();
-        let Some(start_data) = pointer.grab_start_data() else { return };
-        // Restored under the pointer once it really moves.
-        let unmaximize = self.is_any_taken_over(&window);
-        let initial_location = self.space.element_location(&window).unwrap_or_default();
-        pointer.set_grab(
-            self,
-            MoveGrab {
-                start_data,
-                window,
-                initial_location,
-                follow: false,
-                unmaximize,
-            },
-            SERIAL_COUNTER.next_serial(),
-            Focus::Clear,
-        );
+        self.x11_move(X11Window::Smithay(surface));
     }
 
     fn resize_request(&mut self, _xwm: XwmId, surface: X11Surface, _button: u32, edge: X11ResizeEdge) {
-        let Some(window) = self.x11_window(&surface) else { return };
-        let pointer = self.seat.get_pointer().unwrap();
-        let Some(start_data) = pointer.grab_start_data() else { return };
-        let location = self.space.element_location(&window).unwrap_or_default();
-        let initial = Rectangle::new(location, window.geometry().size);
-        let edges = edges(edge);
-        self.resize = Some(ResizeTracking {
-            window: window.clone(),
-            edges,
-            initial,
-            finished: false,
-        });
-        pointer.set_grab(
-            self,
-            ResizeGrab {
-                start_data,
-                window,
-                edges,
-                initial,
-                last_size: initial.size,
-                follow: false,
-            },
-            SERIAL_COUNTER.next_serial(),
-            Focus::Clear,
-        );
+        self.x11_resize(X11Window::Smithay(surface), edges(edge));
     }
 
     // ----- Clipboard and primary selection between X11 and Wayland -------
@@ -660,27 +881,12 @@ impl XwmHandler for Helix {
         }
     }
 
-    fn disconnected(&mut self, xwm: XwmId) {
-        self.xwayland_gone(xwm);
+    fn disconnected(&mut self, _xwm: XwmId) {
+        self.xwayland_gone();
     }
 
     fn cleared_selection(&mut self, _xwm: XwmId, selection: SelectionTarget) {
-        tracing::info!(?selection, "X11 selection cleared");
-        match selection {
-            SelectionTarget::Clipboard => {
-                let x11 = matches!(current_data_device_selection_userdata(&self.seat).as_deref(), Some(super::ServerSelection::X11));
-                if x11 {
-                    clear_data_device_selection(&self.display_handle, &self.seat);
-                    self.clipboard_changed(Vec::new(), super::clipboard::Source::default());
-                }
-            }
-            SelectionTarget::Primary => {
-                let x11 = matches!(current_primary_selection_userdata(&self.seat).as_deref(), Some(super::ServerSelection::X11));
-                if x11 {
-                    clear_primary_selection(&self.display_handle, &self.seat);
-                }
-            }
-        }
+        self.x11_selection_cleared(selection);
     }
 }
 

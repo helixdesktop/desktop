@@ -35,8 +35,10 @@ fn the_x_stack_follows_focus() {
 /// X58: `_NET_CLIENT_LIST_STACKING` is the X stack, each window once
 /// (Chromium and Electron read it to find drop targets).
 #[test]
-#[ignore = "fails on Smithay's xwm: restacking lists a window twice in _NET_CLIENT_LIST_STACKING (#191)"]
 fn the_stacking_list_is_the_x_stack() {
+    if common::known_failure(&[common::Xwm::Smithay], "restacking lists a window twice in _NET_CLIENT_LIST_STACKING (#191)") {
+        return;
+    }
     let Some(session) = xwm::session() else { return };
     let x = X::new(&session);
     let windows = [x.mapped(), x.mapped(), x.mapped()];
@@ -66,8 +68,10 @@ fn the_x_stack_follows_raise_and_lower() {
 /// X59: raising an app window keeps it under the menus and tooltips
 /// (override-redirect windows) already shown.
 #[test]
-#[ignore = "fails on Smithay's xwm: raising a window puts it over override-redirect menus (#191)"]
 fn raised_windows_stay_under_menus() {
+    if common::known_failure(&[common::Xwm::Smithay], "raising a window puts it over override-redirect menus (#191)") {
+        return;
+    }
     let Some(session) = xwm::session() else { return };
     let x = X::new(&session);
     let a = x.mapped();

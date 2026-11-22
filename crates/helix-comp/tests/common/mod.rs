@@ -8,6 +8,42 @@
 pub mod xdnd;
 pub mod xwm;
 
+/// The X11 window manager the compositor under test runs
+/// (`HELIX_XWM=helix` for Helix's own, helixdesktop/desktop#191).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Xwm {
+    Smithay,
+    Helix,
+}
+
+pub fn xwm_running() -> Xwm {
+    if std::env::var("HELIX_XWM").is_ok_and(|v| v == "helix") { Xwm::Helix } else { Xwm::Smithay }
+}
+
+/// Whether to skip a test that fails, for `why`, on the window managers
+/// in `on` (it passes as skipped there). `HELIX_RUN_KNOWN_FAILURES=1`
+/// runs it anyway.
+#[must_use]
+pub fn known_failure(on: &[Xwm], why: &str) -> bool {
+    let xwm = xwm_running();
+    if !on.contains(&xwm) || std::env::var("HELIX_RUN_KNOWN_FAILURES").is_ok_and(|v| v == "1") {
+        return false;
+    }
+    eprintln!("skipped: known to fail on {xwm:?}'s window manager: {why}");
+    true
+}
+
+/// Whether to skip a test of something Helix's window manager doesn't do
+/// yet (`step` of #191 brings it).
+#[must_use]
+pub fn not_yet(step: &str) -> bool {
+    if xwm_running() != Xwm::Helix || std::env::var("HELIX_RUN_KNOWN_FAILURES").is_ok_and(|v| v == "1") {
+        return false;
+    }
+    eprintln!("skipped: not yet in Helix's window manager ({step})");
+    true
+}
+
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
