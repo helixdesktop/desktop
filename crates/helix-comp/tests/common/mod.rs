@@ -326,5 +326,9 @@ pub fn x11(session: &HeadlessSession) -> (x11rb::rust_connection::RustConnection
     static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _turn = ENV.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("XAUTHORITY", &session.x_authority);
-    x11rb::connect(Some(&session.x_display)).expect("connect to Xwayland")
+    match x11rb::connect(Some(&session.x_display)) {
+        Ok(c) => c,
+        Err(x11rb::errors::ConnectError::SetupFailed(f)) => panic!("connect to Xwayland {}: refused: {}", session.x_display, String::from_utf8_lossy(&f.reason)),
+        Err(err) => panic!("connect to Xwayland {}: {err:?}", session.x_display),
+    }
 }

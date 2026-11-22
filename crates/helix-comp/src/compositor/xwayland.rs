@@ -338,6 +338,25 @@ impl XwmHandler for Helix {
         }
     }
 
+    /// An X11 app asks for its window to be activated (`_NET_ACTIVE_WINDOW`,
+    /// as `xdg_activation_v1` on Wayland): granted for a pager (`wmctrl -a`,
+    /// `xdotool windowactivate`) and for an app moving between its own
+    /// windows (the request names the focused window as its active one);
+    /// otherwise the window wants attention, as for an activation token
+    /// Helix does not grant (`Windows wanting attention`).
+    fn active_window_request(&mut self, _xwm: XwmId, surface: X11Surface, source: u32, _timestamp: u32, currently_active: Option<X11Surface>) {
+        let Some(window) = self.x11_window(&surface) else { return };
+        let focused = self.seat.get_keyboard().and_then(|k| k.current_focus()).and_then(|f| self.window_for_focus(&f));
+        let from_focused = currently_active.is_some_and(|active| focused.as_ref().and_then(|w| w.x11_surface()) == Some(&active));
+        let pager = source == 2;
+        tracing::debug!(pager, from_focused, "X11 activation request");
+        if pager || from_focused {
+            self.focus_window(&window);
+        } else {
+            self.set_attention(&window, true);
+        }
+    }
+
     fn move_request(&mut self, _xwm: XwmId, surface: X11Surface, _button: u32) {
         let Some(window) = self.x11_window(&surface) else { return };
         let pointer = self.seat.get_pointer().unwrap();
