@@ -342,3 +342,51 @@ fn focus_changes_reach_x11_apps_at_once() {
         std::thread::sleep(Duration::from_millis(10));
     }
 }
+
+/// X94 (W30): an X11 window with an input shape (an OSD, a shaped
+/// launcher): the pointer outside it goes through to the window below,
+/// inside it reaches the X11 window.
+#[test]
+#[ignore = "fails today: X11 input shapes aren't honored; the pointer outside the shape still goes to the X11 window (#191)"]
+fn the_pointer_outside_an_input_shape_goes_through() {
+    use x11rb::protocol::shape::{ConnectionExt as _, SK, SO};
+    use x11rb::protocol::xproto::{ClipOrdering, Rectangle};
+    let Some(mut session) = xwm::session() else { return };
+    // A big Wayland window below, and where it is.
+    let mut app = common::connect(&session);
+    let (wl, ()) = app.toplevel((700, 500), |_, _| {});
+    let surface = wl.surface.clone();
+    let mut over_wayland = Vec::new();
+    for px in (0..i32::from(xwm::SCREEN.0)).step_by(30) {
+        for py in (0..i32::from(xwm::SCREEN.1)).step_by(30) {
+            session.input(&format!("move {px} {py}"));
+            app.roundtrip();
+            if app.state.pointer.as_ref() == Some(&surface) {
+                over_wayland.push((px, py));
+            }
+        }
+    }
+    let x = X::new(&session);
+    let window = x.window();
+    let events = EventMask::STRUCTURE_NOTIFY | EventMask::PROPERTY_CHANGE | EventMask::ENTER_WINDOW | EventMask::LEAVE_WINDOW | EventMask::POINTER_MOTION;
+    x.conn.change_window_attributes(window, &ChangeWindowAttributesAux::new().event_mask(events)).unwrap();
+    x.map_managed(window);
+    let (wx, wy) = x.position(window);
+    let (ww, wh) = x.size(window);
+    let (wx, wy, ww, wh) = (i32::from(wx), i32::from(wy), i32::from(ww), i32::from(wh));
+    // Input only in its left half.
+    let left = Rectangle { x: 0, y: 0, width: (ww / 2) as u16, height: wh as u16 };
+    x.conn.shape_rectangles(SO::SET, SK::INPUT, ClipOrdering::UNSORTED, window, 0, 0, &[left]).unwrap();
+    x.flush();
+    std::thread::sleep(Duration::from_millis(300));
+    let in_right = |(px, py): &(i32, i32)| *px >= wx + ww / 2 + 10 && *px < wx + ww - 10 && *py >= wy + 10 && *py < wy + wh - 10;
+    let in_left = |(px, py): &(i32, i32)| *px >= wx + 10 && *px < wx + ww / 2 - 10 && *py >= wy + 10 && *py < wy + wh - 10;
+    let right = *over_wayland.iter().find(|p| in_right(p)).expect("the Wayland window isn't under the X11 window's right half");
+    let left = *over_wayland.iter().find(|p| in_left(p)).expect("the Wayland window isn't under the X11 window's left half");
+
+    session.input(&format!("move {} {}", left.0, left.1));
+    app.roundtrip();
+    x.wait_event("the X11 window never got the pointer inside its shape", |e| matches!(e, Event::EnterNotify(n) if n.event == window).then_some(()));
+    session.input(&format!("move {} {}", right.0, right.1));
+    app.until("the pointer outside the input shape never reached the Wayland window below", |s| s.pointer.as_ref() == Some(&surface));
+}

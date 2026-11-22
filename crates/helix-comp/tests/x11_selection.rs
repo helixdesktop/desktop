@@ -52,12 +52,29 @@ type Sending = ((u32, u32), u32, Vec<u8>, usize);
 /// until the connection closes; or never answering when `stuck`. Each
 /// incremental transfer that ends (its empty last chunk sent) is reported.
 fn x11_owner(session: &HeadlessSession, offers: Vec<(&'static str, Vec<u8>)>, stuck: bool) -> mpsc::Receiver<usize> {
+    x11_owner_of(session, vec![("CLIPBOARD", offers)], stuck)
+}
+
+/// What an owner offers: (target name, data).
+type Offers = Vec<(&'static str, Vec<u8>)>;
+
+/// The same, as atoms.
+type OfferedAs = Vec<(u32, Vec<u8>)>;
+
+/// The same for several selections (each with its own offers), all taken
+/// in one go.
+fn x11_owner_of(session: &HeadlessSession, selections: Vec<(&'static str, Offers)>, stuck: bool) -> mpsc::Receiver<usize> {
     let (conn, screen_num) = common::x11(session);
     let root = conn.setup().roots[screen_num].root;
     let window = helper_window(&conn, root, EventMask::PROPERTY_CHANGE);
-    let (clipboard, targets, incr) = (atom(&conn, "CLIPBOARD"), atom(&conn, "TARGETS"), atom(&conn, "INCR"));
-    let offers: Vec<(u32, Vec<u8>)> = offers.into_iter().map(|(name, data)| (atom(&conn, name), data)).collect();
-    conn.set_selection_owner(window, clipboard, x11rb::CURRENT_TIME).unwrap();
+    let (targets, incr) = (atom(&conn, "TARGETS"), atom(&conn, "INCR"));
+    let selections: Vec<(u32, OfferedAs)> = selections
+        .into_iter()
+        .map(|(selection, offers)| (atom(&conn, selection), offers.into_iter().map(|(name, data)| (atom(&conn, name), data)).collect()))
+        .collect();
+    for (selection, _) in &selections {
+        conn.set_selection_owner(window, *selection, x11rb::CURRENT_TIME).unwrap();
+    }
     conn.flush().unwrap();
     let (done, finished) = mpsc::channel();
     std::thread::spawn(move || {
@@ -82,6 +99,7 @@ fn x11_owner(session: &HeadlessSession, offers: Vec<(&'static str, Vec<u8>)>, st
             if stuck {
                 continue;
             }
+            let offers = selections.iter().find(|(s, _)| *s == request.selection).map_or(&[][..], |(_, o)| o.as_slice());
             let offered = offers.iter().find(|(a, _)| *a == request.target);
             let property = if request.target == targets {
                 let mut list = vec![targets];
@@ -460,4 +478,87 @@ fn a_hung_owner_does_not_break_the_clipboard_for_good() {
     x11_owner(&session, vec![("UTF8_STRING", b"working".to_vec())], false);
     app.until("the next X11 copy was never offered", |s| s.selection.is_some());
     assert_eq!(app.paste("text/plain;charset=utf-8"), b"working");
+}
+
+/// X96 (W65): an X11 app taking CLIPBOARD and PRIMARY at once, with
+/// different types: each reaches Wayland apps with its own types (the
+/// answers about the two didn't cross).
+#[test]
+fn clipboard_and_primary_taken_at_once_keep_their_own_types() {
+    let Some(session) = xwm::session() else { return };
+    let mut app = wayland_app(&session);
+    assert!(app.primary_device.is_some(), "helix-comp offers no primary selection");
+    let _owner = x11_owner_of(
+        &session,
+        vec![
+            ("CLIPBOARD", vec![("text/html", b"<i>clip</i>".to_vec()), ("image/png", data(100, 2)), ("application/x-helix-clip", b"clip".to_vec())]),
+            ("PRIMARY", vec![("text/html", b"<i>primary</i>".to_vec()), ("image/png", data(100, 3))]),
+        ],
+        false,
+    );
+    let sorted = |types: &[String]| {
+        let mut t: Vec<String> = types.iter().filter(|t| !t.starts_with("TARGETS")).cloned().collect();
+        t.sort();
+        t
+    };
+    app.until("the X11 clipboard and primary selection never both reached the Wayland app", |s| {
+        let clip = s.selection.as_ref().is_some_and(|(_, t)| sorted(t).len() == 3);
+        let primary = s.primary.as_ref().is_some_and(|(_, t)| !t.is_empty());
+        clip && primary
+    });
+    let clip = sorted(&app.state.selection.as_ref().unwrap().1);
+    let primary = sorted(&app.state.primary.as_ref().unwrap().1);
+    assert_eq!(clip, ["application/x-helix-clip", "image/png", "text/html"], "the clipboard's types");
+    assert_eq!(primary, ["image/png", "text/html"], "the primary selection's types");
+}
+
+/// X97 (W68): ownership flipping fast between an X11 app and a Wayland
+/// app (Emacs and the window manager) settles on the last copy, which
+/// pastes both ways (the window manager didn't end up asking itself).
+#[test]
+#[ignore = "fails on Smithay's xwm: an X11 copy right before a Wayland one leaves the clipboard empty on both sides (the window manager ends up serving the Wayland side from itself) (#191)"]
+fn clipboard_ownership_flipping_fast_settles() {
+    let Some(session) = xwm::session() else { return };
+    let mut app = wayland_app(&session);
+    let mut owners = Vec::new();
+    for i in 0..10 {
+        owners.push(x11_owner(&session, vec![("UTF8_STRING", format!("x11 {i}").into_bytes())], false));
+        app.copy("text/plain;charset=utf-8", format!("wayland {i}").as_bytes());
+    }
+    let until = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < until {
+        app.roundtrip();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // The Wayland app's copy was last: it pastes it itself, and so does
+    // an X11 app.
+    assert_eq!(String::from_utf8_lossy(&app.paste("text/plain;charset=utf-8")), "wayland 9", "the Wayland app's own paste");
+    let got = while_serving(&mut app, || {
+        let reader = Reader::new(&session);
+        reader.read("UTF8_STRING")
+    });
+    let shown = got.as_ref().map(|g| String::from_utf8_lossy(g).into_owned());
+    assert_eq!(shown.as_deref(), Some("wayland 9"), "the X11 app's paste");
+}
+
+/// After such a flip, the next X11 copy still reaches Wayland apps (the
+/// clipboard isn't broken for good).
+#[test]
+fn the_clipboard_recovers_after_ownership_flipped_fast() {
+    let Some(session) = xwm::session() else { return };
+    let mut app = wayland_app(&session);
+    let _first = x11_owner(&session, vec![("UTF8_STRING", b"x11 first".to_vec())], false);
+    app.copy("text/plain;charset=utf-8", b"wayland");
+    std::thread::sleep(Duration::from_millis(300));
+    let _last = x11_owner(&session, vec![("UTF8_STRING", b"x11 last".to_vec())], false);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        app.roundtrip();
+        let ready = app.state.selection.as_ref().is_some_and(|(_, t)| t.iter().any(|t| t == "text/plain;charset=utf-8"));
+        if ready && app.paste("text/plain;charset=utf-8") == b"x11 last" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the next X11 copy never reached the Wayland app");
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
