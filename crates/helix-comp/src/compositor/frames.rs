@@ -37,13 +37,14 @@ smithay::backend::renderer::element::render_elements! {
     Converted = smithay::backend::renderer::gles::element::TextureShaderElement,
 }
 
-/// Whether Helix draws a title bar for `window`: managed X11 windows that
-/// do not ask for none and are not fullscreen.
+/// Whether Helix draws a title bar for `window`: managed X11 app windows
+/// (not splash screens, notifications, docks) that do not ask for none and
+/// are not fullscreen.
 pub fn framed(window: &Window) -> bool {
-    window
-        .x11_surface()
+    window.x11_surface().is_some_and(|x| {
         // Smithay's `is_decorated`: the Motif hints say the client draws its own.
-        .is_some_and(|x| !x.is_override_redirect() && !x.is_decorated() && !x.is_fullscreen())
+        !x.is_override_redirect() && !x.is_decorated() && !x.is_fullscreen() && super::xwayland::x11_kind(x) == super::xwayland::X11Kind::App
+    })
 }
 
 /// How far a window's frame reaches above its own area.

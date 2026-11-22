@@ -27,10 +27,57 @@ use smithay::xwayland::{X11Surface, X11Wm, XWayland, XWaylandEvent, XwmHandler};
 use super::grabs::{Edges, MoveGrab, ResizeGrab, ResizeTracking};
 use super::Helix;
 
+/// How Helix treats an X11 window, by its `_NET_WM_WINDOW_TYPE` (#168;
+/// as mutter does).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum X11Kind {
+    /// An app window (normal, dialog, utility, toolbar, menu): framed,
+    /// placed by Helix, focused when it opens.
+    App,
+    /// A splash screen: no frame, centered, not focused.
+    Splash,
+    /// Notifications, docks, and menus or tooltips that are not
+    /// override-redirect: no frame, where the app puts them, not focused.
+    Placed,
+}
+
+pub fn x11_kind(surface: &X11Surface) -> X11Kind {
+    use smithay::xwayland::xwm::WmWindowType as T;
+    match surface.window_type() {
+        Some(T::Splash) => X11Kind::Splash,
+        Some(T::Notification | T::Dock | T::Tooltip | T::DropdownMenu | T::PopupMenu | T::Combo | T::Dnd) => X11Kind::Placed,
+        _ => X11Kind::App,
+    }
+}
+
 /// Displays tried after Smithay's own search (`:0` to `:32`) found none free.
 const FALLBACK_DISPLAYS: std::ops::RangeInclusive<u32> = 33..=99;
 
 impl Helix {
+    /// A splash screen (centered on the output under the pointer) or a
+    /// window placing itself (where it asked, kept on its output): shown
+    /// without a frame, and focus stays where it is.
+    fn map_unfocused_x11(&mut self, window: &Window, surface: &X11Surface, kind: X11Kind) {
+        let size = surface.geometry().size;
+        let asked = surface.geometry().loc;
+        let output = match kind {
+            X11Kind::Placed => self.space.outputs().find(|o| self.space.output_geometry(o).is_some_and(|g| g.contains(asked))).cloned().or_else(|| self.primary()),
+            _ => self.pointer_output().or_else(|| self.primary()),
+        };
+        let area = output.and_then(|o| self.space.output_geometry(&o)).unwrap_or_else(|| Rectangle::new((0, 0).into(), size));
+        let location = match kind {
+            X11Kind::Splash => smithay::utils::Point::from((area.loc.x + (area.size.w - size.w) / 2, area.loc.y + (area.size.h - size.h) / 2)),
+            _ => smithay::utils::Point::from((
+                asked.x.clamp(area.loc.x, (area.loc.x + area.size.w - size.w).max(area.loc.x)),
+                asked.y.clamp(area.loc.y, (area.loc.y + area.size.h - size.h).max(area.loc.y)),
+            )),
+        };
+        let _ = surface.configure(Rectangle::new(location, size));
+        tracing::info!(title = surface.title(), class = surface.class(), ?kind, ?location, ?size, "new X11 window, not focused");
+        self.space.map_element(window.clone(), location, false);
+        self.restack_above();
+    }
+
     /// At shutdown: give Xwayland's display back (its lock file and
     /// socket). Smithay would on dropping the Xwayland source, but the
     /// event loop's sources are not dropped at exit, and a lock left
@@ -234,6 +281,11 @@ impl XwmHandler for Helix {
             return;
         }
         let window = Window::new_x11_window(surface.clone());
+        let kind = x11_kind(&surface);
+        if kind != X11Kind::App {
+            self.map_unfocused_x11(&window, &surface, kind);
+            return;
+        }
         let (x, y) = self.next_window_position();
         // Room for the title bar Helix draws above it.
         let location: smithay::utils::Point<i32, Logical> = (x, y + super::frames::frame_top(&window)).into();
@@ -277,12 +329,23 @@ impl XwmHandler for Helix {
         &mut self,
         _xwm: XwmId,
         surface: X11Surface,
-        _x: Option<i32>,
-        _y: Option<i32>,
+        x: Option<i32>,
+        y: Option<i32>,
         w: Option<u32>,
         h: Option<u32>,
         _reorder: Option<Reorder>,
     ) {
+        // Windows that place themselves (notifications, docks) move too.
+        if x11_kind(&surface) == X11Kind::Placed {
+            let mut geo = surface.geometry();
+            geo.loc = (x.unwrap_or(geo.loc.x), y.unwrap_or(geo.loc.y)).into();
+            geo.size = (w.map_or(geo.size.w, |w| w as i32), h.map_or(geo.size.h, |h| h as i32)).into();
+            let _ = surface.configure(geo);
+            if let Some(window) = self.x11_window(&surface) {
+                self.space.map_element(window, geo.loc, false);
+            }
+            return;
+        }
         // Apps may resize themselves; Helix keeps deciding where they go.
         let mut geo = surface.geometry();
         if let Some(w) = w {

@@ -104,6 +104,8 @@ impl Helix {
             // (`_NET_WM_STATE_SKIP_TASKBAR`) are left out of the window
             // list (overview, dash, switcher), as GNOME Shell does.
             .filter(|w| !w.x11_surface().is_some_and(|x| x.is_skip_taskbar()))
+            // Nor splash screens, notifications and docks (#168).
+            .filter(|w| !w.x11_surface().is_some_and(|x| super::xwayland::x11_kind(x) != super::xwayland::X11Kind::App))
             .cloned()
             .collect();
         let list = &mut self.window_list;
