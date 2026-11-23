@@ -68,7 +68,8 @@ struct Sel {
 
 /// An X11 app's selection on its way to a Wayland app.
 struct Incoming {
-    selection: SelectionTarget,
+    /// CLIPBOARD or PRIMARY; `None` for a drag's XdndSelection.
+    selection: Option<SelectionTarget>,
     /// The window asking for it (one per transfer).
     window: XId,
     /// The Wayland app's pipe; `None` once it stopped reading.
@@ -100,6 +101,14 @@ struct Outgoing {
     deadline: Instant,
 }
 
+/// A Wayland drag's data, offered as XdndSelection by the window manager's
+/// `owner` window while the drag is over (or dropped on) an X11 window.
+pub(super) struct DndServe {
+    pub owner: XId,
+    pub types: Vec<String>,
+    pub source: Arc<dyn smithay::input::dnd::Source>,
+}
+
 pub struct Selections {
     conn: Arc<RustConnection>,
     atoms: Atoms,
@@ -115,6 +124,8 @@ pub struct Selections {
     /// The transfer whose pipe is being handled from the event loop now:
     /// its watch goes when [`Selections::ready`] says so.
     in_ready: Option<u64>,
+    /// A Wayland drag over an X11 window (`dnd`).
+    pub(super) dnd: Option<DndServe>,
 }
 
 impl Selections {
@@ -130,12 +141,17 @@ impl Selections {
             Ok(Sel { target, atom, window, owner: x11rb::NONE, wayland: None, timestamp: x11rb::CURRENT_TIME, targets_for: None, offered: Vec::new() })
         };
         let sels = [make(SelectionTarget::Clipboard, atoms.CLIPBOARD)?, make(SelectionTarget::Primary, atoms.PRIMARY)?];
-        Ok(Self { conn: conn.clone(), atoms, root, sels, incoming: HashMap::new(), outgoing: HashMap::new(), next: 0, own, atom_cache: HashMap::new(), in_ready: None })
+        Ok(Self { conn: conn.clone(), atoms, root, sels, incoming: HashMap::new(), outgoing: HashMap::new(), next: 0, own, atom_cache: HashMap::new(), in_ready: None, dnd: None })
     }
 
     /// Whether the window manager made this window for selections.
     pub fn is_own(&self, id: XId) -> bool {
         self.own.contains(&id)
+    }
+
+    /// A window the window manager made (for drag and drop): never managed.
+    pub(super) fn adopt(&mut self, id: XId) {
+        self.own.insert(id);
     }
 
     fn sel(&mut self, target: SelectionTarget) -> &mut Sel {
@@ -188,8 +204,6 @@ impl Selections {
     /// A Wayland app pastes the X11 owner's selection as `mime` into `fd`.
     pub fn receive(&mut self, target: SelectionTarget, mime: &str, fd: OwnedFd, actions: &mut Vec<Action>) -> Result<(), ReplyOrIdError> {
         let _ = actions;
-        let conn = self.conn.clone();
-        let property = self.atoms._HELIX_SELECTION;
         let sel = self.sel(target);
         if sel.owner == x11rb::NONE || sel.owner == sel.window {
             return Ok(());
@@ -199,11 +213,27 @@ impl Selections {
             return Ok(());
         };
         let selection = sel.atom;
+        self.convert(Some(target), selection, asked, fd, x11rb::CURRENT_TIME, mime)
+    }
+
+    /// A Wayland app takes a drop of an X11 app's drag as `asked` (an atom
+    /// of the drag's types) into `fd`: asked of XdndSelection's owner at
+    /// the drop's `time`.
+    pub(super) fn receive_drop(&mut self, asked: u32, fd: OwnedFd, time: u32, mime: &str) -> Result<(), ReplyOrIdError> {
+        let selection = self.atoms.XdndSelection;
+        self.convert(None, selection, asked, fd, time, mime)
+    }
+
+    /// Asks the owner of `selection` for it as `asked`, from a window of
+    /// this transfer's own, for the Wayland app's pipe `fd`.
+    fn convert(&mut self, target: Option<SelectionTarget>, selection: u32, asked: u32, fd: OwnedFd, time: u32, mime: &str) -> Result<(), ReplyOrIdError> {
+        let conn = self.conn.clone();
+        let property = self.atoms._HELIX_SELECTION;
         set_nonblocking(&fd);
         let window = conn.generate_id()?;
         conn.create_window(0, window, self.root, -1, -1, 1, 1, 0, WindowClass::INPUT_ONLY, x11rb::COPY_FROM_PARENT, &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE))?;
         self.own.insert(window);
-        conn.convert_selection(window, selection, asked, property, x11rb::CURRENT_TIME)?;
+        conn.convert_selection(window, selection, asked, property, time)?;
         conn.flush()?;
         let id = self.id();
         tracing::debug!(id, mime, "X11 selection asked for");
@@ -268,7 +298,7 @@ impl Selections {
                 Ok(true)
             }
             Event::SelectionRequest(e) => {
-                if self.sels.iter().any(|s| s.window == e.owner) {
+                if self.sels.iter().any(|s| s.window == e.owner) || self.dnd.as_ref().is_some_and(|d| d.owner == e.owner) {
                     self.request(*e, actions)?;
                     self.conn.flush()?;
                 }
@@ -486,10 +516,16 @@ impl Selections {
 
     /// An X11 app asks for the selection Helix owns for a Wayland copy.
     fn request(&mut self, e: SelectionRequestEvent, actions: &mut Vec<Action>) -> Result<(), ReplyOrIdError> {
-        let Some(i) = self.sels.iter().position(|s| s.window == e.owner && s.atom == e.selection) else {
-            return self.answer(&e, false);
+        let dnd = self.dnd.as_ref().filter(|d| d.owner == e.owner && e.selection == self.atoms.XdndSelection).map(|d| (d.types.clone(), d.source.clone()));
+        let i = self.sels.iter().position(|s| s.window == e.owner && s.atom == e.selection);
+        let (types, timestamp) = match (&dnd, i) {
+            (Some((types, _)), _) => (types.clone(), x11rb::CURRENT_TIME),
+            (None, Some(i)) => match self.sels[i].wayland.clone() {
+                Some(types) => (types, self.sels[i].timestamp),
+                None => return self.answer(&e, false),
+            },
+            (None, None) => return self.answer(&e, false),
         };
-        let Some(types) = self.sels[i].wayland.clone() else { return self.answer(&e, false) };
         // Obsolete clients give no property: the target is the property.
         let property = if e.property == x11rb::NONE { e.target } else { e.property };
         let e = SelectionRequestEvent { property, ..e };
@@ -514,7 +550,6 @@ impl Selections {
             return self.answer(&e, true);
         }
         if e.target == a.TIMESTAMP {
-            let timestamp = self.sels[i].timestamp;
             self.conn.change_property32(PropMode::REPLACE, e.requestor, property, AtomEnum::INTEGER, &[timestamp])?;
             return self.answer(&e, true);
         }
@@ -527,10 +562,13 @@ impl Selections {
             return self.answer(&e, false);
         };
         // An app that asks again before reading its last answer only
-        // reads the newest (fcitx, Slack): the older ones end.
-        let older: Vec<u64> = self.outgoing.iter().filter(|(_, t)| t.requestor == e.requestor && !t.answered).map(|(id, _)| *id).collect();
-        for id in older {
-            self.drop_outgoing(id, actions);
+        // reads the newest (fcitx, Slack): the older ones end. Not for a
+        // drop, whose types are asked for at once (Chromium).
+        if dnd.is_none() {
+            let older: Vec<u64> = self.outgoing.iter().filter(|(_, t)| t.requestor == e.requestor && !t.answered).map(|(id, _)| *id).collect();
+            for id in older {
+                self.drop_outgoing(id, actions);
+            }
         }
         // The type it goes as: TEXT is no encoding of its own.
         let kind = if e.target == a.TEXT { a.UTF8_STRING } else { e.target };
@@ -539,8 +577,15 @@ impl Selections {
         let watch = read.try_clone().map_err(|e| ReplyOrIdError::ConnectionError(e.into()))?;
         tracing::debug!(id, mime, "the Wayland selection asked for by an X11 app");
         self.outgoing.insert(id, Outgoing { requestor: e.requestor, property, kind, request: e, fd: std::fs::File::from(read), buf: Vec::new(), eof: false, answered: false, incr: false, waiting: false, deadline: Instant::now() + STALL });
-        let target = self.sels[i].target;
-        actions.push(Action::SelectionWanted { selection: target, mime, fd: write });
+        match (dnd, i) {
+            // The drag's source writes it.
+            (Some((_, source)), _) => source.send(&mime, write),
+            (None, Some(i)) => {
+                let target = self.sels[i].target;
+                actions.push(Action::SelectionWanted { selection: target, mime, fd: write });
+            }
+            (None, None) => {}
+        }
         actions.push(Action::Watch { id, fd: watch, write: false });
         Ok(())
     }

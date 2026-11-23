@@ -9,10 +9,12 @@
 //! manager, pairing X11 windows with their Wayland surfaces, mapping and
 //! withdrawing, override-redirect windows, configure requests, the
 //! window properties Helix reads, EWMH states and activation requests,
-//! the client lists, closing, and the clipboard and primary selection
-//! (`selection`). Drag and drop comes later (step 5).
+//! the client lists, closing, the clipboard and primary selection
+//! (`selection`), and drag and drop between X11 and Wayland apps
+//! (`dnd`).
 
 mod atoms;
+mod dnd;
 mod focus;
 mod props;
 mod selection;
@@ -38,6 +40,7 @@ use x11rb::rust_connection::{DefaultStream, RustConnection};
 use x11rb::wrapper::ConnectionExt as _;
 
 pub use atoms::Atoms;
+pub use dnd::{DragCmd, XOffer, XSource};
 pub use window::XWin;
 
 /// Which X11 window manager runs: Smithay's (the default) or Helix's.
@@ -89,6 +92,10 @@ pub enum Action {
     Watch { id: u64, fd: OwnedFd, write: bool },
     /// Stop watching a transfer's pipe.
     Unwatch(u64),
+    /// An X11 app took XdndSelection: a drag, if a button is held.
+    XDragOffered,
+    /// The X11 app's drag is gone (it or its window went away).
+    XDragGone,
 }
 
 pub struct Xwm {
@@ -115,6 +122,7 @@ pub struct Xwm {
     client_list: Vec<XId>,
     stacking: Vec<XId>,
     selections: selection::Selections,
+    dnd: dnd::Dnd,
 }
 
 impl std::fmt::Debug for Xwm {
@@ -209,7 +217,8 @@ impl Xwm {
         conn.change_property32(PropMode::REPLACE, root, atoms._NET_CLIENT_LIST_STACKING, AtomEnum::WINDOW, &[])?;
         conn.change_property32(PropMode::REPLACE, root, atoms._NET_ACTIVE_WINDOW, AtomEnum::WINDOW, &[x11rb::NONE])?;
 
-        let selections = selection::Selections::new(&conn, atoms, root)?;
+        let mut selections = selection::Selections::new(&conn, atoms, root)?;
+        let dnd = dnd::Dnd::new(&conn, atoms, root, &mut selections)?;
         let id_mask = conn.setup().resource_id_mask;
         let fd = conn.stream().as_fd().try_clone_to_owned()?;
         let mut xwm = Self {
@@ -228,6 +237,7 @@ impl Xwm {
             client_list: Vec::new(),
             stacking: Vec::new(),
             selections,
+            dnd,
         };
         // Windows made before the window manager started.
         let conn = xwm.conn.clone();
@@ -294,6 +304,18 @@ impl Xwm {
     fn handle_inner(&mut self, event: Event) -> Result<Vec<Action>, ReplyOrIdError> {
         let mut actions = Vec::new();
         tracing::trace!(?event, "X11 event");
+        match &event {
+            Event::XfixesSelectionNotify(e) if e.selection == self.atoms.XdndSelection => {
+                match self.dnd.owner_changed(e.owner) {
+                    Some(true) => actions.push(Action::XDragOffered),
+                    Some(false) => actions.push(Action::XDragGone),
+                    None => {}
+                }
+                return Ok(actions);
+            }
+            Event::ClientMessage(e) if self.dnd.client_message(e, &mut self.selections)? => return Ok(actions),
+            _ => {}
+        }
         if self.selections.handle(&event, &mut actions)? {
             return Ok(actions);
         }
@@ -860,14 +882,63 @@ impl Xwm {
         (keep, actions)
     }
 
-    /// When the next stalled transfer gives up.
+    /// When the next stalled transfer (or an X11 drag that doesn't
+    /// finish) gives up.
     pub fn selection_deadline(&self) -> Option<std::time::Instant> {
-        self.selections.deadline()
+        [self.selections.deadline(), self.dnd.deadline()].into_iter().flatten().min()
+    }
+
+    // ----- Drag and drop (step 5) ----------------------------------------
+
+    /// Whether an X11 app's drag is going on.
+    pub fn dragging_from_x(&self) -> bool {
+        self.dnd.dragging_from_x()
+    }
+
+    /// Helix carries an X11 app's drag in the seat's grab: its source.
+    pub fn begin_x_drag(&mut self, tx: smithay::reexports::calloop::channel::Sender<DragCmd>) -> XSource {
+        self.dnd.begin_from_x(tx)
+    }
+
+    /// The X11 app's drag is over an X11 window, or over something else.
+    pub fn x_drag_over_x11(&mut self, x11: bool) {
+        self.dnd.over_x11(x11);
+    }
+
+    /// The seat's drag-and-drop grab ended.
+    pub fn drag_grab_ended(&mut self) {
+        self.dnd.grab_ended();
+    }
+
+    /// What the X11 app's drag source asks.
+    pub fn x_drag_cmd(&mut self, cmd: DragCmd) -> Vec<Action> {
+        if let Err(err) = self.dnd.cmd(cmd, &mut self.selections) {
+            tracing::debug!(%err, "an X11 drag request failed");
+        }
+        Vec::new()
+    }
+
+    /// A Wayland drag comes over `win`, at `at` on its surface.
+    pub fn drag_enter(&mut self, win: &XWin, source: Arc<dyn smithay::input::dnd::Source>, at: smithay::utils::Point<f64, Logical>) -> Option<XOffer> {
+        self.dnd.enter(win, source, at, &mut self.selections)
+    }
+
+    pub fn drag_motion(&mut self, win: &XWin, at: smithay::utils::Point<f64, Logical>, time: u32) {
+        self.dnd.motion(win, at, time);
+    }
+
+    pub fn drag_leave(&mut self) {
+        self.dnd.leave(&mut self.selections);
+    }
+
+    pub fn drag_drop(&mut self) {
+        self.dnd.drop(&mut self.selections);
     }
 
     pub fn selection_expired(&mut self) -> Vec<Action> {
         let mut actions = Vec::new();
         self.selections.expired(&mut actions);
+        self.dnd.expired();
         actions
     }
 }

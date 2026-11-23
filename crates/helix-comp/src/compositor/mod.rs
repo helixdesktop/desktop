@@ -208,6 +208,13 @@ pub struct Helix {
     /// and whether a timer is set for its next stalled transfer.
     pub hxwm_watches: std::collections::HashMap<u64, smithay::reexports::calloop::RegistrationToken>,
     pub hxwm_selection_timer: bool,
+    /// The seat has a drag-and-drop grab (a Wayland app's drag or an X11
+    /// app's), and whether it carries an X11 app's drag (#191 step 5).
+    pub dnd_active: bool,
+    pub x_drag_grab: bool,
+    /// Where an X11 app's drag source sends what it asks of Helix's window
+    /// manager.
+    pub x_drag_tx: Option<smithay::reexports::calloop::channel::Sender<xwm::DragCmd>>,
     /// The X root cursor's theme, size and scale, as last set.
     pub x11_cursor: Option<(String, u32, i32)>,
     /// The running Xwayland's event source (removing it gives its display
@@ -395,6 +402,9 @@ impl Helix {
             hxwm_sync_timer: false,
             hxwm_watches: std::collections::HashMap::new(),
             hxwm_selection_timer: false,
+            dnd_active: false,
+            x_drag_grab: false,
+            x_drag_tx: None,
             xdisplay: None,
             xwayland_client: None,
             xsettings: None,
@@ -696,16 +706,28 @@ impl Helix {
     /// that shaded windows are only their title bar (their contents let
     /// the pointer through).
     pub fn window_under(&self, pos: Point<f64, Logical>) -> Option<(&Window, Point<i32, Logical>)> {
-        if self.frames.shaded.is_empty() {
+        self.window_under_for(pos, false)
+    }
+
+    /// The same, leaving out X11 override-redirect windows when `no_menus`
+    /// (a drag's icon under the pointer is no drop target, #191).
+    fn window_under_for(&self, pos: Point<f64, Logical>, no_menus: bool) -> Option<(&Window, Point<i32, Logical>)> {
+        if self.frames.shaded.is_empty() && !no_menus {
             return self.space.element_under(pos);
         }
-        self.space.elements().rev().filter(|w| !self.frames.shaded.contains(w)).find_map(|w| {
+        let menu = |w: &Window| no_menus && w.x11_surface().is_some_and(|x| x.is_override_redirect());
+        self.space.elements().rev().filter(|w| !self.frames.shaded.contains(w) && !menu(w)).find_map(|w| {
             let location = self.space.element_location(w)? - w.geometry().loc;
             smithay::desktop::space::SpaceElement::is_in_input_region(w, &(pos - location.to_f64())).then_some((w, location))
         })
     }
 
     pub fn surface_under(&self, pos: Point<f64, Logical>) -> Option<(WlSurface, Point<f64, Logical>)> {
+        self.surface_under_for(pos, false)
+    }
+
+    /// The same, leaving out X11 override-redirect windows when `no_menus`.
+    pub fn surface_under_for(&self, pos: Point<f64, Logical>, no_menus: bool) -> Option<(WlSurface, Point<f64, Logical>)> {
         if self.lock.locked {
             return self.lock_surface_under(pos);
         }
@@ -722,7 +744,7 @@ impl Helix {
         layer_hit(Layer::Overlay)
             .or_else(|| layer_hit(Layer::Top))
             .or_else(|| {
-                self.window_under(pos).and_then(|(window, location)| {
+                self.window_under_for(pos, no_menus).and_then(|(window, location)| {
                     window
                         .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
                         .map(|(s, p)| (s, (p + location).to_f64()))
