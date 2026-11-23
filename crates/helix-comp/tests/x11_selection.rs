@@ -612,3 +612,92 @@ fn the_clipboard_recovers_after_ownership_flipped_fast() {
         std::thread::sleep(Duration::from_millis(50));
     }
 }
+
+/// An X11 owner with a quirk (#234): it refuses TARGETS (old Xt and Motif
+/// apps), or answers it with another time than the request's. It owns
+/// CLIPBOARD with `text` as UTF8_STRING.
+fn quirky_owner(session: &HeadlessSession, refuse_targets: bool, time_offset: u32, text: &'static [u8]) {
+    let (conn, screen_num) = common::x11(session);
+    let root = conn.setup().roots[screen_num].root;
+    let window = helper_window(&conn, root, EventMask::NO_EVENT);
+    let (clipboard, targets, utf8) = (atom(&conn, "CLIPBOARD"), atom(&conn, "TARGETS"), atom(&conn, "UTF8_STRING"));
+    conn.set_selection_owner(window, clipboard, x11rb::CURRENT_TIME).unwrap();
+    conn.flush().unwrap();
+    std::thread::spawn(move || {
+        while let Ok(event) = conn.wait_for_event() {
+            let Event::SelectionRequest(request) = event else { continue };
+            let property = if request.target == targets && !refuse_targets {
+                conn.change_property32(PropMode::REPLACE, request.requestor, request.property, AtomEnum::ATOM, &[targets, utf8]).unwrap();
+                request.property
+            } else if request.target == utf8 {
+                conn.change_property8(PropMode::REPLACE, request.requestor, request.property, utf8, text).unwrap();
+                request.property
+            } else {
+                x11rb::NONE
+            };
+            let time = if request.target == targets { request.time.wrapping_add(time_offset) } else { request.time };
+            let notify = SelectionNotifyEvent { response_type: SELECTION_NOTIFY_EVENT, sequence: 0, time, requestor: request.requestor, selection: request.selection, target: request.target, property };
+            conn.send_event(false, request.requestor, EventMask::NO_EVENT, notify).unwrap();
+            conn.flush().unwrap();
+        }
+    });
+}
+
+/// #234: an X11 owner that refuses TARGETS (old Xt and Motif apps) is
+/// offered to Wayland apps as text, which pastes; not left unoffered with
+/// the last copy's offer still up.
+#[test]
+fn an_owner_refusing_targets_is_pasted_as_text() {
+    if common::known_failure(&[common::Xwm::Smithay], "an X11 owner refusing TARGETS is never offered to Wayland apps (#234)") {
+        return;
+    }
+    let Some(session) = xwm::session() else { return };
+    let mut app = wayland_app(&session);
+    app.copy("text/plain;charset=utf-8", b"the Wayland copy");
+    app.roundtrip();
+    quirky_owner(&session, true, 0, b"from an old X11 app");
+    app.until("the X11 copy wasn't offered", |s| s.selection.as_ref().is_some_and(|(_, types)| types.iter().any(|t| t == "text/plain;charset=utf-8")) && s.selection.as_ref().is_some_and(|(_, t)| !t.is_empty()));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if app.paste("text/plain;charset=utf-8") == b"from an old X11 app" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the X11 copy of an owner refusing TARGETS doesn't paste");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// #234: an owner answering TARGETS with another time than the request's
+/// is still the owner asked: its types are offered.
+#[test]
+fn targets_answered_with_another_time_are_taken() {
+    let Some(session) = xwm::session() else { return };
+    let mut app = wayland_app(&session);
+    quirky_owner(&session, false, 1, b"answered late");
+    app.until("the X11 copy wasn't offered", |s| s.selection.as_ref().is_some_and(|(_, types)| types.iter().any(|t| t == "text/plain;charset=utf-8")));
+    assert_eq!(app.paste("text/plain;charset=utf-8"), b"answered late");
+}
+
+/// #234: one X11 window asking for two types at once, into two
+/// properties, gets both (the "older requests end" rule is for the same
+/// property).
+#[test]
+fn two_types_asked_for_at_once_by_one_window() {
+    let Some(session) = xwm::session() else { return };
+    let mut app = wayland_app(&session);
+    app.copy("text/plain;charset=utf-8", b"twice");
+    let got = while_serving(&mut app, || {
+        let reader = Reader::new(&session);
+        reader.ask("UTF8_STRING", "HELIX_A");
+        reader.ask("STRING", "HELIX_B");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut answered = Vec::new();
+        while answered.len() < 2 {
+            if let Event::SelectionNotify(n) = reader.next_event(deadline, "not both requests were answered") {
+                answered.push(n.property);
+            }
+        }
+        answered.iter().map(|p| if *p == x11rb::NONE { None } else { Some(reader.conn.get_property(true, reader.window, *p, AtomEnum::ANY, 0, 1024).unwrap().reply().unwrap().value) }).collect::<Vec<_>>()
+    });
+    assert_eq!(got, vec![Some(b"twice".to_vec()), Some(b"twice".to_vec())], "one of the two requests was refused");
+}

@@ -1,5 +1,26 @@
 //! The atoms Helix's X11 window manager uses.
 
+impl Atoms {
+    /// The EWMH states a client may set on its window itself (before it is
+    /// shown, or asked for after): only these are kept and published
+    /// back. Any client can send any number; ones Helix doesn't do
+    /// (STICKY, BELOW, SHADED) or that only the window manager sets
+    /// (FOCUSED, HIDDEN) aren't taken as granted (#234).
+    pub fn client_state(&self, atom: u32) -> bool {
+        [
+            self._NET_WM_STATE_MODAL,
+            self._NET_WM_STATE_MAXIMIZED_VERT,
+            self._NET_WM_STATE_MAXIMIZED_HORZ,
+            self._NET_WM_STATE_SKIP_TASKBAR,
+            self._NET_WM_STATE_SKIP_PAGER,
+            self._NET_WM_STATE_FULLSCREEN,
+            self._NET_WM_STATE_ABOVE,
+            self._NET_WM_STATE_DEMANDS_ATTENTION,
+        ]
+        .contains(&atom)
+    }
+}
+
 x11rb::atom_manager! {
     pub Atoms: AtomsCookie {
         WM_S0,

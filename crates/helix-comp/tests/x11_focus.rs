@@ -395,3 +395,22 @@ fn the_pointer_outside_an_input_shape_goes_through() {
     session.input(&format!("move {} {}", right.0, right.1));
     app.until("the pointer outside the input shape never reached the Wayland window below", |s| s.pointer.as_ref() == Some(&surface));
 }
+
+/// #234: an app moving the X focus to another of its own windows (Steam,
+/// Zoom) moves Helix's focus there too: that window is the focused one
+/// (`_NET_WM_STATE_FOCUSED`), not only `_NET_ACTIVE_WINDOW`.
+#[test]
+fn an_app_moving_focus_among_its_windows_moves_helix_focus() {
+    if common::known_failure(&[common::Xwm::Smithay], "only _NET_ACTIVE_WINDOW follows an app's own focus move (#234)") {
+        return;
+    }
+    let Some(session) = xwm::session() else { return };
+    let x = X::new(&session);
+    let a = x.mapped();
+    let b = x.mapped();
+    x.focus(b);
+    until("the focused window isn't marked focused", || x.has_state(b, "_NET_WM_STATE_FOCUSED"));
+    x.conn.set_input_focus(InputFocus::POINTER_ROOT, a, x11rb::CURRENT_TIME).unwrap();
+    x.flush();
+    until("Helix's focus didn't follow the app to its other window", || x.has_state(a, "_NET_WM_STATE_FOCUSED") && !x.has_state(b, "_NET_WM_STATE_FOCUSED"));
+}

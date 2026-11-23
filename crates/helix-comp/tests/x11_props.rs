@@ -284,3 +284,22 @@ fn motif_hints_without_decorations_get_no_title_bar() {
     assert!(plain_at.1 > 0, "the decorated window has no room for its title bar: at {plain_at:?}");
     assert_eq!(i32::from(x.size(plain).1) + i32::from(plain_at.1), i32::from(xwm::SCREEN.1), "the decorated window maximized under its title bar");
 }
+
+/// #234: before a window is shown, `_NET_WM_STATE` keeps only the states a
+/// client may set: not ones Helix doesn't do (STICKY, BELOW), not ones
+/// only the window manager sets, not unknown numbers.
+#[test]
+fn states_a_client_may_not_set_are_dropped() {
+    if common::known_failure(&[common::Xwm::Smithay], "any atom a client puts in _NET_WM_STATE before mapping is kept (#234)") {
+        return;
+    }
+    let Some(session) = xwm::session() else { return };
+    let x = X::new(&session);
+    let window = x.window();
+    let (sticky, below, above) = (x.atom("_NET_WM_STATE_STICKY"), x.atom("_NET_WM_STATE_BELOW"), x.atom("_NET_WM_STATE_ABOVE"));
+    x.set32(window, "_NET_WM_STATE", AtomEnum::ATOM, &[sticky, below, 0x00de_adbe, above]);
+    x.map_managed(window);
+    until("the window isn't above, as it asked", || x.has_state(window, "_NET_WM_STATE_ABOVE"));
+    let states = x.net_states(window);
+    assert!(!states.contains(&sticky) && !states.contains(&below) && !states.contains(&0x00de_adbe), "states no one granted are published: {states:?}");
+}
