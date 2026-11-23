@@ -249,6 +249,20 @@ impl Helix {
         use smithay::reexports::calloop::generic::Generic;
         use smithay::reexports::calloop::{Interest, Mode, PostAction};
         let (xwm, fd) = super::xwm::Xwm::start(socket, client).map_err(|e| e.to_string())?;
+        // What an X11 app's drag source asks of the window manager.
+        let (tx, rx) = smithay::reexports::calloop::channel::channel::<super::xwm::DragCmd>();
+        self.loop_handle
+            .insert_source(rx, |event, _, state| {
+                if let smithay::reexports::calloop::channel::Event::Msg(cmd) = event {
+                    let actions = state.hxwm.as_mut().map(|x| x.x_drag_cmd(cmd)).unwrap_or_default();
+                    for action in actions {
+                        state.helix_xwm_action(action);
+                    }
+                    state.helix_xwm_selection_timer();
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        self.x_drag_tx = Some(tx);
         let source = Generic::new(fd, Interest::READ, Mode::Level);
         let token = self
             .loop_handle
@@ -842,7 +856,62 @@ impl Helix {
                     self.loop_handle.remove(token);
                 }
             }
+            A::XDragOffered => self.x_drag_offered(),
+            A::XDragGone => self.x_drag_gone(),
         }
+    }
+
+    /// An X11 app took XdndSelection: if a button (or a finger) holds an
+    /// implicit grab, it drags; Helix carries the drag in the seat's
+    /// drag-and-drop grab with the X11 app's source (#191 step 5).
+    fn x_drag_offered(&mut self) {
+        use smithay::input::dnd::DnDGrab;
+        const BTN_LEFT: u32 = 0x110;
+        let (Some(tx), Some(_)) = (self.x_drag_tx.clone(), self.hxwm.as_ref()) else { return };
+        if self.dnd_active {
+            return;
+        }
+        let seat = self.seat.clone();
+        if let Some(pointer) = seat.get_pointer() {
+            if let Some(start_data) = pointer.grab_start_data().filter(|d| d.button == BTN_LEFT) {
+                let source = self.hxwm.as_mut().unwrap().begin_x_drag(tx);
+                self.dnd_active = true;
+                self.x_drag_grab = true;
+                let grab = DnDGrab::new_pointer(&self.display_handle, start_data, source, seat.clone());
+                pointer.set_grab(self, grab, SERIAL_COUNTER.next_serial(), Focus::Keep);
+                return;
+            }
+        }
+        if let Some(touch) = seat.get_touch() {
+            if let Some(start_data) = touch.grab_start_data() {
+                let source = self.hxwm.as_mut().unwrap().begin_x_drag(tx);
+                self.dnd_active = true;
+                self.x_drag_grab = true;
+                let grab = DnDGrab::new_touch(&self.display_handle, start_data, source, seat.clone());
+                touch.set_grab(self, grab, SERIAL_COUNTER.next_serial());
+            }
+        }
+    }
+
+    /// The X11 app's drag is gone (it, or its window, went away): the
+    /// seat's grab ends, and the pointer works as before.
+    fn x_drag_gone(&mut self) {
+        if !self.x_drag_grab {
+            return;
+        }
+        let seat = self.seat.clone();
+        let time = smithay::backend::input::InputTime::now();
+        if let Some(pointer) = seat.get_pointer() {
+            if pointer.is_grabbed() {
+                pointer.unset_grab(self, SERIAL_COUNTER.next_serial(), time);
+            }
+        }
+        if let Some(touch) = seat.get_touch() {
+            if touch.is_grabbed() {
+                touch.unset_grab(self);
+            }
+        }
+        self.drag_grab_ended();
     }
 
     /// A clipboard transfer can stall (a hung app on either side): wake

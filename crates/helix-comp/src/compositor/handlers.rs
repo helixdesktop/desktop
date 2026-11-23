@@ -211,6 +211,7 @@ impl PrimarySelectionHandler for Helix {
 /// pointer or touch (no drag icon is drawn).
 impl WaylandDndGrabHandler for Helix {
     fn dnd_requested<S: Source>(&mut self, source: S, _icon: Option<WlSurface>, seat: Seat<Self>, serial: Serial, type_: GrabType) {
+        self.dnd_active = true;
         match type_ {
             GrabType::Pointer => {
                 let Some(pointer) = seat.get_pointer() else { return source.cancel() };
@@ -227,7 +228,28 @@ impl WaylandDndGrabHandler for Helix {
         }
     }
 }
-impl DndGrabHandler for Helix {}
+/// A drag ended (dropped or cancelled): an X11 app's drag lets go of its
+/// drop window (#191).
+impl DndGrabHandler for Helix {
+    fn dropped(&mut self, _target: Option<smithay::input::dnd::DndTarget<'_, Self>>, _validated: bool, _seat: Seat<Self>, _location: smithay::utils::Point<f64, smithay::utils::Logical>) {
+        self.drag_grab_ended();
+    }
+
+    fn cancelled(&mut self, _seat: Seat<Self>, _location: smithay::utils::Point<f64, smithay::utils::Logical>) {
+        self.drag_grab_ended();
+    }
+}
+
+impl Helix {
+    pub(super) fn drag_grab_ended(&mut self) {
+        self.dnd_active = false;
+        self.x_drag_grab = false;
+        if let Some(xwm) = self.hxwm.as_mut() {
+            xwm.drag_grab_ended();
+            self.helix_xwm_selection_timer();
+        }
+    }
+}
 impl OutputHandler for Helix {}
 
 impl XdgShellHandler for Helix {

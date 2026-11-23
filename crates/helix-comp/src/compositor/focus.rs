@@ -170,9 +170,10 @@ impl Helix {
 pub enum PointerFocusTarget {
     Surface(WlSurface),
     X11(X11Surface),
-    /// A window of Helix's own X11 window manager: events go to its
-    /// surface (no drag and drop yet, #191 step 5).
-    XHelix(super::xwm::XWin),
+    /// A window of Helix's own X11 window manager, by the surface it was
+    /// found by: events go to that surface (a window shown again has a new
+    /// one, and the pointer enters it anew), drags get XDND (#191).
+    XHelix(super::xwm::XWin, Option<WlSurface>),
 }
 
 impl PointerFocusTarget {
@@ -186,7 +187,7 @@ impl PointerFocusTarget {
         match self {
             Self::Surface(s) => Some(s),
             Self::X11(x) => x.wl_surface(),
-            Self::XHelix(x) => x.wl_surface(),
+            Self::XHelix(_, s) => s,
         }
     }
 }
@@ -196,7 +197,7 @@ impl IsAlive for PointerFocusTarget {
         match self {
             Self::Surface(s) => s.alive(),
             Self::X11(x) => x.alive(),
-            Self::XHelix(x) => x.alive(),
+            Self::XHelix(x, s) => x.alive() && s.as_ref().is_some_and(|s| s.alive()),
         }
     }
 }
@@ -206,7 +207,7 @@ impl WaylandFocus for PointerFocusTarget {
         match self {
             Self::Surface(s) => Some(Cow::Borrowed(s)),
             Self::X11(x) => x.wl_surface().map(Cow::Owned),
-            Self::XHelix(x) => x.wl_surface().map(Cow::Owned),
+            Self::XHelix(_, s) => s.as_ref().map(Cow::Borrowed),
         }
     }
 }
@@ -229,7 +230,7 @@ impl From<PointerFocusTarget> for KeyboardFocusTarget {
         match focus {
             PointerFocusTarget::Surface(s) => Self::Surface(s),
             PointerFocusTarget::X11(x) => Self::X11(x),
-            PointerFocusTarget::XHelix(x) => Self::XHelix(x),
+            PointerFocusTarget::XHelix(x, _) => Self::XHelix(x),
         }
     }
 }
@@ -240,7 +241,10 @@ impl From<KeyboardFocusTarget> for PointerFocusTarget {
         match focus {
             KeyboardFocusTarget::Surface(s) => Self::Surface(s),
             KeyboardFocusTarget::X11(x) => Self::X11(x),
-            KeyboardFocusTarget::XHelix(x) => Self::XHelix(x),
+            KeyboardFocusTarget::XHelix(x) => {
+                let surface = x.wl_surface();
+                Self::XHelix(x, surface)
+            }
         }
     }
 }
@@ -250,11 +254,8 @@ macro_rules! each {
         match $self {
             PointerFocusTarget::Surface($t) => $e,
             PointerFocusTarget::X11($t) => $e,
-            PointerFocusTarget::XHelix(x) => match x.wl_surface() {
-                Some(surface) => {
-                    let $t = &surface;
-                    $e
-                }
+            PointerFocusTarget::XHelix(_, surface) => match surface {
+                Some($t) => $e,
                 None => Default::default(),
             },
         }
@@ -336,10 +337,12 @@ impl TouchTarget<Helix> for PointerFocusTarget {
     }
 }
 
-/// A drag's offer to a Wayland surface, or to an X11 window.
+/// A drag's offer to a Wayland surface, or to an X11 window (of either
+/// window manager).
 pub enum OfferTo<S: Source> {
     Wayland(WlOfferData<S>),
     X11(XwmOfferData<S>),
+    XHelix(super::xwm::XOffer),
 }
 
 impl<S: Source> OfferData for OfferTo<S> {
@@ -347,18 +350,21 @@ impl<S: Source> OfferData for OfferTo<S> {
         match self {
             Self::Wayland(o) => o.disable(),
             Self::X11(o) => o.disable(),
+            Self::XHelix(o) => o.disable(),
         }
     }
     fn drop(&self) {
         match self {
             Self::Wayland(o) => o.drop(),
             Self::X11(o) => o.drop(),
+            Self::XHelix(o) => o.drop(),
         }
     }
     fn validated(&self) -> bool {
         match self {
             Self::Wayland(o) => o.validated(),
             Self::X11(o) => o.validated(),
+            Self::XHelix(o) => o.validated(),
         }
     }
 }
@@ -370,10 +376,26 @@ impl DndFocus<Helix> for PointerFocusTarget {
         S: Source;
 
     fn enter<S: Source>(&self, data: &mut Helix, dh: &DisplayHandle, source: Arc<S>, seat: &Seat<Helix>, location: Point<f64, Logical>, serial: &Serial) -> Option<OfferTo<S>> {
+        // An X11 app's drag (Helix's window manager): its drop window covers
+        // the screen while the drag is over anything but an X11 window,
+        // where it steps aside and the X11 apps drag between themselves.
+        let from_x = data.hxwm.as_ref().is_some_and(|x| x.dragging_from_x());
+        if from_x {
+            let over_x11 = matches!(self, Self::XHelix(..));
+            if let Some(xwm) = data.hxwm.as_mut() {
+                xwm.x_drag_over_x11(over_x11);
+            }
+            if over_x11 {
+                return None;
+            }
+        }
         match self {
             Self::Surface(s) => DndFocus::enter(s, data, dh, source, seat, location, serial).map(OfferTo::Wayland),
             Self::X11(x) => DndFocus::enter(x, data, dh, source, seat, location, serial).map(OfferTo::X11),
-            Self::XHelix(_) => None,
+            Self::XHelix(x, _) => {
+                let source: Arc<dyn Source> = source;
+                data.hxwm.as_mut()?.drag_enter(x, source, location).map(OfferTo::XHelix)
+            }
         }
     }
 
@@ -383,6 +405,11 @@ impl DndFocus<Helix> for PointerFocusTarget {
             (Self::Surface(s), None) => DndFocus::<Helix>::motion::<S>(s, data, None, seat, location, time),
             (Self::X11(x), Some(OfferTo::X11(o))) => DndFocus::motion(x, data, Some(o), seat, location, time),
             (Self::X11(x), None) => DndFocus::<Helix>::motion::<S>(x, data, None, seat, location, time),
+            (Self::XHelix(x, _), Some(OfferTo::XHelix(_))) => {
+                if let Some(xwm) = data.hxwm.as_mut() {
+                    xwm.drag_motion(x, location, time.millis());
+                }
+            }
             _ => {}
         }
     }
@@ -393,6 +420,11 @@ impl DndFocus<Helix> for PointerFocusTarget {
             (Self::Surface(s), None) => DndFocus::<Helix>::leave::<S>(s, data, None, seat),
             (Self::X11(x), Some(OfferTo::X11(o))) => DndFocus::leave(x, data, Some(o), seat),
             (Self::X11(x), None) => DndFocus::<Helix>::leave::<S>(x, data, None, seat),
+            (Self::XHelix(..), Some(OfferTo::XHelix(_))) => {
+                if let Some(xwm) = data.hxwm.as_mut() {
+                    xwm.drag_leave();
+                }
+            }
             _ => {}
         }
     }
@@ -403,6 +435,11 @@ impl DndFocus<Helix> for PointerFocusTarget {
             (Self::Surface(s), None) => DndFocus::<Helix>::drop::<S>(s, data, None, seat),
             (Self::X11(x), Some(OfferTo::X11(o))) => DndFocus::drop(x, data, Some(o), seat),
             (Self::X11(x), None) => DndFocus::<Helix>::drop::<S>(x, data, None, seat),
+            (Self::XHelix(..), Some(OfferTo::XHelix(_))) => {
+                if let Some(xwm) = data.hxwm.as_mut() {
+                    xwm.drag_drop();
+                }
+            }
             _ => {}
         }
     }
@@ -420,16 +457,18 @@ impl Helix {
             .cloned();
         match x11 {
             Some(super::window::X11Window::Smithay(x)) => PointerFocusTarget::X11(x),
-            // By its surface: a window shown again (GTK reuses one for
-            // each popup menu) has a new one, and the pointer enters it
-            // anew. (Drag and drop to Helix's windows comes in #191 step 5.)
-            Some(super::window::X11Window::Helix(_)) => PointerFocusTarget::Surface(surface),
+            // With the surface it was found by: a window shown again (GTK
+            // reuses one for each popup menu) has a new one, and the
+            // pointer enters it anew.
+            Some(super::window::X11Window::Helix(x)) => PointerFocusTarget::XHelix(x, Some(surface)),
             None => PointerFocusTarget::Surface(surface),
         }
     }
 
     /// The pointer (or touch) focus under `pos`, and where its surface is.
+    /// During a drag, X11 menus and drag icons (override-redirect windows)
+    /// are passed over: a drag icon under the pointer is no target.
     pub fn pointer_focus_under(&self, pos: Point<f64, Logical>) -> Option<(PointerFocusTarget, Point<f64, Logical>)> {
-        self.surface_under(pos).map(|(s, p)| (self.pointer_target(s), p))
+        self.surface_under_for(pos, self.dnd_active).map(|(s, p)| (self.pointer_target(s), p))
     }
 }
