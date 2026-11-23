@@ -40,7 +40,7 @@ Apps are the ones the upstream reports name.
 | X9 | W14 | Flag changed between two maps | VLC | `x11_map::override_redirect_changed_between_maps` |
 | X10 | S9, W19, W58 | Override-redirect windows are never configured, listed, focused or made active | GIMP submenus | `x11_map::override_redirect_windows_are_left_alone` |
 | X11 | S11, S12 | An override-redirect window that moves itself gets the pointer where it is now | | `x11_map::a_menu_that_moves_gets_the_pointer_where_it_is` |
-| X12 | W3 | One override-redirect window shown again and again (each time a new surface) | GTK 3 menus | `x11_map::a_menu_shown_again_works_again` (ignored) |
+| X12 | W3 | One override-redirect window shown again and again (each time a new surface) | GTK 3 menus | `x11_map::a_menu_shown_again_works_again` |
 | X72 | S10 | Override-redirect windows reparented back to the root on unmap | | not applicable: no frame windows |
 
 ## Which windows are managed

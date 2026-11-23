@@ -271,24 +271,24 @@ fn a_menu_that_moves_gets_the_pointer_where_it_is() {
 /// reuses one for each popup menu): it works every time.
 #[test]
 fn a_menu_shown_again_works_again() {
-    if common::known_failure(&[common::Xwm::Smithay], "an override-redirect window shown a second time never gets the pointer (#191)") {
-        return;
-    }
     let Some(mut session) = xwm::session() else { return };
     let x = X::new(&session);
     let menu = x.create_with(300, 300, 100, 100, CreateWindowAux::new().override_redirect(1));
-    x.conn.change_window_attributes(menu, &ChangeWindowAttributesAux::new().event_mask(EventMask::ENTER_WINDOW | EventMask::STRUCTURE_NOTIFY)).unwrap();
+    x.conn.change_window_attributes(menu, &ChangeWindowAttributesAux::new().event_mask(EventMask::ENTER_WINDOW | EventMask::POINTER_MOTION | EventMask::STRUCTURE_NOTIFY)).unwrap();
     for round in 0..3 {
         session.input("move 20 20");
         x.map(menu);
         until("the menu is not shown", || viewable(&x, menu));
-        // Time for the menu's surface to take its place on the screen
-        // (slow machines need longer than fast ones); a menu that missed
-        // the pointer for good doesn't get it with more time.
+        // Time for the menu's surface to take its place on the screen.
         std::thread::sleep(Duration::from_millis(1000));
         x.drain();
+        // The pointer comes in and moves over the menu: the menu gets its
+        // motion. (Not EnterNotify: X still has the pointer where it last
+        // saw it, over the menu shown before, so it may enter the menu as
+        // soon as it is mapped there, before the pointer really comes.)
         session.input("move 350 350");
-        x.wait_event(&format!("the pointer never entered the menu shown again ({round})"), |e| matches!(e, Event::EnterNotify(n) if n.event == menu).then_some(()));
+        session.input("move 360 360");
+        x.wait_event(&format!("the pointer never reached the menu shown again ({round})"), |e| matches!(e, Event::MotionNotify(n) if n.event == menu).then_some(()));
         x.conn.unmap_window(menu).unwrap();
         x.flush();
         until("the menu is still shown", || !viewable(&x, menu));
