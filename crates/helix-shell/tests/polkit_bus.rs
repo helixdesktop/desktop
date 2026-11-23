@@ -14,6 +14,8 @@ use zbus::zvariant::Value;
 
 const HELPER: &str = r#"#!/bin/sh
 read cookie
+# A request polkit no longer has: refused without asking anything.
+if [ "$cookie" = "gone" ]; then echo FAILURE; exit 1; fi
 echo "PAM_TEXT_INFO hello"
 echo "PAM_PROMPT_ECHO_OFF Password: "
 read pw
@@ -128,6 +130,18 @@ async fn authenticates_through_the_helper() {
         .unwrap();
     assert_eq!(error_name(call.await.unwrap()), "org.freedesktop.PolicyKit1.Error.Cancelled");
     drop(shown);
+
+    // A request the helper refuses without asking: the authentication
+    // fails (it used to run the helper again forever, holding the prompt
+    // turn), and the next one still gets its prompt.
+    let gone = tokio::time::timeout(Duration::from_secs(5), begin(&polkit, "gone")).await.expect("an authentication the helper refuses at once ends");
+    assert_eq!(error_name(gone), "org.freedesktop.PolicyKit1.Error.Failed");
+    let call = tokio::spawn({
+        let polkit = polkit.clone();
+        async move { begin(&polkit, "c1").await }
+    });
+    answer(prompt(&mut ui).await, "right");
+    assert!(call.await.unwrap().is_ok(), "the next authentication gets its turn");
 
     // Two users: the user picks first (ours listed first), then the
     // password; canceling the choice cancels.

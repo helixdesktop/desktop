@@ -199,6 +199,10 @@ async fn authenticate(ui: &mpsc::UnboundedSender<UiEvent>, message: &str, cookie
         stdin.write_all(format!("{cookie}\n").as_bytes()).await.map_err(|e| PolkitError::Failed(e.to_string()))?;
         let mut lines = BufReader::new(stdout).lines();
         let mut info = String::new();
+        // Whether this run of the helper asked anything: one that fails
+        // without asking (the request is gone, or PAM refuses outright)
+        // fails again at once, every time.
+        let mut asked = false;
         let succeeded = loop {
             let line = tokio::select! {
                 _ = &mut cancel => {
@@ -218,6 +222,7 @@ async fn authenticate(ui: &mpsc::UnboundedSender<UiEvent>, message: &str, cookie
             let (kind, text) = line.split_once(' ').unwrap_or((line.as_str(), ""));
             match kind {
                 "PAM_PROMPT_ECHO_OFF" | "PAM_PROMPT_ECHO_ON" => {
+                    asked = true;
                     let p = Prompt {
                         title: tr("Authentication Required").into(),
                         message: message.into(),
@@ -265,6 +270,14 @@ async fn authenticate(ui: &mpsc::UnboundedSender<UiEvent>, message: &str, cookie
         if succeeded {
             prompt::done(ui);
             return Ok(());
+        }
+        // Failed without asking: end it instead of running the helper
+        // again and again. It held the prompt turn forever, so no other
+        // prompt or file chooser came up.
+        if !asked {
+            prompt::done(ui);
+            tracing::warn!("the polkit helper failed without asking for anything");
+            return Err(PolkitError::Failed("the polkit helper failed without asking for anything".into()));
         }
         if warning.is_empty() {
             warning = tr(RETRY).into();
