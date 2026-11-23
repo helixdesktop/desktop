@@ -364,6 +364,8 @@ pub struct Listed {
     /// x, y, width, height.
     pub geometry: Option<(i32, i32, i32, i32)>,
     pub minimized: bool,
+    /// The size of the window's own icon image (0: none).
+    pub icon_size: u32,
 }
 
 #[derive(Default)]
@@ -447,6 +449,7 @@ impl Dispatch<HelixWindowListV1, ()> for ShellState {
                 entry.title = title;
             }
             E::Closed { id } => state.windows.retain(|w| w.id != id),
+            E::Icon { id, size, .. } => state.entry(id).icon_size = size,
             E::Focused { id } => state.focused = (id != 0).then_some(id),
             E::Geometry { id, x, y, width, height, minimized } => {
                 let entry = state.entry(id);

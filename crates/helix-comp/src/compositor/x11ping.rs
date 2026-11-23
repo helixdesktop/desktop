@@ -3,6 +3,12 @@
 //! switching"). Smithay's window manager does not pass these on, so Helix
 //! keeps a connection of its own to Xwayland: it sends the pings, reads
 //! icons, and a thread watches for ping answers and icon changes.
+//!
+//! It never waits for an X reply on the compositor's thread (#249): this
+//! is an ordinary X client, so one holding the X server (XGrabServer)
+//! would stop the whole desktop. What needs a reply (whether a window
+//! takes pings, its app's pid, its icon) is asked on a thread of its own,
+//! and the answer comes back as an [`X11Note`].
 
 use std::sync::Arc;
 
@@ -17,14 +23,29 @@ use smithay::reexports::x11rb::rust_connection::RustConnection;
 pub struct X11Ping {
     conn: Arc<RustConnection>,
     wm_protocols: Atom,
-    net_wm_pid: Atom,
     net_wm_ping: Atom,
-    net_wm_icon: Atom,
+    /// Questions for the asking thread.
+    asks: std::sync::mpsc::Sender<Ask>,
 }
 
-/// What the watching thread reports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What the asking thread finds out.
+enum Ask {
+    /// Whether the window takes pings, and its app's pid.
+    Ping(Window),
+    /// Its icon (and, with `watch`, follow its changes from now on).
+    Icon(Window, bool),
+}
+
+/// What the watching and asking threads report.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum X11Note {
+    /// Whether a window takes pings (`WM_PROTOCOLS` lists `_NET_WM_PING`)
+    /// and its app: its X11 client (resource id base) and `_NET_WM_PID`
+    /// (0 if unset), so a client slot reused by another app is not taken
+    /// for the old one ([`X11Ping::ask_ping`]).
+    PingInfo { window: Window, takes_pings: bool, client: (u32, u32) },
+    /// A window's icon, read ([`X11Ping::ask_icon`]).
+    Icon(Window, Option<X11Icon>),
     /// A window answered a ping.
     Pong(Window),
     /// A window's `_NET_WM_ICON` changed.
@@ -118,6 +139,37 @@ impl X11Ping {
             tracing::info!(err, "no X11 bells");
         }
         let conn = Arc::new(conn);
+        let (asks, asked) = std::sync::mpsc::channel::<Ask>();
+        {
+            let conn = conn.clone();
+            let answers = answers.clone();
+            let base_mask = !conn.setup().resource_id_mask;
+            std::thread::Builder::new()
+                .name("helix-x11-ask".into())
+                .spawn(move || {
+                    let property = |window: Window, atom: Atom, kind: AtomEnum, len: u32| conn.get_property(false, window, atom, kind, 0, len).ok().and_then(|c| c.reply().ok());
+                    while let Ok(ask) = asked.recv() {
+                        let note = match ask {
+                            Ask::Ping(window) => {
+                                let takes_pings = property(window, wm_protocols, AtomEnum::ATOM, 32).and_then(|r| r.value32().map(|mut v| v.any(|a| a == net_wm_ping))).unwrap_or(false);
+                                let pid = property(window, net_wm_pid, AtomEnum::CARDINAL, 1).and_then(|r| r.value32().and_then(|mut v| v.next())).unwrap_or(0);
+                                X11Note::PingInfo { window, takes_pings, client: (window & base_mask, pid) }
+                            }
+                            Ask::Icon(window, watch) => {
+                                if watch {
+                                    let _ = conn.change_window_attributes(window, &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE));
+                                }
+                                let icon = property(window, net_wm_icon, AtomEnum::CARDINAL, 4 * 1024 * 1024).and_then(|r| r.value32().map(|v| v.collect::<Vec<u32>>())).and_then(|v| pick_icon(&v));
+                                X11Note::Icon(window, icon)
+                            }
+                        };
+                        if answers.send(note).is_err() {
+                            return;
+                        }
+                    }
+                })
+                .map_err(|e| e.to_string())?;
+        }
         let reader = conn.clone();
         std::thread::Builder::new()
             .name("helix-x11-ping".into())
@@ -148,59 +200,27 @@ impl X11Ping {
                 }
             })
             .map_err(|e| e.to_string())?;
-        Ok(Self { conn, wm_protocols, net_wm_pid, net_wm_ping, net_wm_icon })
+        Ok(Self { conn, wm_protocols, net_wm_ping, asks })
     }
 
-    /// Ping `window` if it takes part (`WM_PROTOCOLS` lists `_NET_WM_PING`).
+    /// Find out whether `window` takes pings, and its app: answered with
+    /// [`X11Note::PingInfo`].
+    pub fn ask_ping(&self, window: Window) {
+        let _ = self.asks.send(Ask::Ping(window));
+    }
+
+    /// Ping `window` (one that takes pings, from [`X11Note::PingInfo`]).
     pub fn ping(&self, window: Window) -> bool {
-        let listed = self
-            .conn
-            .get_property(false, window, self.wm_protocols, AtomEnum::ATOM, 0, 32)
-            .ok()
-            .and_then(|c| c.reply().ok())
-            .and_then(|r| r.value32().map(|mut v| v.any(|a| a == self.net_wm_ping)))
-            .unwrap_or(false);
-        if !listed {
-            return false;
-        }
         let event = ClientMessageEvent::new(32, window, self.wm_protocols, [self.net_wm_ping, 0, window, 0, 0]);
         let sent = self.conn.send_event(false, window, EventMask::NO_EVENT, event).is_ok();
         let _ = self.conn.flush();
         sent
     }
 
-    /// Which app `window` belongs to: its X11 client (the resource id
-    /// base) and `_NET_WM_PID` (0 if unset), so a client slot reused by
-    /// another app is not mistaken for the old one.
-    pub fn client_of(&self, window: Window) -> (u32, u32) {
-        let base = window & !self.conn.setup().resource_id_mask;
-        let pid = self
-            .conn
-            .get_property(false, window, self.net_wm_pid, AtomEnum::CARDINAL, 0, 1)
-            .ok()
-            .and_then(|c| c.reply().ok())
-            .and_then(|r| r.value32().and_then(|mut v| v.next()))
-            .unwrap_or(0);
-        (base, pid)
-    }
-
-    /// Follow `window`'s icon changes, and read its icon now.
-    pub fn watch_icon(&self, window: Window) -> Option<X11Icon> {
-        let _ = self.conn.change_window_attributes(window, &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE));
-        let _ = self.conn.flush();
-        self.icon(window)
-    }
-
-    /// `window`'s icon, if it has a usable one.
-    pub fn icon(&self, window: Window) -> Option<X11Icon> {
-        let reply = self
-            .conn
-            .get_property(false, window, self.net_wm_icon, AtomEnum::CARDINAL, 0, 4 * 1024 * 1024)
-            .ok()?
-            .reply()
-            .ok()?;
-        let values: Vec<u32> = reply.value32()?.collect();
-        pick_icon(&values)
+    /// Read `window`'s icon (and with `watch`, follow its changes):
+    /// answered with [`X11Note::Icon`].
+    pub fn ask_icon(&self, window: Window, watch: bool) {
+        let _ = self.asks.send(Ask::Icon(window, watch));
     }
 
     /// Force Quit: close the app's connection to the display.

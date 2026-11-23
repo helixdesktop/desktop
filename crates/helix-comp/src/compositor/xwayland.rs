@@ -305,6 +305,8 @@ impl Helix {
                     use smithay::reexports::calloop::channel::Event::Msg;
                     match event {
                         Msg(super::x11ping::X11Note::Pong(id)) => state.x11_pong(id),
+                        Msg(super::x11ping::X11Note::PingInfo { window, takes_pings, client }) => state.x11_ping_info(window, takes_pings, client),
+                        Msg(super::x11ping::X11Note::Icon(id, icon)) => state.x11_icon_read(id, icon),
                         Msg(super::x11ping::X11Note::IconChanged(id)) => state.x11_icon_changed(id),
                         Msg(super::x11ping::X11Note::Bell(id)) => state.x11_bell(id),
                         Msg(super::x11ping::X11Note::Attention(id, action)) => state.x11_demands_attention(id, action),

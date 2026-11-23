@@ -16,14 +16,21 @@ use smithay::xwayland::XWaylandClientData;
 use super::Helix;
 
 /// Helix's XSETTINGS manager window on Xwayland.
+/// The XSETTINGS manager. Publishing needs an X reply (the root's
+/// `RESOURCE_MANAGER`, merged with ours), so it is done on a thread of its
+/// own (#249): this is an ordinary X client, and one holding the X server
+/// (XGrabServer) would stop the whole desktop.
 pub struct XSettings {
-    conn: RustConnection,
-    root: Window,
-    window: Window,
-    settings_atom: Atom,
-    resource_manager: Atom,
     serial: u32,
     published: Option<Vec<u8>>,
+    jobs: std::sync::mpsc::Sender<Publish>,
+}
+
+/// What to publish: new XSETTINGS bytes (if they changed), and Helix's
+/// X resources to merge into `RESOURCE_MANAGER`.
+struct Publish {
+    settings: Option<Vec<u8>>,
+    resources: Vec<(&'static str, String)>,
 }
 
 fn x_err(e: impl std::fmt::Display) -> String {
@@ -54,38 +61,52 @@ impl XSettings {
         let event = ClientMessageEvent::new(32, root, manager, [CURRENT_TIME, selection, window, 0, 0]);
         conn.send_event(false, root, EventMask::STRUCTURE_NOTIFY, event).map_err(x_err)?;
         conn.flush().map_err(x_err)?;
-        Ok(Self { conn, root, window, settings_atom, resource_manager, serial: 0, published: None })
+        let (jobs, todo) = std::sync::mpsc::channel::<Publish>();
+        std::thread::Builder::new()
+            .name("helix-xsettings".into())
+            .spawn(move || {
+                while let Ok(job) = todo.recv() {
+                    if let Err(err) = publish(&conn, root, window, settings_atom, resource_manager, job) {
+                        tracing::warn!(%err, "cannot publish XSETTINGS");
+                    }
+                }
+            })
+            .map_err(x_err)?;
+        Ok(Self { serial: 0, published: None, jobs })
     }
 
     /// Publish `settings` at Xwayland scale `scale` (only what changed).
     pub fn publish(&mut self, settings: &Settings, scale: i32) -> Result<(), String> {
         let values = xs::values(settings, scale);
-        // Compare without the serial, then stamp the new one.
         let unchanged = xs::encode(&values, 0);
-        if self.published.as_ref() != Some(&unchanged) {
+        let settings_bytes = if self.published.as_ref() != Some(&unchanged) {
             self.serial = self.serial.wrapping_add(1);
-            let bytes = xs::encode(&values, self.serial);
-            self.conn
-                .change_property(PropMode::REPLACE, self.window, self.settings_atom, self.settings_atom, 8, bytes.len() as u32, &bytes)
-                .map_err(x_err)?;
             self.published = Some(unchanged);
-        }
-        let existing = self
-            .conn
-            .get_property(false, self.root, self.resource_manager, AtomEnum::STRING, 0, 1 << 20)
-            .map_err(x_err)?
-            .reply()
-            .map(|r| String::from_utf8_lossy(&r.value).into_owned())
-            .unwrap_or_default();
-        let text = xs::merge_resources(&existing, &xs::resources(settings, scale));
-        if text != existing {
-            self.conn
-                .change_property(PropMode::REPLACE, self.root, self.resource_manager, AtomEnum::STRING, 8, text.len() as u32, text.as_bytes())
-                .map_err(x_err)?;
-        }
-        self.conn.flush().map_err(x_err)?;
-        Ok(())
+            Some(xs::encode(&values, self.serial))
+        } else {
+            None
+        };
+        self.jobs.send(Publish { settings: settings_bytes, resources: xs::resources(settings, scale) }).map_err(|_| "the XSETTINGS thread is gone".to_owned())
     }
+}
+
+/// Publishes `job` (on the XSETTINGS thread).
+fn publish(conn: &RustConnection, root: Window, window: Window, settings_atom: Atom, resource_manager: Atom, job: Publish) -> Result<(), String> {
+    if let Some(bytes) = job.settings {
+        conn.change_property(PropMode::REPLACE, window, settings_atom, settings_atom, 8, bytes.len() as u32, &bytes).map_err(x_err)?;
+    }
+    let existing = conn
+        .get_property(false, root, resource_manager, AtomEnum::STRING, 0, 1 << 20)
+        .map_err(x_err)?
+        .reply()
+        .map(|r| String::from_utf8_lossy(&r.value).into_owned())
+        .unwrap_or_default();
+    let text = xs::merge_resources(&existing, &job.resources);
+    if text != existing {
+        conn.change_property(PropMode::REPLACE, root, resource_manager, AtomEnum::STRING, 8, text.len() as u32, text.as_bytes()).map_err(x_err)?;
+    }
+    conn.flush().map_err(x_err)?;
+    Ok(())
 }
 
 impl Helix {
