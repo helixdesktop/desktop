@@ -445,3 +445,45 @@ fn hundreds_of_windows() {
     until("destroyed windows are still listed", || x.client_list().is_empty());
     xwm::wm_still_works(&session);
 }
+
+/// X119 (#231): a managed window put into another window (XEmbed tray
+/// icons, Wine making a window a child, Java's embedded frames) is no
+/// longer a top-level window: it leaves the client lists.
+#[test]
+fn a_window_put_into_another_is_no_longer_listed() {
+    let Some(session) = xwm::session() else { return };
+    let x = X::new(&session);
+    let window = x.mapped();
+    until("the window is not listed", || x.client_list().contains(&window));
+    let container = x.window();
+    x.conn.reparent_window(window, container, 0, 0).unwrap();
+    x.flush();
+    until("a window put into another is still listed", || !x.client_list().contains(&window) && !x.stacking_list().contains(&window));
+}
+
+/// X119 (#231): a window id given out again after its window was put into
+/// another and destroyed there (so the root never saw it destroyed) is a
+/// new window: managed with its own size, not the old window's.
+#[test]
+fn an_id_given_out_again_is_a_new_window() {
+    if common::known_failure(&[common::Xwm::Smithay], "a window id given out again keeps the old window's size (#231)") {
+        return;
+    }
+    let Some(session) = xwm::session() else { return };
+    let x = X::new(&session);
+    let window = x.mapped();
+    until("the window is not listed", || x.client_list().contains(&window));
+    let container = x.window();
+    x.conn.reparent_window(window, container, 0, 0).unwrap();
+    x.conn.destroy_window(window).unwrap();
+    x.flush();
+    std::thread::sleep(Duration::from_millis(200));
+    // The same id, on the root again (X clients choose their ids).
+    let aux = CreateWindowAux::new().event_mask(EventMask::STRUCTURE_NOTIFY | EventMask::PROPERTY_CHANGE);
+    x.conn.create_window(0, window, x.root, 20, 20, 120, 80, 0, WindowClass::INPUT_OUTPUT, 0, &aux).unwrap();
+    x.conn.map_window(window).unwrap();
+    x.flush();
+    until("the new window under the old id is not managed", || x.wm_state(window) == Some(1) && x.client_list().contains(&window));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(x.size(window), (120, 80), "the new window took the old window's size");
+}

@@ -508,20 +508,28 @@ impl Xwm {
         }
         match event {
             Event::CreateNotify(e) if e.parent == self.root && e.window != self.check => {
-                if !self.windows.contains_key(&e.window) {
-                    self.add(e.window, e.override_redirect, e.x.into(), e.y.into(), e.width.into(), e.height.into());
+                // An id given out again: whatever was known under it is gone
+                // (its window left the root without the window manager
+                // seeing it destroyed).
+                if self.windows.contains_key(&e.window) {
+                    self.forget(e.window, &mut actions)?;
                 }
+                self.add(e.window, e.override_redirect, e.x.into(), e.y.into(), e.width.into(), e.height.into());
             }
-            Event::DestroyNotify(e) => {
-                if let Some(win) = self.windows.remove(&e.window) {
-                    win.state().destroyed = true;
-                    let alarm = std::mem::take(&mut win.state().sync.alarm);
-                    if alarm != 0 {
-                        x11rb::protocol::sync::ConnectionExt::sync_destroy_alarm(&*self.conn, alarm)?;
+            Event::DestroyNotify(e) => self.forget(e.window, &mut actions)?,
+            // A top-level window put into another window (XEmbed tray
+            // icons, Wine switching a window between child and top level,
+            // Java's embedded frames) is no longer one Helix manages; its
+            // destruction won't reach the root. One put on the root becomes
+            // a top-level window.
+            Event::ReparentNotify(e) if e.event == self.root => {
+                if e.parent == self.root {
+                    if !self.windows.contains_key(&e.window) && e.window != self.check {
+                        self.add(e.window, e.override_redirect, e.x.into(), e.y.into(), 1, 1);
                     }
-                    self.unlist(e.window)?;
-                    self.window_serials.retain(|_, w| *w != e.window);
-                    actions.push(Action::Destroyed(win));
+                } else if self.windows.contains_key(&e.window) {
+                    tracing::debug!(window = e.window, parent = e.parent, "X11 window reparented away from the root");
+                    self.forget(e.window, &mut actions)?;
                 }
             }
             Event::MapRequest(e) => self.map_request(e.window, &mut actions)?,
@@ -826,6 +834,22 @@ impl Xwm {
             actions.push(Action::Unmapped(win.clone()));
         }
         self.conn.flush()?;
+        Ok(())
+    }
+
+    /// A window is gone for the window manager (destroyed, or no longer
+    /// a child of the root): everything known about it goes, and the
+    /// compositor forgets it.
+    fn forget(&mut self, id: XId, actions: &mut Vec<Action>) -> Result<(), ReplyOrIdError> {
+        let Some(win) = self.windows.remove(&id) else { return Ok(()) };
+        win.state().destroyed = true;
+        let alarm = std::mem::take(&mut win.state().sync.alarm);
+        if alarm != 0 {
+            x11rb::protocol::sync::ConnectionExt::sync_destroy_alarm(&*self.conn, alarm)?;
+        }
+        self.unlist(id)?;
+        self.window_serials.retain(|_, w| *w != id);
+        actions.push(Action::Destroyed(win));
         Ok(())
     }
 
