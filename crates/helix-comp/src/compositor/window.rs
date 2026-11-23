@@ -423,7 +423,8 @@ impl X11Window {
         either!(self, x => x.max_size())
     }
 
-    /// Whether it wants a title bar (`_MOTIF_WM_HINTS`).
+    /// Whether it decorates itself: `_MOTIF_WM_HINTS` asks for no
+    /// decorations, so Helix draws no title bar for it.
     pub fn is_decorated(&self) -> bool {
         either!(self, x => x.is_decorated())
     }

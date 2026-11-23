@@ -11,7 +11,8 @@ use std::process::Stdio;
 use super::window::{Window, X11Window};
 use smithay::input::keyboard::KeyboardTarget;
 use smithay::input::pointer::Focus;
-use smithay::utils::{Logical, Rectangle, Size, SERIAL_COUNTER};
+use smithay::utils::{Logical, Point, Rectangle, Size, SERIAL_COUNTER};
+use smithay::output::Output;
 use smithay::wayland::selection::data_device::{
     clear_data_device_selection, current_data_device_selection_userdata,
     request_data_device_client_selection, set_data_device_selection,
@@ -401,7 +402,9 @@ impl Helix {
         // Maximized or full screen before mapping (EWMH; #167): the app
         // gets that size before it shows, so it doesn't draw at another
         // size first; mapped once it has it.
-        let taken_over = kind == X11Kind::App && (x11.is_fullscreen() || x11.is_maximized());
+        // Covering a monitor exactly, undecorated: borderless full screen.
+        let legacy = if kind == X11Kind::App && !x11.is_fullscreen() { self.legacy_fullscreen_output(&x11, x11.last_configure()) } else { None };
+        let taken_over = kind == X11Kind::App && (x11.is_fullscreen() || x11.is_maximized() || legacy.is_some());
         if !taken_over && !self.x11_show(&x11) {
             return;
         }
@@ -420,7 +423,11 @@ impl Helix {
         }
         tracing::info!(title = x11.title(), class = x11.class(), ?location, ?size, "new X11 window");
         self.map_new_window(&window, location);
-        if x11.is_fullscreen() {
+        if let Some(output) = legacy {
+            tracing::info!(output = output.name(), "X11 window covers a monitor: full screen");
+            self.wm.legacy_fullscreen.push(window.clone());
+            self.fullscreen(&window, Some(output));
+        } else if x11.is_fullscreen() {
             self.fullscreen(&window, None);
         } else if x11.is_maximized() {
             self.maximize(&window);
@@ -489,13 +496,31 @@ impl Helix {
             }
             return;
         }
-        // Apps may resize themselves; Helix keeps deciding where they go.
+        // Apps may resize and move themselves.
         let mut geo = x11.last_configure();
         if let Some(w) = w {
             geo.size.w = w;
         }
         if let Some(h) = h {
             geo.size.h = h;
+        }
+        // Borderless full screen (#226), as mutter: an undecorated window
+        // asking to cover a monitor exactly goes full screen there, and
+        // leaves it when it asks for something else.
+        if let Some(window) = self.x11_window(&x11) {
+            let asked = Rectangle::new((x.unwrap_or(geo.loc.x), y.unwrap_or(geo.loc.y)).into(), geo.size);
+            let covers = self.legacy_fullscreen_output(&x11, asked);
+            if self.wm.legacy_fullscreen.contains(&window) {
+                if covers.is_none() {
+                    tracing::info!("X11 window stopped covering its monitor: no longer full screen");
+                    self.restore_window(&window);
+                }
+            } else if let (Some(output), false) = (covers, self.is_any_taken_over(&window)) {
+                tracing::info!(output = output.name(), "X11 window covers a monitor: full screen");
+                self.wm.legacy_fullscreen.push(window.clone());
+                self.fullscreen(&window, Some(output));
+                return;
+            }
         }
         // Not while fullscreen, maximized or tiled (games set their video
         // mode's size after going fullscreen; as mutter, #165): the app is
@@ -520,7 +545,42 @@ impl Helix {
                 geo.size.h = geo.size.h.min(max.h);
             }
         }
+        // A position asked for after it is shown (Wine's SetWindowPos,
+        // installers and launchers), as mutter: kept on a monitor, its
+        // title bar within the work area (#226). Where a new window first
+        // goes stays Helix's choice.
+        if x.is_some() || y.is_some() {
+            if let Some(window) = self.x11_window(&x11).filter(|w| self.presence(w) == super::wm::Presence::Shown) {
+                geo.loc = self.constrained_x11_position(&window, (x.unwrap_or(geo.loc.x), y.unwrap_or(geo.loc.y)).into(), geo.size);
+                let _ = x11.configure(geo);
+                self.space.map_element(window, geo.loc, false);
+                return;
+            }
+        }
         let _ = x11.configure(geo);
+    }
+
+    /// The monitor an undecorated X11 app window covering `rect` exactly
+    /// is on: how SDL, Unity and Wine titles do borderless full screen.
+    fn legacy_fullscreen_output(&self, x11: &X11Window, rect: Rectangle<i32, Logical>) -> Option<Output> {
+        // Undecorated: it asks for no title bar (decorates itself).
+        if !x11.is_decorated() {
+            return None;
+        }
+        self.space.outputs().find(|o| self.space.output_geometry(o) == Some(rect)).cloned()
+    }
+
+    /// Where an X11 window asking to move to `to` goes: on the monitor
+    /// there (else its own), its title bar inside the work area and at
+    /// least a hand's width of it on the monitor.
+    fn constrained_x11_position(&self, window: &Window, to: Point<i32, Logical>, size: smithay::utils::Size<i32, Logical>) -> Point<i32, Logical> {
+        const VISIBLE: i32 = 64;
+        let output = self.space.output_under(to.to_f64()).next().cloned().or_else(|| self.output_of(window));
+        let Some(area) = output.and_then(|o| self.usable_area_of(&o)) else { return to };
+        let top = super::frames::frame_top(window);
+        let x = to.x.clamp(area.loc.x - size.w + VISIBLE, area.loc.x + area.size.w - VISIBLE);
+        let y = to.y.clamp(area.loc.y + top, (area.loc.y + area.size.h - VISIBLE).max(area.loc.y + top));
+        (x, y).into()
     }
 
     /// Override-redirect windows place themselves; follow them.
