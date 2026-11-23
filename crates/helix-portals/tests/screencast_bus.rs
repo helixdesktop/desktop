@@ -27,6 +27,8 @@ type Answer = (bool, u32, String, u32);
 struct Chooser {
     answers: Arc<Mutex<Vec<Answer>>>,
     asked: Arc<Mutex<Vec<Asked>>>,
+    /// When set, each answer waits for it (the user still choosing).
+    gate: Option<Arc<tokio::sync::Notify>>,
 }
 
 #[zbus::interface(name = "org.helixdesktop.ScreenCastChooser")]
@@ -39,6 +41,9 @@ impl Chooser {
     ) -> (bool, u32, String, u32) {
         let flag = |k: &str| options.get(k).and_then(|v| bool::try_from(v.clone()).ok()).unwrap_or(false);
         self.asked.lock().unwrap().push((app_id, monitors, flag("windows"), flag("remember")));
+        if let Some(gate) = &self.gate {
+            gate.notified().await;
+        }
         self.answers.lock().unwrap().remove(0)
     }
 
@@ -155,7 +160,7 @@ async fn share_a_monitor() {
     let asked = Arc::new(Mutex::new(Vec::new()));
     let _shell = bus
         .builder()
-        .serve_at("/org/helixdesktop/ScreenCastChooser", Chooser { answers, asked: asked.clone() })
+        .serve_at("/org/helixdesktop/ScreenCastChooser", Chooser { answers, asked: asked.clone(), gate: None })
         .unwrap()
         .name("org.gnome.Shell")
         .unwrap()
@@ -317,7 +322,7 @@ async fn share_several() {
     let answers = Arc::new(Mutex::new(vec![(true, 1, "DP-1".to_owned(), 0)]));
     let _shell = bus
         .builder()
-        .serve_at("/org/helixdesktop/ScreenCastChooser", Chooser { answers, asked: Arc::default() })
+        .serve_at("/org/helixdesktop/ScreenCastChooser", Chooser { answers, asked: Arc::default(), gate: None })
         .unwrap()
         .name("org.gnome.Shell")
         .unwrap()
@@ -342,4 +347,62 @@ async fn share_several() {
     let log = log.lock().unwrap().clone();
     assert!(log.iter().any(|l| l.starts_with("virtual")), "{log:?}");
     assert_eq!(log.iter().filter(|l| l.starts_with("start")).count(), 2, "{log:?}");
+}
+
+/// The frontend closes the session while the user is still choosing what
+/// to share (the app quit, or cancelled): once the user answers, nothing
+/// is recorded, and no recording is left running (#241).
+#[tokio::test(flavor = "multi_thread")]
+async fn closed_while_choosing() {
+    let Some(bus) = TestBus::start() else { return };
+    let session = SessionService::start(bus.builder()).await.unwrap();
+    let _session = tokio::spawn(session.run(std::future::pending()));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let store = std::env::temp_dir().join(format!("helix-cast-closed-{}.toml", std::process::id()));
+    let control = MonitorControl { store: Store::at(store), cast: Some(fake_recorder(log.clone())), ..MonitorControl::default() };
+    let services = CompositorServices::start_with(bus.builder(), vec![monitor("DP-1")], control).await.unwrap();
+    let (_events, rx) = mpsc::unbounded_channel::<Event>();
+    tokio::spawn(services.run(rx));
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let answers = Arc::new(Mutex::new(vec![(true, 1, "DP-1".to_owned(), 0)]));
+    let _shell = bus
+        .builder()
+        .serve_at("/org/helixdesktop/ScreenCastChooser", Chooser { answers, asked: asked.clone(), gate: Some(gate.clone()) })
+        .unwrap()
+        .name("org.gnome.Shell")
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let settings: Arc<Mutex<Snapshot>> = Arc::new(Mutex::new(BTreeMap::new()));
+    let _portals = PortalService::start(bus.builder(), settings).await.unwrap();
+    let conn = bus.connect().await;
+
+    let request = ObjectPath::try_from("/org/freedesktop/portal/desktop/request/1_1/r").unwrap();
+    let session = ObjectPath::try_from("/org/freedesktop/portal/desktop/session/1_1/closing").unwrap();
+    let none: HashMap<&str, Value<'_>> = HashMap::new();
+    assert_eq!(call(&conn, "CreateSession", &(&request, &session, "org.example.Meet", none.clone())).await.0, 0);
+    let options = HashMap::from([("types", Value::from(1u32))]);
+    assert_eq!(call(&conn, "SelectSources", &(&request, &session, "org.example.Meet", options)).await.0, 0);
+    let start = tokio::spawn({
+        let (conn, request, session, none) = (conn.clone(), request.clone().into_owned(), session.clone().into_owned(), none.clone());
+        async move { call(&conn, "Start", &(&request, &session, "org.example.Meet", "", none)).await.0 }
+    });
+    // The chooser is up; the frontend closes the session, then the user
+    // picks a monitor.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while asked.lock().unwrap().is_empty() {
+        assert!(std::time::Instant::now() < deadline, "the chooser was never asked");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    conn.call_method(Some(BUS_NAME), session.as_str(), Some("org.freedesktop.impl.portal.Session"), "Close", &()).await.unwrap();
+    gate.notify_one();
+    let response = tokio::time::timeout(Duration::from_secs(10), start).await.expect("Start answers").unwrap();
+    assert_ne!(response, 0, "a closed session's Start doesn't succeed");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!sharing(&conn).await, "a recording is left running: {:?}", log.lock().unwrap());
+    let started = log.lock().unwrap().iter().filter(|l| l.starts_with("start")).count();
+    let stopped = log.lock().unwrap().iter().filter(|l| l.starts_with("stop")).count();
+    assert_eq!(started, stopped, "every recording started was stopped: {:?}", log.lock().unwrap());
 }
