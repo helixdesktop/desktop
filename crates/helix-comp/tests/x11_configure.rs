@@ -312,6 +312,30 @@ fn an_app_moves_its_window_from_its_own_title_bar() {
     until("the window did not follow the pointer", || x.position(window) == (px + 100, py + 50));
 }
 
+/// X126: `_NET_WM_MOVERESIZE` from a touch on an app's own title bar
+/// (GTK, Chromium and Firefox on a touch screen): the window follows the
+/// finger.
+#[test]
+fn an_app_moves_its_window_by_touch() {
+    if common::known_failure(&[common::Xwm::Smithay, common::Xwm::Helix], "_NET_WM_MOVERESIZE only follows the pointer, not a touch (#281)") {
+        return;
+    }
+    let Some(mut session) = xwm::session() else { return };
+    let x = X::new(&session);
+    let window = x.mapped();
+    x.sync();
+    let (px, py) = x.position(window);
+    let (gx, gy) = (i32::from(px) + 50, i32::from(py) + 30);
+    session.input(&format!("touch down {gx} {gy}"));
+    x.tell_wm(window, "_NET_WM_MOVERESIZE", [gx as u32, gy as u32, 8, 1, 1]);
+    x.sync();
+    for step in 1..=10 {
+        session.input(&format!("touch move {} {}", gx + step * 10, gy + step * 5));
+    }
+    session.input("touch up");
+    until("the window did not follow the finger", || x.position(window) == (px + 100, py + 50));
+}
+
 /// X75 (S16): X11 coordinates at an Xwayland scale (Helix scales Xwayland
 /// on HiDPI screens; always by a whole number, see `xwayland_scale`):
 /// the X screen is that much bigger, and the pointer and windows agree

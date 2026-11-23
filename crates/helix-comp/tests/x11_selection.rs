@@ -701,3 +701,112 @@ fn two_types_asked_for_at_once_by_one_window() {
     });
     assert_eq!(got, vec![Some(b"twice".to_vec()), Some(b"twice".to_vec())], "one of the two requests was refused");
 }
+
+/// MULTIPLE (ICCCM 2.6.2: several targets in one request, as target and
+/// property pairs in an ATOM_PAIR property): answered at once, refused
+/// or converted, and the clipboard goes on working.
+#[test]
+fn a_multiple_request_is_answered_at_once() {
+    let Some(session) = xwm::session() else { return };
+    let mut app = wayland_app(&session);
+    app.copy("text/plain;charset=utf-8", b"several");
+    let (answer, after) = while_serving(&mut app, || {
+        let reader = Reader::new(&session);
+        let pairs = [atom(&reader.conn, "UTF8_STRING"), atom(&reader.conn, "HELIX_A"), atom(&reader.conn, "STRING"), atom(&reader.conn, "HELIX_B")];
+        let (pair, multiple) = (atom(&reader.conn, "ATOM_PAIR"), atom(&reader.conn, "HELIX_MULTIPLE"));
+        reader.conn.change_property32(PropMode::REPLACE, reader.window, multiple, pair, &pairs).unwrap();
+        reader.ask("MULTIPLE", "HELIX_MULTIPLE");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let notify = loop {
+            if let Event::SelectionNotify(n) = reader.next_event(deadline, "a MULTIPLE request was never answered") {
+                break n;
+            }
+        };
+        let answer = (notify.property != x11rb::NONE).then(|| {
+            let value = |name: &str| reader.conn.get_property(false, reader.window, atom(&reader.conn, name), AtomEnum::ANY, 0, 1024).unwrap().reply().unwrap().value;
+            (value("HELIX_A"), value("HELIX_B"))
+        });
+        (answer, reader.read("UTF8_STRING"))
+    });
+    if let Some((a, b)) = answer {
+        assert_eq!((a.as_slice(), b.as_slice()), (&b"several"[..], &b"several"[..]), "a MULTIPLE request was answered without the data");
+    }
+    assert_eq!(after.as_deref(), Some(&b"several"[..]), "the clipboard stopped working after a MULTIPLE request");
+}
+
+/// An X11 app owning the clipboard that answers TARGETS (`text`) and then
+/// never sends the data; each data request is reported.
+fn x11_owner_that_hangs(session: &HeadlessSession) -> mpsc::Receiver<()> {
+    let (conn, screen_num) = common::x11(session);
+    let root = conn.setup().roots[screen_num].root;
+    let window = helper_window(&conn, root, EventMask::NO_EVENT);
+    let (clipboard, targets, utf8) = (atom(&conn, "CLIPBOARD"), atom(&conn, "TARGETS"), atom(&conn, "UTF8_STRING"));
+    conn.set_selection_owner(window, clipboard, x11rb::CURRENT_TIME).unwrap();
+    conn.flush().unwrap();
+    let (asked, asks) = mpsc::channel();
+    std::thread::spawn(move || {
+        while let Ok(event) = conn.wait_for_event() {
+            let Event::SelectionRequest(request) = event else { continue };
+            if request.target != targets {
+                let _ = asked.send(());
+                continue;
+            }
+            conn.change_property32(PropMode::REPLACE, request.requestor, request.property, AtomEnum::ATOM, &[targets, utf8]).unwrap();
+            let notify = SelectionNotifyEvent { response_type: SELECTION_NOTIFY_EVENT, sequence: 0, time: request.time, requestor: request.requestor, selection: request.selection, target: request.target, property: request.property };
+            conn.send_event(false, request.requestor, EventMask::NO_EVENT, notify).unwrap();
+            conn.flush().unwrap();
+        }
+    });
+    asks
+}
+
+/// Xwayland going away (a crash) in the middle of a paste from an X11
+/// app: the Wayland app's paste ends instead of waiting for good, the X11
+/// copy is no longer offered, and a Wayland copy pastes into X11 apps
+/// once Xwayland is back.
+#[test]
+fn xwayland_going_away_mid_paste_ends_the_paste() {
+    let Some(session) = xwm::session() else { return };
+    let mut app = wayland_app(&session);
+    let asks = x11_owner_that_hangs(&session);
+    app.until("the X11 copy wasn't offered", |s| s.selection.as_ref().is_some_and(|(_, types)| types.iter().any(|t| t == "text/plain;charset=utf-8")));
+    let (offer, _) = app.state.selection.clone().unwrap();
+    let (read, write) = std::io::pipe().unwrap();
+    offer.receive("text/plain;charset=utf-8".into(), write.as_fd());
+    drop(write);
+    app.roundtrip();
+    let reading = std::thread::spawn(move || std::io::Read::read_to_end(&mut { read }, &mut Vec::new()));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while asks.try_recv().is_err() {
+        assert!(Instant::now() < deadline, "the X11 owner was never asked for the data");
+        app.roundtrip();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let killed = xwm::kill_xwayland(&session);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !reading.is_finished() {
+        assert!(Instant::now() < deadline, "a paste from an X11 app never ended after Xwayland went away");
+        app.roundtrip();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    app.until("the X11 copy is still offered after Xwayland went away", |s| s.selection.is_none());
+    drop(xwm::restarted_xwayland(&session, killed));
+    app.copy("text/plain;charset=utf-8", b"after the restart");
+    let got = while_serving(&mut app, || Reader::new(&session).read("UTF8_STRING"));
+    assert_eq!(got.as_deref(), Some(&b"after the restart"[..]), "a Wayland copy doesn't paste into X11 apps after Xwayland came back");
+}
+
+/// A Wayland copy made before Xwayland went away (a crash) pastes into
+/// X11 apps once it is back, as it did before.
+#[test]
+fn a_wayland_copy_pastes_into_x11_after_xwayland_comes_back() {
+    let Some(session) = xwm::session() else { return };
+    let mut app = wayland_app(&session);
+    app.copy("text/plain;charset=utf-8", b"before the restart");
+    let before = while_serving(&mut app, || Reader::new(&session).read("UTF8_STRING"));
+    assert_eq!(before.as_deref(), Some(&b"before the restart"[..]));
+    let killed = xwm::kill_xwayland(&session);
+    drop(xwm::restarted_xwayland(&session, killed));
+    let got = while_serving(&mut app, || Reader::new(&session).read("UTF8_STRING"));
+    assert_eq!(got.as_deref(), Some(&b"before the restart"[..]), "a Wayland copy made before Xwayland went away doesn't paste into X11 apps once it is back");
+}

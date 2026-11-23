@@ -60,9 +60,9 @@ Apps are the ones the upstream reports name.
 
 | ID | Sources | Scenario | Apps | Status |
 |---|---|---|---|---|
-| X76 | S13, W1, W6 | The surface's serial (or id) arriving before or after its first commit, on Xwayland's other connection | st | not testable headlessly: the order between Xwayland's X11 and Wayland connections can't be forced from a client |
-| X77 | S14 | Keyboard focus given before the surface is associated: keys lost or stuck | cosmic-comp | not testable headlessly: same ordering |
-| X78 | W9 | Associated before the first buffer: shown only once there is one | | not testable headlessly: Xwayland decides when buffers come |
+| X76 | S13, W1, W6 | The surface's serial (or id) arriving before or after its first commit, on Xwayland's other connection; hidden before pairing; the surface destroyed first; a serial repeated or forged | st | Helix's window manager: the pairing is a state machine of its own (`xwm/pairing.rs`) with unit tests for each order (`compositor::xwm::pairing::tests`); headlessly the order between Xwayland's two connections can't be forced from a client. Smithay's: not testable |
+| X77 | S14, W1 | Keyboard focus given before the surface is associated: keys lost or stuck; the focus lost and given again when the surface comes | cosmic-comp, Wine, SDL | `x11_focus_at_map::a_new_window_gets_the_focus_and_keeps_it`, `x11_focus_at_map::a_window_fullscreen_before_it_is_shown_gets_the_focus` (a new window is focused at map, before it has its surface; fixed in #229) |
+| X78 | W9 | Associated before the first buffer: shown only once there is one | | not testable headlessly: Xwayland decides when buffers come (a surface without a buffer draws nothing and takes no input either way) |
 
 ## Focus and input models
 
@@ -81,6 +81,9 @@ Apps are the ones the upstream reports name.
 | X31 | W48 | Quick focus changes settle; WM and app don't chase each other | Chrome | `x11_focus::quick_focus_changes_settle` |
 | X32 | S25, S38 | Activating the active window again rewrites nothing (`_NET_WM_STATE`, stacking, configure) | | `x11_focus::activating_the_active_window_again_changes_nothing` |
 | X33 | S39, W63 | Pings only for windows listing `_NET_WM_PING` | | `x11_focus::only_windows_listing_ping_are_pinged` |
+| X130 | review (#236) | A window that stops answering `_NET_WM_PING` (pinged when it gets focus) is flagged to the shell after `check-alive-timeout`, which offers Wait or Force Quit; Force Quit disconnects the app; a late answer unflags it; an app that never answered a ping (Zoom) is not flagged | Zoom | `x11_unresponsive::a_hung_x11_app_is_flagged_and_can_be_forced_to_quit`, `x11_unresponsive::a_hung_x11_app_answering_late_is_responding_again`, `x11_unresponsive::an_x11_app_that_never_answers_is_not_flagged` |
+| X131 | review (#236) | The `WM_HINTS` urgency hint marks a window as wanting attention, and taking it away or focus unmarks it; never the focused window | xterm (`bellIsUrgent`), IRC and chat clients | `x11_attention::the_urgency_hint_wants_attention`, `x11_attention::the_focused_window_is_not_marked` |
+| X132 | review (#236) | `_NET_WM_STATE_DEMANDS_ATTENTION` added, removed or toggled by client message: marks and unmarks the window; focus unmarks it | Firefox, Qt, Java | `x11_attention::demands_attention_wants_attention`, `x11_attention::the_focused_window_is_not_marked` |
 | X34 | S55, W26 | Changes the compositor makes reach X11 apps at once (flushed), without other X11 traffic | evince, GTK drag and drop | `x11_focus::focus_changes_reach_x11_apps_at_once` |
 | X90 | W53 | `_NET_ACTIVE_WINDOW` names a dummy window instead of None while a Wayland window is active | Wine | not applicable: Helix sets None (#166, `x11_windows::the_active_window_follows_focus`); revisit if Wine misbehaves |
 | X99 | S35, W62 | `_NET_ACTIVE_WINDOW` requests from apps and pagers | | `x11_windows::activation_requests` |
@@ -100,11 +103,12 @@ Apps are the ones the upstream reports name.
 | X41 | W34 | Size hints: the minimum is kept; a base size stands in for a missing minimum | | `x11_configure::the_minimum_size_is_kept`, `x11_configure::the_base_size_stands_in_for_a_minimum` (fixed in #211) |
 | X42 | S17 | `_GTK_FRAME_EXTENTS`: a maximized window's shadow goes off screen | GTK CSD apps | `x11_configure::a_maximized_window_puts_its_shadow_off_screen` |
 | X43 | S18, W86 | `_NET_WM_SYNC_REQUEST` before each resize for apps that sync | | `x11_configure::resizes_are_announced_to_apps_that_sync` (Helix's window manager), `x11_configure::an_app_that_never_answers_a_sync_request_still_resizes` |
-| X44 | W88 | `_NET_WM_MOVERESIZE`: move follows the pointer; unknown directions ignored | Steam, Chromium, Electron | `x11_configure::an_app_moves_its_window_from_its_own_title_bar` |
+| X44 | W88 | `_NET_WM_MOVERESIZE`: move follows the pointer; unknown directions ignored; the keyboard move and its cancel (directions 10 and 11) | Steam, Chromium, Electron | `x11_configure::an_app_moves_its_window_from_its_own_title_bar`, `x11_ewmh::keyboard_move_and_cancel` (Helix's window manager) |
+| X126 | review (#236) | `_NET_WM_MOVERESIZE` started from a touch: the window follows the finger | GTK, Chromium, Firefox on touch screens | `x11_configure::an_app_moves_its_window_by_touch` (ignored: both window managers follow the pointer only, #281) |
 | X73 | S19 | The frame's visual dropped the client's alpha | | not applicable: no frame windows |
 | X75 | S16 | Coordinates rounded wrongly with an Xwayland client scale | `x11_configure::coordinates_at_an_xwayland_scale_of_two` (Helix's Xwayland scale is always whole, see `xwayland_scale`, so the fractional rounding of S16 can't happen; this checks both directions at scale 2) |
 | X94 | W30 | Input shape: clicks outside it go through | shaped windows, OSDs | `x11_focus::the_pointer_outside_an_input_shape_goes_through` (fixed in #208) |
-| X95 | W28 | Windows at negative layout coordinates | | not testable headlessly: the headless session has one monitor at 0,0 |
+| X95 | W28 | Windows at negative layout coordinates | | not applicable: Helix's monitor layout always starts at 0,0 (`display_config.rs` refuses others, as mutter does), so no monitor is at negative coordinates; a window partly off the top left: `x11_configure::a_maximized_window_puts_its_shadow_off_screen`, `x11_self_placing::a_user_position_off_screen_stays_on_it` |
 | X98 | W43 | `_MOTIF_WM_HINTS` without decorations: no title bar from Helix | Steam, Chromium | `x11_props::motif_hints_without_decorations_get_no_title_bar`; a truncated property: `x11_props` garbage tests |
 | X122 | | Initial position: `USPosition` (the user's, e.g. `-geometry`) is kept at first map, on a monitor; `PPosition` (the program's) is not, Helix places the window (as mutter; transients and dialogs go over their parent either way) (#226) | xterm, saved sessions | `x11_self_placing::a_user_position_is_kept_at_map`, `x11_self_placing::a_user_position_off_screen_stays_on_it`, `x11_self_placing::a_program_position_is_not_kept` |
 | X123 | | Borderless full screen (an undecorated window covering a monitor exactly) and moves after mapping, kept on a monitor (#226) | SDL, Unity and Wine games; installers | `x11_self_placing` |
@@ -122,7 +126,7 @@ Apps are the ones the upstream reports name.
 | X56 | W8 | Properties set before mapping are there at first show | | `x11_shell::properties_set_before_mapping_show_at_once` |
 | X87 | S23, W42 | `_NET_WM_WINDOW_OPACITY` | xwaylandvideobridge | not applicable: Helix doesn't apply X11 window opacity |
 | X88 | W29 | Struts and `_NET_WORKAREA` | X11 panels; Qt, Java and Wine read the work area | X11 struts: not applicable (Helix doesn't honor them). `_NET_WORKAREA` published from Helix's own panels (#227): `x11_ewmh::the_work_area_follows_the_panels`, `x11_ewmh::the_desktop_is_described_to_apps` |
-| X89 | W46 | Startup notification (`_NET_STARTUP_ID`, `_NET_STARTUP_INFO`) | | not applicable: Helix doesn't read X11 startup notification |
+| X89 | W46 | Startup notification (`_NET_STARTUP_ID`, `_NET_STARTUP_INFO`): an X11 app launched from the dock or app grid ends the launch feedback with `_NET_STARTUP_INFO` "remove" | single-instance apps | applicable, not done: Helix doesn't read X11 startup notification yet, so the feedback ends when a window shows or times out (#282) |
 
 ## `_NET_WM_STATE` and the WM's identity
 
@@ -145,6 +149,9 @@ Apps are the ones the upstream reports name.
 | X58 | S36, W16, W56, W57 | The X stack follows what is on screen, and `_NET_CLIENT_LIST_STACKING` matches it, each window once | Slack, Discord, Chromium, Electron | `x11_stacking::the_x_stack_follows_focus`, `x11_stacking::the_x_stack_follows_raise_and_lower`, `x11_stacking::the_stacking_list_is_the_x_stack` (fixed in #213) |
 | X59 | W20 | Raising an app window keeps it under menus and tooltips | | `x11_stacking::raised_windows_stay_under_menus` (fixed in #214) |
 | X60 | W37 | A parentless popup over the app's fullscreen window is above it | Chromium | `x11_stacking::a_window_over_a_fullscreen_window_is_above_it` |
+| X127 | review (#225) | A window's dialogs, modal or not, stay above it when it is raised | JetBrains Find, GIMP and Krita tool dialogs, Wine owned windows | `transients::an_x11_dialog_stays_above_its_window_when_the_window_is_raised` (fixed in #225) |
+| X128 | review (#224, #232) | Hidden windows (minimized, or parked on another workspace) go under the shown ones in the X stack; withdrawn or destroyed while parked they are forgotten; one parked can be activated | | `x11_hidden::a_minimized_x11_window_goes_under_the_shown_ones`, `x11_hidden::an_x11_window_on_another_workspace_goes_under_the_shown_ones` (fixed in #232), `window_presence::an_x11_window_withdrawn_on_another_workspace_is_forgotten`, `window_presence::an_x11_window_destroyed_on_another_workspace_is_forgotten`, `window_presence::an_x11_window_on_another_workspace_can_be_activated` (fixed in #224) |
+| X129 | review (#240) | A minimized window maximized or going full screen stays minimized, and comes back in that state | games, video players | `window_presence::a_minimized_window_maximized_stays_hidden` (fixed in #240), `window_presence::a_minimized_window_going_full_screen_stays_hidden` |
 | X74 | S37 | Frames' MapNotify listed windows twice | | not applicable: no frame windows (duplicates are X3, X58) |
 
 ## Closing
@@ -171,6 +178,8 @@ Apps are the ones the upstream reports name.
 | X71 | W75 | A hung X11 owner doesn't break the clipboard for good | copyq, fcitx | `x11_selection::a_hung_owner_does_not_break_the_clipboard_for_good` |
 | X104 | W73 | Every type an X11 app offers reaches Wayland | Chromium → LibreOffice | `x11_clipboard::an_x11_image_pastes_into_a_wayland_app` |
 | X105 | S40 | The INCR size hint is not data | GTK on X11 | `x11_clipboard::a_large_x11_image_pastes_whole` |
+| X133 | review (#236) | `MULTIPLE` (several targets in one request): answered at once, and the clipboard goes on working | | `x11_selection::a_multiple_request_is_answered_at_once` (both window managers refuse it; converting it is #283) |
+| X134 | review (#236) | The clipboard after the app that copied exits ("copy in xterm, close it, paste"): with no clipboard manager or `SAVE_TARGETS` the paste fails today; GNOME keeps the clipboard | xterm, GTK 3 apps | open, a decision first (#284) |
 | X91 | W74 | X11 apps refused the clipboard while no X11 window has focus | | not applicable: Helix serves every request, as GNOME does (#172) |
 | X96 | W65 | CLIPBOARD and PRIMARY changed at once keep their own types | `x11_selection::clipboard_and_primary_taken_at_once_keep_their_own_types` |
 | X97 | W68 | Ownership flipping fast between an X11 app and the WM: no self-copy loop | Emacs | `x11_selection::clipboard_ownership_flipping_fast_settles` (fixed in #197), `x11_selection::the_clipboard_recovers_after_ownership_flipped_fast` |
@@ -200,6 +209,7 @@ Apps are the ones the upstream reports name.
 |---|---|---|---|---|
 | X53 | S58 | `_XSETTINGS_SETTINGS` reads back whole (strings padded) | GTK | `x11_props::xsettings_read_back_whole` |
 | X83 | S60, W82 | Xwayland gone: windows dropped, started again, X11 apps work | | `x11_windows::xwayland_is_started_again`, `x11_windows::the_window_list_drops_x11_windows_when_xwayland_goes` |
+| X135 | review (#236) | Xwayland gone in the middle of a drag or a clipboard transfer: a paste from an X11 app ends, a drag over or dropped on an X11 window ends, and a Wayland copy made before pastes into X11 apps once Xwayland is back | | `x11_selection::xwayland_going_away_mid_paste_ends_the_paste`, `x11_selection::a_wayland_copy_pastes_into_x11_after_xwayland_comes_back` (fixed in #236), `x11_dnd::a_drag_over_x11_when_xwayland_goes_away_ends`, `x11_dnd::a_drop_on_x11_when_xwayland_goes_away_ends` (fixed in #236 for Helix's window manager; Smithay's: known failure); Xwayland comes back on its own display, which no other X server can take meanwhile: `x11_windows::xwayland_comes_back_on_its_own_display` (fixed in #236) |
 | X84 | S61 | Stale lock and socket of a dead X server: the display reused, the lock 11 bytes | | `x11_windows::the_display_is_released_at_exit`; reuse not testable headlessly (display numbers race with other sessions) |
 | X86 | S59, W81 | A root cursor from the theme | GTK | `x11_windows::x11_windows_show_the_cursor_theme` |
 | X79 | S57 | Calling back into the WM from its callbacks deadlocked | | not applicable: Smithay's Rust API, not visible to X11 |

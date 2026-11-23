@@ -713,6 +713,15 @@ impl Dnd {
         }
     }
 
+    /// Xwayland went away: a Wayland drag dropped on an X11 window is
+    /// cancelled (one only over it ends with the seat's grab).
+    pub fn xwayland_gone(&mut self, selections: &mut Selections) {
+        if self.to_x.as_ref().is_some_and(|d| d.dropped) {
+            tracing::debug!("Xwayland went away before the X11 drop target finished");
+            self.end_to_x(false, selections);
+        }
+    }
+
     /// A window went away: a Wayland drag over it, or dropped on it, ends
     /// there (one dropped is cancelled: it can't finish any more).
     pub fn window_destroyed(&mut self, window: XId, selections: &mut Selections) {

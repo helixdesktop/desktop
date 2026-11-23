@@ -683,3 +683,53 @@ fn a_drag_whose_x11_target_goes_away_goes_on() {
     // And the window manager still manages new windows.
     let _again = X11::new(&session, (100, 100), false);
 }
+
+/// Wait (the Wayland app answering meanwhile) until the Wayland drag
+/// ended, or fail with `what`.
+fn until_drag_ended(app: &mut common::Client, what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while app.state.source_ended.is_none() {
+        assert!(Instant::now() < deadline, "{what}");
+        app.roundtrip();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Xwayland going away (a crash) while a Wayland drag is over an X11
+/// window: the drag ends when the button is let go, and X11 apps work
+/// once Xwayland is back.
+#[test]
+fn a_drag_over_x11_when_xwayland_goes_away_ends() {
+    let Some(mut session) = session() else { return };
+    let x = X11::new(&session, (300, 200), true);
+    let x_rect = x.rect();
+    let (mut app, surface, start) = wayland_window_by(&mut session);
+    let over_x = point_over_x(&mut session, &mut app, x_rect, &[]);
+    let saw = xdnd_target_app(x);
+    begin_wayland_drag(&mut session, &mut app, &surface, start, &[("text/plain;charset=utf-8", DATA)]);
+    glide(&mut session, start, over_x);
+    served(&mut app, &saw, |s| matches!(s, TargetSaw::Entered(..)), "the X11 window never got XdndEnter");
+    let killed = common::xwm::kill_xwayland(&session);
+    let x = common::xwm::restarted_xwayland(&session, killed);
+    session.input(&format!("move {} {}", over_x.0 + 1, over_x.1 + 1));
+    session.input(&format!("button {BTN_LEFT} 0"));
+    until_drag_ended(&mut app, "a Wayland drag over an X11 window never ended after Xwayland went away");
+    x.mapped();
+}
+
+/// Xwayland going away (a crash) after a Wayland drag was dropped on an
+/// X11 window, before the window finished: the drag ends.
+#[test]
+fn a_drop_on_x11_when_xwayland_goes_away_ends() {
+    if common::known_failure(&[common::Xwm::Smithay], "a Wayland drop on an X11 window isn't ended when Xwayland goes away before the window finished (as #230)") {
+        return;
+    }
+    let Some(mut session) = session() else { return };
+    let how = Target { leave_to_test: true, ..Target::default() };
+    let (saw, _conn, _window, mut app) = wayland_drop_on_x11(&mut session, how, &[("text/plain;charset=utf-8", DATA)]);
+    served(&mut app, &saw, |s| matches!(s, TargetSaw::Drop(..)), "the X11 window never got XdndDrop");
+    let killed = common::xwm::kill_xwayland(&session);
+    until_drag_ended(&mut app, "a drop on an X11 window never ended after Xwayland went away");
+    assert_eq!(app.state.source_ended, Some("cancelled"));
+    common::xwm::restarted_xwayland(&session, killed).mapped();
+}

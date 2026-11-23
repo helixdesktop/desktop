@@ -519,6 +519,41 @@ fn xwayland_is_started_again() {
     x.mapped();
 }
 
+/// Another X server (another session's Xwayland) looking for a display
+/// while Xwayland is being started again doesn't get the session's: it
+/// is kept, and Xwayland comes back on it (X11 apps and the session keep
+/// DISPLAY). The other server is played by this test, taking the display
+/// as X servers and Smithay do: its lock file created, or taken over
+/// from a process that is gone.
+#[test]
+fn xwayland_comes_back_on_its_own_display() {
+    let Some(session) = session() else { return };
+    let number: u32 = session.x_display.trim_start_matches(':').parse().expect("a display number");
+    let lock = format!("/tmp/.X{number}-lock");
+    let killed = common::xwm::kill_xwayland(&session);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let back = loop {
+        assert!(Instant::now() < deadline, "Xwayland was not started again");
+        let taken = match std::fs::OpenOptions::new().write(true).create_new(true).open(&lock) {
+            Ok(_) => true,
+            Err(_) => std::fs::read_to_string(&lock).ok().and_then(|pid| pid.trim().parse::<i32>().ok()).is_some_and(|pid| {
+                // SAFETY: kill(2) with signal 0 only checks the process.
+                unsafe { libc::kill(pid, 0) != 0 }
+            }),
+        };
+        if taken {
+            let _ = std::fs::remove_file(&lock);
+            panic!("another X server could take the session's display while Xwayland was started again");
+        }
+        if let Some(pid) = common::xwm::xwayland_pid(&session).filter(|pid| *pid != killed) {
+            break pid;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(back > 0);
+    common::xwm::restarted_xwayland(&session, killed).mapped();
+}
+
 // ---- the window list, as the shell sees it ----
 
 mod shell {

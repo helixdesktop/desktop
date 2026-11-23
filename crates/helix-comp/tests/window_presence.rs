@@ -64,6 +64,34 @@ fn a_minimized_window_maximized_stays_hidden() {
     });
 }
 
+/// A minimized X11 window asking to go full screen itself (a game, a
+/// video player): it stays minimized, and is full screen when shown
+/// again, as a maximized one (above).
+#[test]
+fn a_minimized_window_going_full_screen_stays_hidden() {
+    let Some((session, mut shell)) = session_with_shell("presence-fullscreen") else { return };
+    let x = X::new(&session);
+    let window = x.mapped_titled("hidden");
+    let id = shell.window("hidden").id;
+    shell.action(id, action::MINIMIZE);
+    until("the window was not minimized", || x.wm_state(window) == Some(3));
+    x.net_wm_state(window, 1, &["_NET_WM_STATE_FULLSCREEN"]);
+    until("the window was not told it is full screen", || x.has_state(window, "_NET_WM_STATE_FULLSCREEN"));
+    x.sync();
+    shell.until("the window is not listed once, minimized", |s| {
+        let listed: Vec<_> = s.windows.iter().filter(|w| w.title == "hidden").collect();
+        listed.len() == 1 && listed[0].minimized
+    });
+    assert_eq!(x.wm_state(window), Some(3), "the window is not Iconic any more");
+    shell.activate(id);
+    until("the window was not shown again", || x.wm_state(window) == Some(1));
+    until("the window was not shown full screen", || x.position(window) == (0, 0) && x.size(window) == SCREEN);
+    shell.until("the window is not listed once, shown", |s| {
+        let listed: Vec<_> = s.windows.iter().filter(|w| w.title == "hidden").collect();
+        listed.len() == 1 && !listed[0].minimized
+    });
+}
+
 /// Show Desktop again brings back the windows it hid, even when one of
 /// them was closed meanwhile (it used to minimize everything again).
 #[test]
