@@ -56,9 +56,6 @@ fn a_synthetic_unmap_of_a_menu_is_ignored() {
 /// X3: mapped three times without unmapping (GTK 4 apps do): listed once.
 #[test]
 fn a_window_mapped_three_times_is_listed_once() {
-    if common::known_failure(&[common::Xwm::Smithay], "a window mapped again while mapped is listed twice in _NET_CLIENT_LIST_STACKING (#191)") {
-        return;
-    }
     let Some(session) = xwm::session() else { return };
     let x = X::new(&session);
     let window = x.window();
@@ -95,9 +92,6 @@ fn wm_state_follows_the_window() {
 /// window (the app starts afresh when it maps it again).
 #[test]
 fn net_wm_state_is_removed_when_withdrawn() {
-    if common::known_failure(&[common::Xwm::Smithay], "_NET_WM_STATE stays on a withdrawn window (#191)") {
-        return;
-    }
     let Some(session) = xwm::session() else { return };
     let x = X::new(&session);
     let window = x.mapped();

@@ -98,4 +98,4 @@ accesskit_atspi_common = { path = "vendor/accesskit_atspi_common" }
 # (https://github.com/helixdesktop/smithay/commits/helix). Moving the pin:
 # rebase those commits onto a newer upstream commit, push, and change rev
 # here (helixdesktop/desktop#187).
-smithay = { git = "https://github.com/helixdesktop/smithay", rev = "8f08eea531804211d32500b5d69b25ce60fa30f2" }
+smithay = { git = "https://github.com/helixdesktop/smithay", rev = "3892e067633e5d0d9604fe74aaaf6525dee54386" }

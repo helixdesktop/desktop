@@ -364,9 +364,6 @@ fn xdnd_proxy(proper: bool) {
 /// crashed or closed it): the drag ends, and the pointer works again.
 #[test]
 fn a_drag_whose_source_goes_away_ends() {
-    if common::known_failure(&[common::Xwm::Smithay], "the drag never ends when its X11 source's window is destroyed, and the pointer stays in the drag (#191)") {
-        return;
-    }
     let Some(mut session) = session() else { return };
     let mut source = None;
     let mut d = x11_drag_to_wayland(&mut session, |s| {
@@ -527,9 +524,6 @@ fn a_drop_fetched_late_is_still_served() {
 /// each is answered with its own data.
 #[test]
 fn several_types_fetched_at_once() {
-    if common::known_failure(&[common::Xwm::Smithay], "of several types asked for at once during a drop, only the last gets its data (#191)") {
-        return;
-    }
     several_types(false);
 }
 

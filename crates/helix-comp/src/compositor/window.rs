@@ -489,7 +489,13 @@ impl X11Window {
     /// Moves and resizes it.
     pub fn configure(&self, rect: impl Into<Option<Rectangle<i32, Logical>>>) -> Result<(), smithay::xwayland::xwm::X11SurfaceError> {
         match self {
-            Self::Smithay(s) => s.configure(rect),
+            // Resizes go through _NET_WM_SYNC_REQUEST for apps that take
+            // part (Smithay falls back to a plain configure otherwise);
+            // one that doesn't answer in time doesn't hold them up.
+            Self::Smithay(s) => match rect.into() {
+                Some(rect) if !s.is_override_redirect() => s.configure_with_sync(rect, Some(std::time::Duration::from_millis(200))),
+                rect => s.configure(rect),
+            },
             Self::Helix(w) => w.configure(rect.into()).map_err(Into::into),
         }
     }

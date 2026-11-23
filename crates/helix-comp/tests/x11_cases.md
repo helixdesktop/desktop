@@ -10,9 +10,9 @@ shell) see, not how the window manager does it, so the same tests hold for
 Smithay's window manager today and Helix's later.
 
 Status:
-- a test name: the test checking it. "(ignored)" means it fails on
-  today's window manager; the reason is in the test's `#[ignore]`, and
-  Helix's window manager has to make it pass.
+- a test name: the test checking it. "(ignored)" means it fails on a
+  window manager; the test's `common::known_failure` names which and
+  why. "(fixed in #N)" names the issue that made it pass on Smithay's.
 - **not applicable**: the case only exists for a design Helix doesn't have
   (frame windows), or contradicts a choice Helix made on purpose.
 - **not testable headlessly**: it needs something a headless test can't
@@ -26,8 +26,8 @@ Apps are the ones the upstream reports name.
 |---|---|---|---|---|
 | X1 | S1, W11 | Withdrawn per ICCCM 4.1.4 (unmap plus a synthetic UnmapNotify), mapped and withdrawn again before the WM catches up; synthetic unmaps of override-redirect windows aren't requests | Zoom | `x11_map::withdraw_and_map_in_a_row_ends_shown`, `x11_map::a_synthetic_unmap_of_a_menu_is_ignored`, `x11_windows::a_window_shown_and_hidden_at_once_stays_hidden` |
 | X2 | S2 | Destroying a frame destroyed the client window inside it | GIMP | not applicable: no frame windows |
-| X3 | S3, S37 | MapWindow sent several times without unmapping: listed once | GTK 4 | `x11_map::a_window_mapped_three_times_is_listed_once` (ignored) |
-| X4 | S4, W12 | `WM_STATE` Normal on map, Withdrawn on unmap, as a `WM_STATE`-typed pair; `_NET_WM_STATE` removed when withdrawn | Wine | `x11_map::wm_state_follows_the_window`, `x11_windows::a_hidden_window_is_withdrawn`, `x11_map::net_wm_state_is_removed_when_withdrawn` (ignored) |
+| X3 | S3, S37 | MapWindow sent several times without unmapping: listed once | GTK 4 | `x11_map::a_window_mapped_three_times_is_listed_once` (fixed in #213) |
+| X4 | S4, W12 | `WM_STATE` Normal on map, Withdrawn on unmap, as a `WM_STATE`-typed pair; `_NET_WM_STATE` removed when withdrawn | Wine | `x11_map::wm_state_follows_the_window`, `x11_windows::a_hidden_window_is_withdrawn`, `x11_map::net_wm_state_is_removed_when_withdrawn` (fixed in #215) |
 | X5 | S5 | `WM_HINTS` initial state Iconic: starts minimized, `WM_STATE` Iconic, `_NET_WM_STATE_HIDDEN` | XCOM 2 | `x11_map::a_window_asking_to_start_iconic_starts_minimized` |
 | X6 | S6, W61 | Minimized: Iconic and HIDDEN; restored: Normal; focus and fullscreen never rewrite `WM_STATE` | Dishonored 2, Steam | `x11_map::minimize_and_restore` (fixed in #194), `x11_map::focus_and_fullscreen_leave_wm_state_alone` |
 | X7 | S7 | `WM_CHANGE_STATE` honors its state: Normal doesn't minimize | | `x11_map::minimize_and_restore` (fixed in #194) |
@@ -97,13 +97,13 @@ Apps are the ones the upstream reports name.
 | X38 | S15, W27 | The window is told its real root position each time it is placed | Firefox, tooltips | `x11_configure::the_window_is_told_where_it_is` |
 | X39 | W10 | A size set before mapping is kept | | `x11_configure::a_size_asked_for_before_mapping_is_kept` |
 | X40 | W15 | Maximized before mapping: told its final size before it shows | | `x11_configure::maximized_before_mapping_gets_its_size_first` (Helix's window manager; Smithay's maps the window in its frame first) |
-| X41 | W34 | Size hints: the minimum is kept; a base size stands in for a missing minimum | | `x11_configure::the_minimum_size_is_kept`, `x11_configure::the_base_size_stands_in_for_a_minimum` (ignored) |
+| X41 | W34 | Size hints: the minimum is kept; a base size stands in for a missing minimum | | `x11_configure::the_minimum_size_is_kept`, `x11_configure::the_base_size_stands_in_for_a_minimum` (fixed in #211) |
 | X42 | S17 | `_GTK_FRAME_EXTENTS`: a maximized window's shadow goes off screen | GTK CSD apps | `x11_configure::a_maximized_window_puts_its_shadow_off_screen` |
 | X43 | S18, W86 | `_NET_WM_SYNC_REQUEST` before each resize for apps that sync | | `x11_configure::resizes_are_announced_to_apps_that_sync` (Helix's window manager), `x11_configure::an_app_that_never_answers_a_sync_request_still_resizes` |
 | X44 | W88 | `_NET_WM_MOVERESIZE`: move follows the pointer; unknown directions ignored | Steam, Chromium, Electron | `x11_configure::an_app_moves_its_window_from_its_own_title_bar` |
 | X73 | S19 | The frame's visual dropped the client's alpha | | not applicable: no frame windows |
 | X75 | S16 | Coordinates rounded wrongly with an Xwayland client scale | `x11_configure::coordinates_at_an_xwayland_scale_of_two` (Helix's Xwayland scale is always whole, see `xwayland_scale`, so the fractional rounding of S16 can't happen; this checks both directions at scale 2) |
-| X94 | W30 | Input shape: clicks outside it go through | shaped windows, OSDs | `x11_focus::the_pointer_outside_an_input_shape_goes_through` (ignored) |
+| X94 | W30 | Input shape: clicks outside it go through | shaped windows, OSDs | `x11_focus::the_pointer_outside_an_input_shape_goes_through` (fixed in #208) |
 | X95 | W28 | Windows at negative layout coordinates | | not testable headlessly: the headless session has one monitor at 0,0 |
 | X98 | W43 | `_MOTIF_WM_HINTS` without decorations: no title bar from Helix | Steam, Chromium | `x11_props::motif_hints_without_decorations_get_no_title_bar`; a truncated property: `x11_props` garbage tests |
 
@@ -138,8 +138,8 @@ Apps are the ones the upstream reports name.
 
 | ID | Sources | Scenario | Apps | Status |
 |---|---|---|---|---|
-| X58 | S36, W16, W56, W57 | The X stack follows what is on screen, and `_NET_CLIENT_LIST_STACKING` matches it, each window once | Slack, Discord, Chromium, Electron | `x11_stacking::the_x_stack_follows_focus`, `x11_stacking::the_x_stack_follows_raise_and_lower`, `x11_stacking::the_stacking_list_is_the_x_stack` (ignored) |
-| X59 | W20 | Raising an app window keeps it under menus and tooltips | | `x11_stacking::raised_windows_stay_under_menus` (ignored) |
+| X58 | S36, W16, W56, W57 | The X stack follows what is on screen, and `_NET_CLIENT_LIST_STACKING` matches it, each window once | Slack, Discord, Chromium, Electron | `x11_stacking::the_x_stack_follows_focus`, `x11_stacking::the_x_stack_follows_raise_and_lower`, `x11_stacking::the_stacking_list_is_the_x_stack` (fixed in #213) |
+| X59 | W20 | Raising an app window keeps it under menus and tooltips | | `x11_stacking::raised_windows_stay_under_menus` (fixed in #214) |
 | X60 | W37 | A parentless popup over the app's fullscreen window is above it | Chromium | `x11_stacking::a_window_over_a_fullscreen_window_is_above_it` |
 | X74 | S37 | Frames' MapNotify listed windows twice | | not applicable: no frame windows (duplicates are X3, X58) |
 
@@ -147,7 +147,7 @@ Apps are the ones the upstream reports name.
 
 | ID | Sources | Scenario | Apps | Status |
 |---|---|---|---|---|
-| X57 | W64, W38 | Close asks windows listing `WM_DELETE_WINDOW`; others, or ones that stopped listing it, are disconnected | xterm | `x11_shell::closing_asks_a_window_that_takes_part`, `x11_shell::closing_disconnects_an_app_that_does_not_take_part` (ignored) |
+| X57 | W64, W38 | Close asks windows listing `WM_DELETE_WINDOW`; others, or ones that stopped listing it, are disconnected | xterm | `x11_shell::closing_asks_a_window_that_takes_part`, `x11_shell::closing_disconnects_an_app_that_does_not_take_part` (fixed in #209) |
 
 ## Clipboard
 
@@ -157,12 +157,12 @@ Apps are the ones the upstream reports name.
 | X62 | S43 | One answer per request, no stray refusal after | | `x11_selection::each_request_gets_one_answer`, `x11_clipboard::an_x11_app_pastes_more_than_once` |
 | X63 | S44 | A Wayland app pastes an X11 copy again and again | | `x11_selection::a_wayland_app_pastes_an_x11_copy_again_and_again` |
 | X64 | W67 | A large X11 copy pasted twice in a row | | `x11_selection::a_large_x11_copy_pastes_whole_twice` |
-| X65 | S41 | A paste given up halfway doesn't stall the X11 owner | | `x11_selection::a_paste_given_up_halfway_does_not_stall_the_owner` |
+| X65 | S41 | A paste given up halfway doesn't stall the X11 owner | | `x11_selection::a_paste_given_up_halfway_does_not_stall_the_owner` (intermittent before #218) |
 | X66 | W66 | Two pastes of an X11 copy at once | | `x11_selection::two_pastes_at_once` |
 | X67 | W69 | An app asking twice and reading neither doesn't hold up others | fcitx, Slack, Telegram | `x11_selection::an_app_abandoning_its_requests_does_not_hold_up_others` |
 | X68 | W70 | A requestor gone halfway through a large paste | fcitx | `x11_selection::a_requestor_gone_halfway_does_not_hold_up_others` |
 | X69 | W71 | Unknown types are refused at once, every time | | `x11_selection::unknown_types_are_refused_at_once` |
-| X70 | W72 | Wayland text under every X11 text target (UTF8_STRING, STRING, TEXT) | xclip | `x11_selection::wayland_text_under_every_x11_text_target` (ignored) |
+| X70 | W72 | Wayland text under every X11 text target (UTF8_STRING, STRING, TEXT) | xclip | `x11_selection::wayland_text_under_every_x11_text_target` (fixed in #216) |
 | X71 | W75 | A hung X11 owner doesn't break the clipboard for good | copyq, fcitx | `x11_selection::a_hung_owner_does_not_break_the_clipboard_for_good` |
 | X104 | W73 | Every type an X11 app offers reaches Wayland | Chromium → LibreOffice | `x11_clipboard::an_x11_image_pastes_into_a_wayland_app` |
 | X105 | S40 | The INCR size hint is not data | GTK on X11 | `x11_clipboard::a_large_x11_image_pastes_whole` |
@@ -179,13 +179,13 @@ Apps are the ones the upstream reports name.
 | X108 | S46 | XdndFinished names the target window | `x11_dnd::the_drop_window_over_wayland_is_named_and_finishes_in_its_own_name` |
 | X109 | S47 | The WM's drop proxy has a WM_NAME | Chromium, Electron | `x11_dnd::the_drop_window_over_wayland_is_named_and_finishes_in_its_own_name` |
 | X110 | S48 | `XdndProxy` on an X11 drop target | `x11_dnd::a_drop_target_behind_an_xdnd_proxy_gets_the_drag_there`, `x11_dnd::a_broken_xdnd_proxy_is_not_followed` |
-| X111 | S49 | The X11 drag source destroyed mid-drag: the drag ends | `x11_dnd::a_drag_whose_source_goes_away_ends` (ignored) |
+| X111 | S49 | The X11 drag source destroyed mid-drag: the drag ends | `x11_dnd::a_drag_whose_source_goes_away_ends` (fixed in #206) |
 | X112 | S50 | An override-redirect drag icon under the pointer isn't the target | Chromium, Electron | `x11_dnd::a_drag_icon_under_the_pointer_is_not_the_target` |
 | X113 | S51 | Wayland drag over one X11 window, then another: the drop lands on the second | `x11_dnd::a_wayland_drag_goes_from_one_x11_window_to_another` |
 | X115 | W77 | XdndFinished with performed false ends the drag; a forged one is ignored | `x11_dnd::a_drop_the_target_refuses_ends_the_drag_and_a_forged_finish_does_not` |
 | X116 | W78 | The X11 target asks for the data a while after the drop | `x11_dnd::a_drop_fetched_late_is_still_served` |
 | X117 | W79 | The X11 target window destroyed mid-drag | `x11_dnd::a_drag_whose_x11_target_goes_away_goes_on` (shutting the window manager down mid-drag: not testable headlessly, Xwayland only goes away by crashing) |
-| X118 | W80 | Several targets asked for at once during a drag | Chromium | `x11_dnd::several_types_fetched_at_once` (ignored), `x11_dnd::several_types_fetched_one_after_another` |
+| X118 | W80 | Several targets asked for at once during a drag | Chromium | `x11_dnd::several_types_fetched_at_once` (fixed in #207), `x11_dnd::several_types_fetched_one_after_another` |
 
 ## Xwayland itself
 
