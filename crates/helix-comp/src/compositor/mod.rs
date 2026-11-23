@@ -102,6 +102,25 @@ const ACTIVITY_THROTTLE_MS: u128 = 50;
 /// A relative pointer motion: from where, unaccelerated delta, time (ms).
 pub type RelativeMotion = (Point<f64, Logical>, Point<f64, Logical>, u64);
 
+/// The seat's drag-and-drop grab, if any, and whose drag it carries
+/// (#245). Set once the grab is in place, cleared when it ends: never a
+/// drag without a grab, nor an X11 drag that isn't one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DragState {
+    #[default]
+    None,
+    /// A Wayland app's drag.
+    Wayland,
+    /// An X11 app's drag (#191 step 5).
+    X11,
+}
+
+impl DragState {
+    pub fn active(self) -> bool {
+        self != Self::None
+    }
+}
+
 pub struct Helix {
     pub start_time: Instant,
     pub socket_name: OsString,
@@ -213,10 +232,9 @@ pub struct Helix {
     /// and whether a timer is set for its next stalled transfer.
     pub hxwm_watches: std::collections::HashMap<u64, smithay::reexports::calloop::RegistrationToken>,
     pub hxwm_selection_timer: bool,
-    /// The seat has a drag-and-drop grab (a Wayland app's drag or an X11
-    /// app's), and whether it carries an X11 app's drag (#191 step 5).
-    pub dnd_active: bool,
-    pub x_drag_grab: bool,
+    /// The seat's drag-and-drop grab: none, a Wayland app's drag, or an
+    /// X11 app's (#191 step 5, #245).
+    pub drag: DragState,
     /// Where an X11 app's drag source sends what it asks of Helix's window
     /// manager.
     pub x_drag_tx: Option<smithay::reexports::calloop::channel::Sender<xwm::DragCmd>>,
@@ -407,8 +425,7 @@ impl Helix {
             hxwm_sync_timer: false,
             hxwm_watches: std::collections::HashMap::new(),
             hxwm_selection_timer: false,
-            dnd_active: false,
-            x_drag_grab: false,
+            drag: DragState::None,
             x_drag_tx: None,
             xdisplay: None,
             xwayland_client: None,

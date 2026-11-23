@@ -211,7 +211,9 @@ impl PrimarySelectionHandler for Helix {
 /// pointer or touch (no drag icon is drawn).
 impl WaylandDndGrabHandler for Helix {
     fn dnd_requested<S: Source>(&mut self, source: S, _icon: Option<WlSurface>, seat: Seat<Self>, serial: Serial, type_: GrabType) {
-        self.dnd_active = true;
+        // The state is set once the grab is in place: a refused drag
+        // leaves none (an X11 drag after it would be turned away), and a
+        // grab it replaces ends (and clears the state) before.
         match type_ {
             GrabType::Pointer => {
                 let Some(pointer) = seat.get_pointer() else { return source.cancel() };
@@ -226,6 +228,7 @@ impl WaylandDndGrabHandler for Helix {
                 touch.set_grab(self, grab, serial);
             }
         }
+        self.drag = super::DragState::Wayland;
     }
 }
 /// A drag ended (dropped or cancelled): an X11 app's drag lets go of its
@@ -242,8 +245,7 @@ impl DndGrabHandler for Helix {
 
 impl Helix {
     pub(super) fn drag_grab_ended(&mut self) {
-        self.dnd_active = false;
-        self.x_drag_grab = false;
+        self.drag = super::DragState::None;
         if let Some(xwm) = self.hxwm.as_mut() {
             xwm.drag_grab_ended();
             self.helix_xwm_selection_timer();

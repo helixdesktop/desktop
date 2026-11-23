@@ -472,6 +472,6 @@ impl Helix {
     /// During a drag, X11 menus and drag icons (override-redirect windows)
     /// are passed over: a drag icon under the pointer is no target.
     pub fn pointer_focus_under(&self, pos: Point<f64, Logical>) -> Option<(PointerFocusTarget, Point<f64, Logical>)> {
-        self.surface_under_for(pos, self.dnd_active).map(|(s, p)| (self.pointer_target(s), p))
+        self.surface_under_for(pos, self.drag.active()).map(|(s, p)| (self.pointer_target(s), p))
     }
 }

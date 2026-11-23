@@ -993,27 +993,25 @@ impl Helix {
         use smithay::input::dnd::DnDGrab;
         const BTN_LEFT: u32 = 0x110;
         let (Some(tx), Some(_)) = (self.x_drag_tx.clone(), self.hxwm.as_ref()) else { return };
-        if self.dnd_active {
+        if self.drag.active() {
             return;
         }
         let seat = self.seat.clone();
         if let Some(pointer) = seat.get_pointer() {
             if let Some(start_data) = pointer.grab_start_data().filter(|d| d.button == BTN_LEFT) {
                 let source = self.hxwm.as_mut().unwrap().begin_x_drag(tx);
-                self.dnd_active = true;
-                self.x_drag_grab = true;
                 let grab = DnDGrab::new_pointer(&self.display_handle, start_data, source, seat.clone());
                 pointer.set_grab(self, grab, SERIAL_COUNTER.next_serial(), Focus::Keep);
+                self.drag = super::DragState::X11;
                 return;
             }
         }
         if let Some(touch) = seat.get_touch() {
             if let Some(start_data) = touch.grab_start_data() {
                 let source = self.hxwm.as_mut().unwrap().begin_x_drag(tx);
-                self.dnd_active = true;
-                self.x_drag_grab = true;
                 let grab = DnDGrab::new_touch(&self.display_handle, start_data, source, seat.clone());
                 touch.set_grab(self, grab, SERIAL_COUNTER.next_serial());
+                self.drag = super::DragState::X11;
             }
         }
     }
@@ -1021,7 +1019,7 @@ impl Helix {
     /// The X11 app's drag is gone (it, or its window, went away): the
     /// seat's grab ends, and the pointer works as before.
     fn x_drag_gone(&mut self) {
-        if !self.x_drag_grab {
+        if self.drag != super::DragState::X11 {
             return;
         }
         let seat = self.seat.clone();
