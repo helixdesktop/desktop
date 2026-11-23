@@ -9,6 +9,7 @@ use std::os::fd::OwnedFd;
 use std::process::Stdio;
 
 use super::window::{Window, X11Window};
+use smithay::input::keyboard::KeyboardTarget;
 use smithay::input::pointer::Focus;
 use smithay::utils::{Logical, Rectangle, Size, SERIAL_COUNTER};
 use smithay::wayland::selection::data_device::{
@@ -616,17 +617,35 @@ impl Helix {
         if x11.is_override_redirect() || !x11.is_activated() || self.lock.locked {
             return;
         }
-        // It got focus while it had no surface: enter again, now with it
-        // (the X input focus stays on it).
         let target = match x11 {
             X11Window::Smithay(s) => super::focus::KeyboardFocusTarget::X11(s),
             X11Window::Helix(w) => super::focus::KeyboardFocusTarget::XHelix(w),
         };
         let keyboard = self.seat.get_keyboard().unwrap();
         let focus = keyboard.current_focus();
-        if focus.is_none() || focus.as_ref() == Some(&target) {
-            keyboard.set_focus(self, Option::<super::focus::KeyboardFocusTarget>::None, SERIAL_COUNTER.next_serial());
-            keyboard.set_focus(self, Some(target), SERIAL_COUNTER.next_serial());
+        if focus.is_some() && focus.as_ref() != Some(&target) {
+            return;
+        }
+        // It got focus before it had a surface. A window focused before X
+        // mapped it (fullscreen or maximized before being shown) didn't
+        // get the X focus either: SetInputFocus fails on an unmapped
+        // window. Enter it again now, with its surface.
+        match &target {
+            // Helix's: its enter gives the X focus and enters the surface,
+            // without leaving it first (a leave for a surface that never
+            // got an enter, and the X focus via PointerRoot meanwhile).
+            super::focus::KeyboardFocusTarget::XHelix(_) if focus.is_some() => {
+                let seat = self.seat.clone();
+                KeyboardTarget::enter(&target, &seat, self, Vec::new(), SERIAL_COUNTER.next_serial());
+                KeyboardTarget::modifiers(&target, &seat, self, keyboard.modifier_state(), SERIAL_COUNTER.next_serial());
+            }
+            // Smithay's entered the surface on its own once it had one;
+            // focus again for the X focus (the app sees one FocusIn: it
+            // never had the X focus before).
+            _ => {
+                keyboard.set_focus(self, Option::<super::focus::KeyboardFocusTarget>::None, SERIAL_COUNTER.next_serial());
+                keyboard.set_focus(self, Some(target), SERIAL_COUNTER.next_serial());
+            }
         }
     }
 
