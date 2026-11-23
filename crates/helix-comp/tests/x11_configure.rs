@@ -352,3 +352,36 @@ fn coordinates_at_an_xwayland_scale_of_two() {
     assert_eq!((w, h), (200, 100), "the window's size in X pixels");
     assert!(px % 2 == 0 && py % 2 == 0, "a managed window at an odd X position {:?} at scale 2", (px, py));
 }
+
+/// #233: at an Xwayland scale of 2 an odd X size has no exact logical
+/// one; a window keeps the odd size it was made with and the odd size it
+/// asks for (not rounded to an even neighbor, which picky apps answer by
+/// asking again).
+#[test]
+fn odd_sizes_survive_an_xwayland_scale_of_two() {
+    if common::known_failure(&[common::Xwm::Smithay], "odd X sizes are rounded through logical pixels at a scale of 2 (#233)") {
+        return;
+    }
+    if !xwm::xwayland_at_least(24, 1) {
+        eprintln!("Xwayland older than 24.1; skipped");
+        return;
+    }
+    let comp = std::path::PathBuf::from(env!("CARGO_BIN_EXE_helix-comp"));
+    let settings = "[org/gnome/mutter/wayland]\nxwayland-scaling-factor=2.0\n";
+    let options = helix_test_support::headless::Options { comp: &comp, shell: None, size: (u32::from(xwm::SCREEN.0), u32::from(xwm::SCREEN.1)), settings, env: Vec::new() };
+    let Some(session) = helix_test_support::headless::HeadlessSession::start(options) else { return };
+    if session.x_display.is_empty() {
+        return;
+    }
+    let x = X::new(&session);
+    until("the X screen never became twice as big", || {
+        let g = x.conn.get_geometry(x.root).unwrap().reply().unwrap();
+        (g.width, g.height) == (xwm::SCREEN.0 * 2, xwm::SCREEN.1 * 2)
+    });
+    let window = x.create((10, 10), (251, 151));
+    x.map_managed(window);
+    until("the window didn't keep its odd size when shown", || x.size(window) == (251, 151));
+    x.conn.configure_window(window, &ConfigureWindowAux::new().width(301).height(201)).unwrap();
+    x.flush();
+    until("the window didn't get the odd size it asked for", || x.size(window) == (301, 201));
+}

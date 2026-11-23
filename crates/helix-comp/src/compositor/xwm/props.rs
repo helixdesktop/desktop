@@ -95,8 +95,10 @@ fn apply(a: &Atoms, win: &XWin, atom: u32, reply: Option<&GetPropertyReply>) {
         x if x == a.WM_NORMAL_HINTS => {
             let v = cardinals(reply);
             let flags = v.first().copied().unwrap_or(0);
+            // Any client can set any numbers: kept within what X sizes can
+            // be (#233).
             let pair = |i: usize| match (v.get(i), v.get(i + 1)) {
-                (Some(w), Some(h)) => Some((*w as i32, *h as i32)),
+                (Some(w), Some(h)) => Some(((*w).min(32767) as i32, (*h).min(32767) as i32)),
                 _ => None,
             };
             // The base size stands in for a minimum when none is given
