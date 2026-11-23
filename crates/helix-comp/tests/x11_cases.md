@@ -187,6 +187,7 @@ Apps are the ones the upstream reports name.
 | X116 | W78 | The X11 target asks for the data a while after the drop | `x11_dnd::a_drop_fetched_late_is_still_served` |
 | X117 | W79 | The X11 target window destroyed mid-drag | `x11_dnd::a_drag_whose_x11_target_goes_away_goes_on` (shutting the window manager down mid-drag: not testable headlessly, Xwayland only goes away by crashing) |
 | X118 | W80 | Several targets asked for at once during a drag | Chromium | `x11_dnd::several_types_fetched_at_once` (fixed in #207), `x11_dnd::several_types_fetched_one_after_another` |
+| X119 | review (#231) | A top-level window reparented into another window (XEmbed tray icons, Wine child windows, Java embedded frames) stops being managed; its id given out again later is a new window | Wine, Java, tray apps | `x11_map::a_window_put_into_another_is_no_longer_listed`, `x11_map::an_id_given_out_again_is_a_new_window` |
 
 ## Xwayland itself
 
