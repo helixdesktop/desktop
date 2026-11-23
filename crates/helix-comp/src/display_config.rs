@@ -1104,6 +1104,10 @@ impl DisplayConfig {
                 if let Err(err) = dc.store.save(&key, &config) {
                     tracing::warn!(%err, "cannot remember the monitor configuration");
                 }
+            } else if dc.layout().key() != key {
+                // Monitors came or went while the dialog was up: the
+                // configuration from before was for other monitors (#246).
+                tracing::info!(timed_out = keep.is_none(), "the monitors changed meanwhile; not reverting the display change");
             } else {
                 tracing::info!(timed_out = keep.is_none(), "reverting the display change");
                 if let Err(err) = dc.apply_and_publish(previous, iface.signal_emitter()).await {

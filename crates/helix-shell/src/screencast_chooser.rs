@@ -188,15 +188,26 @@ impl ScreenCastChooser {
         Ok(())
     }
 
-    /// Only the portal may ask, one question at a time (marks busy).
-    async fn check(&self, header: &Header<'_>, conn: &Connection) -> fdo::Result<()> {
+    /// Only the portal may ask, one question at a time: busy until the
+    /// returned guard goes, however the question ends (#246; a reset by
+    /// hand after the await stayed set if the call was dropped).
+    async fn check(&self, header: &Header<'_>, conn: &Connection) -> fdo::Result<Busy> {
         self.check_caller(header, conn).await?;
         let mut busy = self.busy.lock().unwrap_or_else(|e| e.into_inner());
         if *busy {
             return Err(fdo::Error::Failed("another question is open".into()));
         }
         *busy = true;
-        Ok(())
+        Ok(Busy(self.busy.clone()))
+    }
+}
+
+/// A question is open while this lives.
+struct Busy(Arc<Mutex<bool>>);
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = false;
     }
 }
 
@@ -215,12 +226,12 @@ impl ScreenCastChooser {
         let (windows, remember) = (flag("windows", false), flag("remember", false));
         let (virtual_monitor, multiple) = (flag("virtual", false), flag("multiple", false));
         let control: Vec<String> = options.get("control").and_then(|v| Vec::<String>::try_from(v.clone()).ok()).unwrap_or_default();
-        self.check(header, conn).await?;
+        let busy = self.check(header, conn).await?;
         let (reply, answer) = oneshot::channel();
         let question = ShareQuestion { app: app_label(app_id), monitors, windows, remember, control, virtual_monitor, multiple, reply };
         let sent = self.ui.send(UiEvent::ShareScreen(QuestionSlot::new(question))).is_ok();
         let chosen = if sent { answer.await.ok().flatten() } else { None };
-        *self.busy.lock().unwrap_or_else(|e| e.into_inner()) = false;
+        drop(busy);
         tracing::info!(app_id, ?chosen, "screen share answered");
         Ok(match chosen {
             Some(list) if !list.is_empty() => (true, list.iter().map(Shared::wire).collect()),
@@ -264,12 +275,12 @@ impl ScreenCastChooser {
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] conn: &Connection,
     ) -> fdo::Result<bool> {
-        self.check(&header, conn).await?;
+        let busy = self.check(&header, conn).await?;
         let (reply, answer) = oneshot::channel();
         let question = ControlQuestion { app: app_label(app_id), devices, reply };
         let sent = self.ui.send(UiEvent::AllowControl(ControlSlot::new(question))).is_ok();
         let allowed = sent && answer.await.unwrap_or(false);
-        *self.busy.lock().unwrap_or_else(|e| e.into_inner()) = false;
+        drop(busy);
         tracing::info!(app_id, allowed, "remote control answered");
         Ok(allowed)
     }
@@ -343,5 +354,26 @@ mod tests {
         // Unknown devices are left out.
         assert_eq!(control_message("Remmina", &d(&["touchscreen", "joystick"]), false), "Remmina wants to control your touchscreen.");
         assert_eq!(control_message("Remmina", &[], false), "Remmina wants to control your input devices.");
+    }
+}
+
+#[cfg(test)]
+mod busy_tests {
+    use super::*;
+
+    /// The busy flag clears however a question ends, a dropped call or a
+    /// panic included (#246).
+    #[test]
+    fn busy_clears_when_the_question_goes() {
+        let flag = Arc::new(Mutex::new(true));
+        drop(Busy(flag.clone()));
+        assert!(!*flag.lock().unwrap());
+        *flag.lock().unwrap() = true;
+        let f = flag.clone();
+        let _ = std::panic::catch_unwind(move || {
+            let _busy = Busy(f);
+            panic!("the question failed");
+        });
+        assert!(!*flag.lock().unwrap(), "a panic left it busy");
     }
 }

@@ -317,6 +317,32 @@ async fn reverted_and_unanswered_changes_go_back() {
     assert!(!store.exists());
 }
 
+/// Monitors change while the question is up (another monitor plugged in
+/// on HDMI-1): reverting doesn't apply the configuration from before,
+/// which was for other monitors (#246).
+#[tokio::test(flavor = "multi_thread")]
+async fn no_revert_onto_other_monitors() {
+    let Some(bus) = TestBus::start() else { return };
+    let store = scratch("hotplug");
+    let (shell, _calls) = fake_dialog(&bus).await;
+    let running = start(&bus, &store, both_on()).await;
+    let dc = proxy(&bus).await;
+    let (serial, ..) = dc.get_current_state().await.unwrap();
+    dc.apply_monitors_config(serial, 2, &dp_only(), HashMap::new()).await.unwrap();
+
+    let mut other = monitor("HDMI-1", 1920, false);
+    other.product = "Other Panel".into();
+    running.events.send(Event::Monitors(vec![monitor("DP-1", 0, true), other])).unwrap();
+    eventually(|| async { shown(&dc).await == both() }).await;
+    let applied = *running.applied.lock().unwrap();
+
+    answer(&shell, false).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(*running.applied.lock().unwrap(), applied, "the old configuration was applied to other monitors");
+    assert_eq!(shown(&dc).await, both());
+    let _ = std::fs::remove_dir_all(store.parent().unwrap());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_second_change_replaces_the_question() {
     let Some(bus) = TestBus::start() else { return };
