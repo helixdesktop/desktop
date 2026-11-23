@@ -132,11 +132,7 @@ impl Helix {
             (vec![mime.clone()], ServerSelection::Data { mime_type: mime.clone(), data: Arc::new(data) })
         };
         smithay::wayland::selection::data_device::set_data_device_selection(&self.display_handle, &self.seat, types.clone(), selection);
-        if let Some(xwm) = self.xwm.as_mut() {
-            if let Err(err) = xwm.new_selection(SelectionTarget::Clipboard, Some(types.clone())) {
-                tracing::warn!(?err, "cannot offer an agent's copy to X11");
-            }
-        }
+        self.x11_offer_selection(SelectionTarget::Clipboard, Some(types.clone()));
         self.clipboard_changed(types, Source::of(Kind::Agent));
         tracing::info!("an agent's data copied to the clipboard");
     }

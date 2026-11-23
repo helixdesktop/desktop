@@ -235,9 +235,6 @@ fn while_serving<T: Send>(app: &mut common::Client, x11: impl FnOnce() -> T + Se
 /// ending with an empty chunk (pasted images were cut or zeroed).
 #[test]
 fn a_large_wayland_copy_reaches_x11_whole() {
-    if common::not_yet("#191 step 4: selections") {
-        return;
-    }
     let Some(session) = xwm::session() else { return };
     let mut app = wayland_app(&session);
     let picture = data(2 * 1024 * 1024 + 123, 1);
@@ -255,9 +252,6 @@ fn a_large_wayland_copy_reaches_x11_whole() {
 /// listens for the requestor's property changes itself).
 #[test]
 fn a_large_wayland_copy_reaches_an_input_only_requestor() {
-    if common::not_yet("#191 step 4: selections") {
-        return;
-    }
     let Some(session) = xwm::session() else { return };
     let mut app = wayland_app(&session);
     let picture = data(512 * 1024, 8);
@@ -273,9 +267,6 @@ fn a_large_wayland_copy_reaches_an_input_only_requestor() {
 /// stray refusal after.
 #[test]
 fn each_request_gets_one_answer() {
-    if common::not_yet("#191 step 4: selections") {
-        return;
-    }
     let Some(session) = xwm::session() else { return };
     let mut app = wayland_app(&session);
     app.copy("text/plain;charset=utf-8", b"once each");
@@ -301,9 +292,6 @@ fn each_request_gets_one_answer() {
 /// X63: a Wayland app pastes from an X11 app again and again.
 #[test]
 fn a_wayland_app_pastes_an_x11_copy_again_and_again() {
-    if common::not_yet("#191 step 4: selections") {
-        return;
-    }
     let Some(session) = xwm::session() else { return };
     x11_owner(&session, vec![("UTF8_STRING", b"from x11".to_vec())], false);
     assert!(session.wait_for_log("selection set by an X11 app", Duration::from_secs(10)), "the compositor never saw the X11 copy");
@@ -317,9 +305,6 @@ fn a_wayland_app_pastes_an_x11_copy_again_and_again() {
 /// X64: a large X11 copy pasted twice in a row arrives whole both times.
 #[test]
 fn a_large_x11_copy_pastes_whole_twice() {
-    if common::not_yet("#191 step 4: selections") {
-        return;
-    }
     let Some(session) = xwm::session() else { return };
     let picture = data(1024 * 1024 + 7, 2);
     x11_owner(&session, vec![("image/png", picture.clone())], false);
@@ -337,9 +322,6 @@ fn a_large_x11_copy_pastes_whole_twice() {
 /// the next paste works.
 #[test]
 fn a_paste_given_up_halfway_does_not_stall_the_owner() {
-    if common::not_yet("#191 step 4: selections") {
-        return;
-    }
     let Some(session) = xwm::session() else { return };
     let picture = data(1024 * 1024, 3);
     let finished = x11_owner(&session, vec![("image/png", picture.clone()), ("UTF8_STRING", b"after".to_vec())], false);
@@ -370,9 +352,6 @@ fn a_paste_given_up_halfway_does_not_stall_the_owner() {
 /// arrive right.
 #[test]
 fn two_pastes_at_once() {
-    if common::not_yet("#191 step 4: selections") {
-        return;
-    }
     let Some(session) = xwm::session() else { return };
     let (a, b) = (data(300 * 1024, 4), data(200 * 1024, 5));
     x11_owner(&session, vec![("image/png", a.clone()), ("text/html", b.clone())], false);
@@ -407,9 +386,6 @@ fn two_pastes_at_once() {
 /// Slack): the clipboard is not held up for other apps.
 #[test]
 fn an_app_abandoning_its_requests_does_not_hold_up_others() {
-    if common::not_yet("#191 step 4: selections") {
-        return;
-    }
     let Some(session) = xwm::session() else { return };
     let mut app = wayland_app(&session);
     app.copy("text/plain;charset=utf-8", &data(4 * 1024, 6));
@@ -430,9 +406,6 @@ fn an_app_abandoning_its_requests_does_not_hold_up_others() {
 /// the transfer is dropped, and the next copy and paste work.
 #[test]
 fn a_requestor_gone_halfway_does_not_hold_up_others() {
-    if common::not_yet("#191 step 4: selections") {
-        return;
-    }
     let Some(session) = xwm::session() else { return };
     let mut app = wayland_app(&session);
     let big = data(2 * 1024 * 1024, 7);
@@ -460,9 +433,6 @@ fn a_requestor_gone_halfway_does_not_hold_up_others() {
 /// every time, and the clipboard still works after.
 #[test]
 fn unknown_types_are_refused_at_once() {
-    if common::not_yet("#191 step 4: selections") {
-        return;
-    }
     let Some(session) = xwm::session() else { return };
     let mut app = wayland_app(&session);
     app.copy("text/plain;charset=utf-8", b"real");
@@ -481,9 +451,6 @@ fn unknown_types_are_refused_at_once() {
 /// target (`xclip` asks for STRING).
 #[test]
 fn wayland_text_under_every_x11_text_target() {
-    if common::not_yet("#191 step 4: selections") {
-        return;
-    }
     if common::known_failure(&[common::Xwm::Smithay], "Wayland text is offered as UTF8_STRING only; STRING and TEXT are refused (#191)") {
         return;
     }
@@ -502,9 +469,6 @@ fn wayland_text_under_every_x11_text_target() {
 /// once another app copies, pasting works again.
 #[test]
 fn a_hung_owner_does_not_break_the_clipboard_for_good() {
-    if common::not_yet("#191 step 4: selections") {
-        return;
-    }
     let Some(session) = xwm::session() else { return };
     let mut app = wayland_app(&session);
     // It never even says what it offers (TARGETS).
@@ -521,9 +485,6 @@ fn a_hung_owner_does_not_break_the_clipboard_for_good() {
 /// answers about the two didn't cross).
 #[test]
 fn clipboard_and_primary_taken_at_once_keep_their_own_types() {
-    if common::not_yet("#191 step 4: selections") {
-        return;
-    }
     let Some(session) = xwm::session() else { return };
     let mut app = wayland_app(&session);
     assert!(app.primary_device.is_some(), "helix-comp offers no primary selection");
@@ -556,9 +517,6 @@ fn clipboard_and_primary_taken_at_once_keep_their_own_types() {
 /// pastes both ways (the window manager didn't end up asking itself).
 #[test]
 fn clipboard_ownership_flipping_fast_settles() {
-    if common::not_yet("#191 step 4: selections") {
-        return;
-    }
     let Some(session) = xwm::session() else { return };
     let mut app = wayland_app(&session);
     let mut owners = Vec::new();
@@ -586,9 +544,6 @@ fn clipboard_ownership_flipping_fast_settles() {
 /// clipboard isn't broken for good).
 #[test]
 fn the_clipboard_recovers_after_ownership_flipped_fast() {
-    if common::not_yet("#191 step 4: selections") {
-        return;
-    }
     let Some(session) = xwm::session() else { return };
     let mut app = wayland_app(&session);
     let _first = x11_owner(&session, vec![("UTF8_STRING", b"x11 first".to_vec())], false);

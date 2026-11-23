@@ -9,12 +9,13 @@
 //! manager, pairing X11 windows with their Wayland surfaces, mapping and
 //! withdrawing, override-redirect windows, configure requests, the
 //! window properties Helix reads, EWMH states and activation requests,
-//! the client lists, and closing. Selections and drag and drop come
-//! later (steps 4 and 5).
+//! the client lists, closing, and the clipboard and primary selection
+//! (`selection`). Drag and drop comes later (step 5).
 
 mod atoms;
 mod focus;
 mod props;
+mod selection;
 pub mod window;
 
 use std::collections::HashMap;
@@ -76,6 +77,18 @@ pub enum Action {
     Resize(XWin, u32),
     /// `_NET_CLOSE_WINDOW`.
     Close(XWin),
+    /// An X11 app owns the selection now, with these (Wayland) types.
+    SelectionOffered(smithay::wayland::selection::SelectionTarget, Vec<String>),
+    /// The X11 app owning the selection let it go (or went away).
+    SelectionCleared(smithay::wayland::selection::SelectionTarget),
+    /// An X11 app pastes the Wayland selection as `mime`: it is to be
+    /// written to `fd`.
+    SelectionWanted { selection: smithay::wayland::selection::SelectionTarget, mime: String, fd: OwnedFd },
+    /// Watch a transfer's pipe (for writing, or reading) and call
+    /// [`Xwm::selection_ready`] when it is ready, until that says stop.
+    Watch { id: u64, fd: OwnedFd, write: bool },
+    /// Stop watching a transfer's pipe.
+    Unwatch(u64),
 }
 
 pub struct Xwm {
@@ -101,6 +114,7 @@ pub struct Xwm {
     /// Managed windows, in the order they were mapped, and bottom to top.
     client_list: Vec<XId>,
     stacking: Vec<XId>,
+    selections: selection::Selections,
 }
 
 impl std::fmt::Debug for Xwm {
@@ -195,6 +209,7 @@ impl Xwm {
         conn.change_property32(PropMode::REPLACE, root, atoms._NET_CLIENT_LIST_STACKING, AtomEnum::WINDOW, &[])?;
         conn.change_property32(PropMode::REPLACE, root, atoms._NET_ACTIVE_WINDOW, AtomEnum::WINDOW, &[x11rb::NONE])?;
 
+        let selections = selection::Selections::new(&conn, atoms, root)?;
         let id_mask = conn.setup().resource_id_mask;
         let fd = conn.stream().as_fd().try_clone_to_owned()?;
         let mut xwm = Self {
@@ -212,12 +227,13 @@ impl Xwm {
             surface_serials: HashMap::new(),
             client_list: Vec::new(),
             stacking: Vec::new(),
+            selections,
         };
         // Windows made before the window manager started.
         let conn = xwm.conn.clone();
         let tree = conn.query_tree(root)?.reply()?;
         for child in tree.children {
-            if child == check {
+            if child == check || xwm.selections.is_own(child) {
                 continue;
             }
             if let Ok(attrs) = conn.get_window_attributes(child)?.reply() {
@@ -278,6 +294,9 @@ impl Xwm {
     fn handle_inner(&mut self, event: Event) -> Result<Vec<Action>, ReplyOrIdError> {
         let mut actions = Vec::new();
         tracing::trace!(?event, "X11 event");
+        if self.selections.handle(&event, &mut actions)? {
+            return Ok(actions);
+        }
         match event {
             Event::CreateNotify(e) if e.parent == self.root && e.window != self.check => {
                 if !self.windows.contains_key(&e.window) {
@@ -816,5 +835,39 @@ impl Xwm {
 
     pub fn windows(&self) -> impl Iterator<Item = &XWin> {
         self.windows.values()
+    }
+
+    /// A Wayland copy (its types), or none, for `selection`.
+    pub fn set_selection(&mut self, selection: smithay::wayland::selection::SelectionTarget, types: Option<Vec<String>>) {
+        if let Err(err) = self.selections.set_wayland(selection, types) {
+            tracing::warn!(%err, ?selection, "cannot offer the selection to X11");
+        }
+    }
+
+    /// A Wayland app pastes the X11 selection as `mime` into `fd`.
+    pub fn receive_selection(&mut self, selection: smithay::wayland::selection::SelectionTarget, mime: &str, fd: OwnedFd) -> Vec<Action> {
+        let mut actions = Vec::new();
+        if let Err(err) = self.selections.receive(selection, mime, fd, &mut actions) {
+            tracing::warn!(%err, ?selection, "cannot paste the X11 selection");
+        }
+        actions
+    }
+
+    /// A transfer's pipe is ready: whether to keep watching it.
+    pub fn selection_ready(&mut self, id: u64) -> (bool, Vec<Action>) {
+        let mut actions = Vec::new();
+        let keep = self.selections.ready(id, &mut actions);
+        (keep, actions)
+    }
+
+    /// When the next stalled transfer gives up.
+    pub fn selection_deadline(&self) -> Option<std::time::Instant> {
+        self.selections.deadline()
+    }
+
+    pub fn selection_expired(&mut self) -> Vec<Action> {
+        let mut actions = Vec::new();
+        self.selections.expired(&mut actions);
+        actions
     }
 }

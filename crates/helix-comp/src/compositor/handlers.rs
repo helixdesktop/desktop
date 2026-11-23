@@ -156,11 +156,7 @@ impl SelectionHandler for Helix {
         // other apps' requests without a word), so a copy with no line here
         // was refused.
         tracing::info!(?ty, app = %self.focused_app(), types = mime_types.as_ref().map_or(0, Vec::len), "selection set by a Wayland app");
-        if let Some(xwm) = self.xwm.as_mut() {
-            if let Err(err) = xwm.new_selection(ty, mime_types.clone()) {
-                tracing::warn!(?err, ?ty, "cannot offer selection to X11");
-            }
-        }
+        self.x11_offer_selection(ty, mime_types.clone());
         if ty == smithay::wayland::selection::SelectionTarget::Clipboard {
             let who = match source.as_ref() {
                 Some(source) => self.clipboard_source_of(source.client().as_ref()),
@@ -195,11 +191,7 @@ impl SelectionHandler for Helix {
             self.start_transfer(*session, mime_type, fd);
             return;
         }
-        if let Some(xwm) = self.xwm.as_mut() {
-            if let Err(err) = xwm.send_selection(ty, mime_type, fd) {
-                tracing::warn!(?err, "cannot transfer selection from X11");
-            }
-        }
+        self.x11_paste_selection(ty, mime_type, fd);
     }
 }
 

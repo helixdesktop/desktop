@@ -301,11 +301,7 @@ impl Helix {
             mime.clone(),
             super::ServerSelection::Image(std::sync::Arc::new(png)),
         );
-        if let Some(xwm) = self.xwm.as_mut() {
-            if let Err(err) = xwm.new_selection(smithay::wayland::selection::SelectionTarget::Clipboard, Some(mime.clone())) {
-                tracing::warn!(?err, "cannot offer the image to X11");
-            }
-        }
+        self.x11_offer_selection(smithay::wayland::selection::SelectionTarget::Clipboard, Some(mime.clone()));
         self.clipboard_changed(mime, super::clipboard::Source::of(super::clipboard::Kind::Shell));
         tracing::info!("image copied to the clipboard");
     }
@@ -324,11 +320,7 @@ impl Helix {
         }
         let mime: Vec<String> = TEXT_MIMES.iter().map(|m| (*m).to_owned()).collect();
         smithay::wayland::selection::data_device::set_data_device_selection(&self.display_handle, &self.seat, mime.clone(), super::ServerSelection::Text(std::sync::Arc::new(text)));
-        if let Some(xwm) = self.xwm.as_mut() {
-            if let Err(err) = xwm.new_selection(smithay::wayland::selection::SelectionTarget::Clipboard, Some(mime.clone())) {
-                tracing::warn!(?err, "cannot offer the text to X11");
-            }
-        }
+        self.x11_offer_selection(smithay::wayland::selection::SelectionTarget::Clipboard, Some(mime.clone()));
         self.clipboard_changed(mime, super::clipboard::Source::of(super::clipboard::Kind::Shell));
         tracing::info!("text copied to the clipboard");
     }

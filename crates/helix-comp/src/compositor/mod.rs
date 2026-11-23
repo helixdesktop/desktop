@@ -204,6 +204,10 @@ pub struct Helix {
     pub hxwm_source: Option<smithay::reexports::calloop::RegistrationToken>,
     /// A timer is set for a resize waiting on an X11 app's redraw (#191).
     pub hxwm_sync_timer: bool,
+    /// The clipboard transfers' pipes Helix's window manager has watched,
+    /// and whether a timer is set for its next stalled transfer.
+    pub hxwm_watches: std::collections::HashMap<u64, smithay::reexports::calloop::RegistrationToken>,
+    pub hxwm_selection_timer: bool,
     /// The X root cursor's theme, size and scale, as last set.
     pub x11_cursor: Option<(String, u32, i32)>,
     /// The running Xwayland's event source (removing it gives its display
@@ -389,6 +393,8 @@ impl Helix {
             hxwm: None,
             hxwm_source: None,
             hxwm_sync_timer: false,
+            hxwm_watches: std::collections::HashMap::new(),
+            hxwm_selection_timer: false,
             xdisplay: None,
             xwayland_client: None,
             xsettings: None,

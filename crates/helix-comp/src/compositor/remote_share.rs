@@ -176,8 +176,11 @@ impl Helix {
                 Ok(())
             }
             Some(ServerSelection::X11) => {
-                let xwm = self.xwm.as_mut().ok_or_else(|| failed("no X11"))?;
-                xwm.send_selection(SelectionTarget::Clipboard, mime_type, fd).map_err(|e| failed(&e.to_string()))
+                if self.xwm.is_none() && self.hxwm.is_none() {
+                    return Err(failed("no X11"));
+                }
+                self.x11_paste_selection(SelectionTarget::Clipboard, mime_type, fd);
+                Ok(())
             }
             None => request_data_device_client_selection(&self.seat, mime_type, fd).map_err(|e| failed(&e.to_string())),
         }
@@ -186,11 +189,7 @@ impl Helix {
     /// Session `session`'s content becomes the clipboard.
     fn set_remote_selection(&mut self, session: u32, mime_types: Vec<String>) {
         set_data_device_selection(&self.display_handle, &self.seat, mime_types.clone(), ServerSelection::Remote { session });
-        if let Some(xwm) = self.xwm.as_mut() {
-            if let Err(err) = xwm.new_selection(SelectionTarget::Clipboard, Some(mime_types.clone())) {
-                tracing::warn!(?err, "cannot offer the remote clipboard to X11");
-            }
-        }
+        self.x11_offer_selection(SelectionTarget::Clipboard, Some(mime_types.clone()));
         self.clipboard_changed(mime_types, super::clipboard::Source::of(super::clipboard::Kind::Remote(session)));
     }
 
@@ -232,9 +231,7 @@ impl Helix {
         );
         if owned {
             clear_data_device_selection(&self.display_handle, &self.seat);
-            if let Some(xwm) = self.xwm.as_mut() {
-                let _ = xwm.new_selection(SelectionTarget::Clipboard, None);
-            }
+            self.x11_offer_selection(SelectionTarget::Clipboard, None);
             self.clipboard_changed(Vec::new(), super::clipboard::Source::default());
         }
     }
