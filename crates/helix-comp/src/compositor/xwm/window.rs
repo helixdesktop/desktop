@@ -73,6 +73,10 @@ pub(super) struct State {
     /// `_GTK_FRAME_EXTENTS`: left, right, top, bottom.
     pub frame_extents: [i32; 4],
     pub net_state: HashSet<u32>,
+    /// `_NET_WM_STATE` messages (state, action: 0 remove, 1 add, 2
+    /// toggle) sent before the window is managed, in order: replayed over
+    /// the property when it is read, so neither loses (as mutter; #276).
+    pub premap_state: Vec<(u32, u32)>,
     /// Where Helix last put it, in Helix's logical coordinates.
     pub last_configure: Rectangle<i32, Logical>,
     /// Where the client last put or asked for it, in X pixels (x, y,

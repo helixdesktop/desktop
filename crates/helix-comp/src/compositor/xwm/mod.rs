@@ -793,7 +793,12 @@ impl Xwm {
             Box::new(move |xwm, replies, actions| {
                 props::apply_all(&xwm.atoms, &win, &atoms, replies);
                 xwm.break_transient_cycle(&win);
-                win.state().managed = true;
+                {
+                    let mut state = win.state();
+                    state.managed = true;
+                    // Merged into its states now: later messages are acted on.
+                    state.premap_state.clear();
+                }
                 tracing::debug!(window = win.window_id(), class = %win.class(), title = %win.title(), kind = ?win.window_type(), "managing an X11 window");
                 actions.push(Action::MapRequest(win));
                 xwm.log_table("managed");
@@ -1023,6 +1028,20 @@ impl Xwm {
                     // states a client may set.
                     if !a.client_state(atom) {
                         continue;
+                    }
+                    // Kept apart too: the property, read when it is
+                    // managed, would otherwise replace it (#276). An add or
+                    // remove outdoes what came before for that state;
+                    // toggles, any client's to send, are kept to 32.
+                    {
+                        let mut state = win.state();
+                        if action != 2 {
+                            state.premap_state.retain(|(a, _)| *a != atom);
+                        }
+                        if state.premap_state.len() >= 32 {
+                            state.premap_state.remove(0);
+                        }
+                        state.premap_state.push((atom, action));
                     }
                     if on {
                         win.state().net_state.insert(atom);
