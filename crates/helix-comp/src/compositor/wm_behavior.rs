@@ -192,7 +192,7 @@ impl Helix {
             // really moves.
             let unmaximize = self.is_any_taken_over(window);
             let initial_location = self.space.element_location(window).unwrap_or_default();
-            let grab = MoveGrab { start_data, window: window.clone(), initial_location, follow: false, unmaximize };
+            let grab = MoveGrab { start_data, window: window.clone(), initial_location, follow: false, unmaximize, ended: false };
             pointer.set_grab(self, grab, serial, Focus::Clear);
         } else if button == resize_button {
             if self.is_taken_over(window, Takeover::Maximized) || self.is_taken_over(window, Takeover::Fullscreen) {

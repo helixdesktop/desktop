@@ -553,6 +553,7 @@ impl Helix {
                 initial_location,
                 follow: false,
                 unmaximize,
+                ended: false,
             },
             SERIAL_COUNTER.next_serial(),
             Focus::Clear,

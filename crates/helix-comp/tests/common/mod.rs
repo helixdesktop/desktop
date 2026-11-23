@@ -70,6 +70,8 @@ pub struct State {
     pub press: Option<u32>,
     /// Whether the last toplevel configure said maximized.
     pub maximized: bool,
+    /// Whether the last toplevel configure said resizing.
+    pub resizing: bool,
     /// The clipboard selection offered (while focused) and its types.
     pub selection: Option<(wl_data_offer::WlDataOffer, Vec<String>)>,
     /// Types of offers announced but not yet made the selection.
@@ -117,6 +119,8 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for State {
         if let xdg_toplevel::Event::Configure { states, .. } = event {
             let maximized = xdg_toplevel::State::Maximized as u32;
             state.maximized = states.as_chunks::<4>().0.iter().any(|c| u32::from_ne_bytes(*c) == maximized);
+            let resizing = xdg_toplevel::State::Resizing as u32;
+            state.resizing = states.as_chunks::<4>().0.iter().any(|c| u32::from_ne_bytes(*c) == resizing);
         }
     }
 }
@@ -292,6 +296,19 @@ impl Client {
             assert!(Instant::now() < deadline, "{what}");
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// Acknowledge `t`'s latest configure (if any) and draw it again at
+    /// `size`.
+    pub fn redraw(&mut self, t: &Toplevel, size: (i32, i32)) {
+        self.roundtrip();
+        if let Some(serial) = self.state.configured.iter().rev().find(|(x, _)| x == &t.xdg).map(|(_, s)| *s) {
+            t.xdg.ack_configure(serial);
+            self.state.configured.retain(|(x, _)| x != &t.xdg);
+        }
+        t.surface.attach(Some(&filled(&self.shm, &self.qh, size)), 0, 0);
+        t.surface.commit();
+        self.roundtrip();
     }
 
     /// A mapped toplevel of `size`; `before_commit` runs before its

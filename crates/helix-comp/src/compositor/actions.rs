@@ -272,7 +272,7 @@ impl Helix {
             self.resize = Some(ResizeTracking { window: window.clone(), edges, initial, finished: false });
             pointer.set_grab(self, ResizeGrab { start_data, window, edges, initial, last_size: initial.size, follow: true }, serial, Focus::Clear);
         } else {
-            pointer.set_grab(self, MoveGrab { start_data, window, initial_location: location, follow: true, unmaximize: false }, serial, Focus::Clear);
+            pointer.set_grab(self, MoveGrab { start_data, window, initial_location: location, follow: true, unmaximize: false, ended: false }, serial, Focus::Clear);
         }
     }
 
