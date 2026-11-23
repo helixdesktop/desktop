@@ -260,6 +260,14 @@ impl X {
     pub fn focus(&self, window: Window) {
         self.activate(window, 2, x11rb::NONE);
         until("the window never became active", || self.active() == Some(window));
+        // `_NET_ACTIVE_WINDOW` is written a moment before the window
+        // manager sets the X input focus: wait for that too (a window that
+        // takes no input never gets it), or a focus change the test makes
+        // next can land first and be undone (#269).
+        let end = Instant::now() + Duration::from_secs(2);
+        while self.input_focus() != window && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     pub fn client_list(&self) -> Vec<Window> {
