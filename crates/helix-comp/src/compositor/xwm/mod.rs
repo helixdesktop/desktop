@@ -796,6 +796,7 @@ impl Xwm {
                     state.managed = true;
                     // Merged into its states now: later messages are acted on.
                     state.premap_state.clear();
+                    state.premap_desktop = None;
                 }
                 tracing::debug!(window = win.window_id(), class = %win.class(), title = %win.title(), kind = ?win.window_type(), "managing an X11 window");
                 actions.push(Action::MapRequest(win));
@@ -858,6 +859,9 @@ impl Xwm {
             // "_NET_WM_STATE": removed when the window is withdrawn).
             self.conn.change_property32(PropMode::REPLACE, id, self.atoms.WM_STATE, self.atoms.WM_STATE, &[0, x11rb::NONE])?;
             self.conn.delete_property(id, self.atoms._NET_WM_STATE)?;
+            // As `_NET_WM_DESKTOP` (EWMH; mutter): a window shown again
+            // starts where it asks then, not where it was (#279).
+            self.conn.delete_property(id, self.atoms._NET_WM_DESKTOP)?;
             win.state().net_state.clear();
             self.unlist(id)?;
             tracing::debug!(window = id, class = %win.class(), "X11 window withdrawn");
@@ -1105,8 +1109,16 @@ impl Xwm {
                     }),
                 );
             }
-        } else if e.type_ == a._NET_WM_DESKTOP && win.state().managed {
-            actions.push(Action::MoveToDesktop(win, data[0]));
+        } else if e.type_ == a._NET_WM_DESKTOP {
+            if win.state().managed {
+                actions.push(Action::MoveToDesktop(win, data[0]));
+            } else {
+                // Before it is shown: where it starts, over the property
+                // read when it is managed (#279).
+                let mut state = win.state();
+                state.premap_desktop = Some(data[0]);
+                state.initial_desktop = Some(data[0]);
+            }
         } else if e.type_ == a._NET_WM_FULLSCREEN_MONITORS {
             self.fullscreen_monitors(win, [data[0], data[1], data[2], data[3]])?;
         }

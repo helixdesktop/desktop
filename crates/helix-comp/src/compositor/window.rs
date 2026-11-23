@@ -501,6 +501,16 @@ impl X11Window {
         }
     }
 
+    /// The workspace it asked to start on (`_NET_WM_DESKTOP` before it was
+    /// mapped; `u32::MAX`: all of them; #279). Helix's window manager
+    /// only: Smithay's doesn't read it.
+    pub fn initial_desktop(&self) -> Option<u32> {
+        match self {
+            Self::Smithay(_) => None,
+            Self::Helix(w) => w.initial_desktop(),
+        }
+    }
+
     /// The rectangle last given to it.
     pub fn last_configure(&self) -> Rectangle<i32, Logical> {
         either!(self, x => x.last_configure())

@@ -76,6 +76,11 @@ pub(super) struct State {
     /// toggle) sent before the window is managed, in order: replayed over
     /// the property when it is read, so neither loses (as mutter; #276).
     pub premap_state: Vec<(u32, u32)>,
+    /// The workspace it asked to start on (`_NET_WM_DESKTOP`, read when it
+    /// is managed; `u32::MAX`: all of them), and the one a message asked
+    /// for before then, which wins over the property (#279).
+    pub initial_desktop: Option<u32>,
+    pub premap_desktop: Option<u32>,
     /// Where Helix last put it, in Helix's logical coordinates.
     pub last_configure: Rectangle<i32, Logical>,
     /// Where the client last put or asked for it, in X pixels (x, y,
@@ -252,6 +257,13 @@ impl XWin {
     /// Whether the user chose where it goes (`USPosition`).
     pub fn user_position(&self) -> bool {
         self.state().hints.user_position
+    }
+
+    /// The workspace it asked to start on (`_NET_WM_DESKTOP` before it was
+    /// mapped; `u32::MAX`: all of them), as the client said it: the
+    /// compositor checks it is one there is.
+    pub fn initial_desktop(&self) -> Option<u32> {
+        self.state().initial_desktop
     }
 
     /// The monitors its full screen spans (`_NET_WM_FULLSCREEN_MONITORS`:

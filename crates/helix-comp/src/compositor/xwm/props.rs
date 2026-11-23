@@ -29,10 +29,12 @@ fn watched(a: &Atoms) -> [u32; 12] {
     ]
 }
 
-/// Asks for all of them, plus the EWMH states the client set before
-/// mapping (`_NET_WM_STATE`), at once: which property each request is.
+/// Asks for all of them, plus the EWMH states and workspace the client set
+/// before mapping (`_NET_WM_STATE`, `_NET_WM_DESKTOP`; later the window
+/// manager's to write, so not watched), at once: which property each
+/// request is.
 pub fn request_all(conn: &RustConnection, a: &Atoms, id: u32) -> Result<Vec<(u32, SequenceNumber)>, ConnectionError> {
-    watched(a).into_iter().chain([a._NET_WM_STATE]).map(|atom| Ok((atom, super::keep(conn.get_property(false, id, atom, AtomEnum::ANY, 0, 4096)?)))).collect()
+    watched(a).into_iter().chain([a._NET_WM_STATE, a._NET_WM_DESKTOP]).map(|atom| Ok((atom, super::keep(conn.get_property(false, id, atom, AtomEnum::ANY, 0, 4096)?)))).collect()
 }
 
 /// The answers to [`request_all`]. A failed one: the window went away
@@ -144,6 +146,11 @@ fn apply(a: &Atoms, win: &XWin, atom: u32, reply: Option<&GetPropertyReply>) {
                 }
             }
             s.premap_state = premap;
+        }
+        x if x == a._NET_WM_DESKTOP => {
+            // A message sent before it was managed is the later word (as
+            // `_NET_WM_STATE`, #276; #279).
+            s.initial_desktop = s.premap_desktop.or_else(|| cardinals(reply).first().copied());
         }
         _ => {}
     }
