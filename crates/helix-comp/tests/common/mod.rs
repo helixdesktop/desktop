@@ -452,6 +452,18 @@ impl Client {
         self.roundtrip();
     }
 
+    /// Copy `types` (each type with its own data) to the clipboard.
+    pub fn copy_types(&mut self, types: &[(&str, &[u8])]) {
+        self.state.copied = types.first().map(|(_, d)| d.to_vec()).unwrap_or_default();
+        self.state.copied_as = types.iter().map(|(m, d)| ((*m).to_owned(), d.to_vec())).collect();
+        let source = self.data_manager.create_data_source(&self.qh, ());
+        for (mime, _) in types {
+            source.offer((*mime).to_owned());
+        }
+        self.data_device.set_selection(Some(&source), 0);
+        self.roundtrip();
+    }
+
     /// Start dragging `data` as `mime` from `origin`, for the press of
     /// `serial` (offered for copying).
     pub fn drag(&mut self, mime: &str, data: &[u8], origin: &wl_surface::WlSurface, serial: u32) {
