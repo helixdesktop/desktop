@@ -374,10 +374,14 @@ impl Helix {
         });
     }
 
+    /// The window of `x11`, shown or hidden (minimized, or on another
+    /// workspace: a window there withdrawn, destroyed or asking for
+    /// something must be found too, #224).
     pub(super) fn x11_window(&self, x11: &X11Window) -> Option<Window> {
         self.space
             .elements()
             .chain(self.minimized_windows())
+            .chain(self.workspaces.parked())
             .find(|w| w.x11_surface() == Some(x11))
             .cloned()
     }
