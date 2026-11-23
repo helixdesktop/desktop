@@ -31,6 +31,9 @@ use x11rb::wrapper::ConnectionExt as _;
 
 #[test]
 fn an_x11_app_drags_onto_a_wayland_window() {
+    if common::not_yet("#191 step 5: drag and drop") {
+        return;
+    }
     let Some(mut session) = session() else { return };
     let mut app = common::connect(&session);
     let (window, ()) = app.toplevel((300, 200), |_, _| {});
@@ -69,6 +72,9 @@ fn an_x11_app_drags_onto_a_wayland_window() {
 
 #[test]
 fn a_wayland_app_drags_onto_an_x11_window() {
+    if common::not_yet("#191 step 5: drag and drop") {
+        return;
+    }
     let Some(mut session) = session() else { return };
     let x = X11::new(&session, (300, 200), true);
     let x_rect = x.rect();
@@ -266,6 +272,9 @@ fn helper_window(x: &X11) -> u32 {
 /// that sent them, the data is asked of the owner.
 #[test]
 fn a_drag_whose_messages_come_from_another_window() {
+    if common::not_yet("#191 step 5: drag and drop") {
+        return;
+    }
     let Some(mut session) = session() else { return };
     let (mut messenger, mut owner) = (0, 0);
     let mut d = x11_drag_to_wayland(&mut session, |s| {
@@ -286,6 +295,9 @@ fn a_drag_whose_messages_come_from_another_window() {
 /// the action.
 #[test]
 fn the_drop_window_over_wayland_is_named_and_finishes_in_its_own_name() {
+    if common::not_yet("#191 step 5: drag and drop") {
+        return;
+    }
     let Some(mut session) = session() else { return };
     let mut source_window = 0;
     let mut d = x11_drag_to_wayland(&mut session, |s| {
@@ -321,11 +333,17 @@ fn wayland_window_by(session: &mut HeadlessSession) -> (common::Client, wayland_
 /// target; a proxy that doesn't name itself isn't followed.
 #[test]
 fn a_drop_target_behind_an_xdnd_proxy_gets_the_drag_there() {
+    if common::not_yet("#191 step 5: drag and drop") {
+        return;
+    }
     xdnd_proxy(true);
 }
 
 #[test]
 fn a_broken_xdnd_proxy_is_not_followed() {
+    if common::not_yet("#191 step 5: drag and drop") {
+        return;
+    }
     xdnd_proxy(false);
 }
 
@@ -363,8 +381,13 @@ fn xdnd_proxy(proper: bool) {
 /// X111 (S49): the X11 drag source's window destroyed mid-drag (the app
 /// crashed or closed it): the drag ends, and the pointer works again.
 #[test]
-#[ignore = "fails on Smithay's xwm: the drag never ends when its X11 source's window is destroyed, and the pointer stays in the drag (#191)"]
 fn a_drag_whose_source_goes_away_ends() {
+    if common::not_yet("#191 step 5: drag and drop") {
+        return;
+    }
+    if common::known_failure(&[common::Xwm::Smithay], "the drag never ends when its X11 source's window is destroyed, and the pointer stays in the drag (#191)") {
+        return;
+    }
     let Some(mut session) = session() else { return };
     let mut source = None;
     let mut d = x11_drag_to_wayland(&mut session, |s| {
@@ -391,6 +414,9 @@ fn a_drag_whose_source_goes_away_ends() {
 /// clicks again after the drop.
 #[test]
 fn a_drag_icon_under_the_pointer_is_not_the_target() {
+    if common::not_yet("#191 step 5: drag and drop") {
+        return;
+    }
     let Some(mut session) = session() else { return };
     let mut d = x11_drag_to_wayland(&mut session, |s| {
         let x = X11::new(s, (200, 150), false);
@@ -436,6 +462,9 @@ fn a_drag_icon_under_the_pointer_is_not_the_target() {
 /// goes on, and the drop lands on the second.
 #[test]
 fn a_wayland_drag_goes_from_one_x11_window_to_another() {
+    if common::not_yet("#191 step 5: drag and drop") {
+        return;
+    }
     let Some(mut session) = session() else { return };
     // Crossed, so each has a part the other doesn't cover.
     let a = X11::new(&session, (300, 80), true);
@@ -491,6 +520,9 @@ fn wayland_drop_on_x11(session: &mut HeadlessSession, how: Target, types: &[(&st
 /// before it is ignored, and the source stays until the real one.
 #[test]
 fn a_drop_the_target_refuses_ends_the_drag_and_a_forged_finish_does_not() {
+    if common::not_yet("#191 step 5: drag and drop") {
+        return;
+    }
     let Some(mut session) = session() else { return };
     let how = Target { leave_to_test: true, ..Target::default() };
     let (saw, conn, window, mut app) = wayland_drop_on_x11(&mut session, how, &[("text/plain;charset=utf-8", DATA)]);
@@ -514,6 +546,9 @@ fn a_drop_the_target_refuses_ends_the_drag_and_a_forged_finish_does_not() {
 /// drop still gets it.
 #[test]
 fn a_drop_fetched_late_is_still_served() {
+    if common::not_yet("#191 step 5: drag and drop") {
+        return;
+    }
     let Some(mut session) = session() else { return };
     let how = Target { fetch_after: Duration::from_millis(400), ..Target::default() };
     let (saw, _conn, _window, mut app) = wayland_drop_on_x11(&mut session, how, &[("text/plain;charset=utf-8", DATA)]);
@@ -524,14 +559,22 @@ fn a_drop_fetched_late_is_still_served() {
 /// X118 (W80): Chromium asks for several types at once during a drop:
 /// each is answered with its own data.
 #[test]
-#[ignore = "fails on Smithay's xwm: of several types asked for at once during a drop, only the last gets its data (#191)"]
 fn several_types_fetched_at_once() {
+    if common::not_yet("#191 step 5: drag and drop") {
+        return;
+    }
+    if common::known_failure(&[common::Xwm::Smithay], "of several types asked for at once during a drop, only the last gets its data (#191)") {
+        return;
+    }
     several_types(false);
 }
 
 /// The same, one after the other (how most toolkits ask).
 #[test]
 fn several_types_fetched_one_after_another() {
+    if common::not_yet("#191 step 5: drag and drop") {
+        return;
+    }
     several_types(true);
 }
 
@@ -553,6 +596,9 @@ fn several_types(one_by_one: bool) {
 /// on and can be dropped elsewhere.
 #[test]
 fn a_drag_whose_x11_target_goes_away_goes_on() {
+    if common::not_yet("#191 step 5: drag and drop") {
+        return;
+    }
     let Some(mut session) = session() else { return };
     let x = X11::new(&session, (300, 200), true);
     let x_rect = x.rect();

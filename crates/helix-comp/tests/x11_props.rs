@@ -123,6 +123,9 @@ fn the_manager_selections_are_owned() {
 /// handles (some apps check before asking).
 #[test]
 fn net_supported_lists_what_is_handled() {
+    if common::not_yet("#191 step 3, next part: Iconic and minimize (_NET_WM_STATE_HIDDEN)") {
+        return;
+    }
     let Some(session) = xwm::session() else { return };
     let x = X::new(&session);
     let supported = x.get32(x.root, "_NET_SUPPORTED").expect("no _NET_SUPPORTED");

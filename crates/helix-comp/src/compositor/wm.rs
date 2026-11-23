@@ -182,8 +182,18 @@ impl Helix {
         if raise {
             self.space.raise_element(window, true);
             self.restack_above();
-            if let (Some(xwm), Some(x11)) = (self.xwm.as_mut(), window.x11_surface()) {
-                let _ = xwm.raise_window(x11.smithay());
+            match window.x11_surface() {
+                Some(super::window::X11Window::Smithay(s)) => {
+                    if let Some(xwm) = self.xwm.as_mut() {
+                        let _ = xwm.raise_window(s);
+                    }
+                }
+                Some(super::window::X11Window::Helix(w)) => {
+                    if let Some(xwm) = self.hxwm.as_mut() {
+                        let _ = xwm.raise(w);
+                    }
+                }
+                None => {}
             }
         }
         let keyboard = self.seat.get_keyboard().unwrap();

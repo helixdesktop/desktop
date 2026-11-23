@@ -431,6 +431,9 @@ fn splash_screens_notifications_and_docks() {
 
 #[test]
 fn x11_windows_show_the_cursor_theme() {
+    if common::not_yet("#191 step 3, next part: the root cursor") {
+        return;
+    }
     // The default settings' theme and size; without it installed (as on
     // CI) the fallback arrow is right.
     let Some(path) = xcursor::CursorTheme::load("Adwaita").load_icon("default") else {

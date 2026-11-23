@@ -112,6 +112,10 @@ impl HeadlessSession {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(std::fs::File::create(home.join("session.log")).map(Stdio::from).unwrap_or(Stdio::null()));
+        // Which X11 window manager the compositor runs (helixdesktop/desktop#191).
+        if let Ok(xwm) = std::env::var("HELIX_XWM") {
+            cmd.env("HELIX_XWM", xwm);
+        }
         let comp = cmd.spawn().expect("start helix-comp");
         let deadline = Instant::now() + Duration::from_secs(30);
         let (wayland, x, xauth) = loop {

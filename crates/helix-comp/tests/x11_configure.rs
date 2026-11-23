@@ -150,8 +150,10 @@ fn a_size_asked_for_before_mapping_is_kept() {
 /// X40: maximized before it is shown: the app is told its final size
 /// before it shows, so it does not draw at the wrong size first.
 #[test]
-#[ignore = "fails on Smithay's xwm: a window maximized before mapping is mapped first and resized after (#191)"]
 fn maximized_before_mapping_gets_its_size_first() {
+    if common::known_failure(&[common::Xwm::Smithay, common::Xwm::Helix], "a window maximized before mapping is mapped first and resized after (#191)") {
+        return;
+    }
     let Some(session) = xwm::session() else { return };
     let x = X::new(&session);
     let window = x.window();
@@ -173,8 +175,10 @@ fn maximized_before_mapping_gets_its_size_first() {
 
 /// X41: size hints: a base size and no minimum is the minimum (ICCCM).
 #[test]
-#[ignore = "fails on Smithay's xwm: a base size without a minimum size is not taken as the minimum (#191)"]
 fn the_base_size_stands_in_for_a_minimum() {
+    if common::known_failure(&[common::Xwm::Smithay], "a base size without a minimum size is not taken as the minimum (#191)") {
+        return;
+    }
     let Some(session) = xwm::session() else { return };
     let x = X::new(&session);
     let window = x.window();
@@ -209,8 +213,10 @@ fn the_minimum_size_is_kept() {
 /// X42: a GTK window drawing its own shadow (`_GTK_FRAME_EXTENTS`)
 /// maximized: its visible part fills the screen, the shadow beyond it.
 #[test]
-#[ignore = "fails on Smithay's xwm: a maximized window's shadow (_GTK_FRAME_EXTENTS) is kept on screen (#191)"]
 fn a_maximized_window_puts_its_shadow_off_screen() {
+    if common::known_failure(&[common::Xwm::Smithay, common::Xwm::Helix], "a maximized window's shadow (_GTK_FRAME_EXTENTS) is kept on screen (#191)") {
+        return;
+    }
     let Some(session) = xwm::session() else { return };
     let x = X::new(&session);
     let window = x.window();
@@ -228,8 +234,13 @@ fn a_maximized_window_puts_its_shadow_off_screen() {
 /// X43: `_NET_WM_SYNC_REQUEST`: an app that takes part is told before
 /// each resize, so resizes don't show half-drawn frames.
 #[test]
-#[ignore = "fails on Smithay's xwm: no _NET_WM_SYNC_REQUEST before a resize (#191)"]
 fn resizes_are_announced_to_apps_that_sync() {
+    if common::not_yet("#191 step 3, next part: _NET_WM_SYNC_REQUEST") {
+        return;
+    }
+    if common::known_failure(&[common::Xwm::Smithay], "no _NET_WM_SYNC_REQUEST before a resize (#191)") {
+        return;
+    }
     let Some(session) = xwm::session() else { return };
     let x = X::new(&session);
     x11rb::protocol::sync::ConnectionExt::sync_initialize(&x.conn, 3, 1).unwrap().reply().unwrap();
@@ -284,6 +295,12 @@ fn an_app_moves_its_window_from_its_own_title_bar() {
 /// on where things are, both ways.
 #[test]
 fn coordinates_at_an_xwayland_scale_of_two() {
+    // Older Xwayland (23.2, as on Ubuntu 24.04) doesn't scale its screen
+    // for the compositor.
+    if !xwm::xwayland_at_least(24, 1) {
+        eprintln!("Xwayland older than 24.1; skipped");
+        return;
+    }
     let comp = std::path::PathBuf::from(env!("CARGO_BIN_EXE_helix-comp"));
     let settings = "[org/gnome/mutter/wayland]\nxwayland-scaling-factor=2.0\n";
     let options = helix_test_support::headless::Options { comp: &comp, shell: None, size: (u32::from(xwm::SCREEN.0), u32::from(xwm::SCREEN.1)), settings, env: Vec::new() };

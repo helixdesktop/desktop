@@ -61,3 +61,43 @@ jobs:
         env:
           HELIX_SPEC_DIR: ${{ github.workspace }}/spec
         run: cargo test --workspace --locked
+
+  # The X11 tests under a real Xwayland, with either X11 window manager:
+  # Smithay's (the default) and Helix's own (HELIX_XWM=helix, #191).
+  x11:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        xwm: [smithay, helix]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: helix-desktop
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libglib2.0-dev libwayland-dev libxkbcommon-dev \
+            libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libegl-dev \
+            libpipewire-0.3-dev libspa-0.2-dev clang \
+            dbus gsettings-desktop-schemas xwayland
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: helix-desktop
+
+      - name: X11 tests
+        working-directory: helix-desktop
+        env:
+          HELIX_XWM: ${{ matrix.xwm }}
+        run: >
+          cargo test -p helix-comp --locked --no-fail-fast
+          --test move_unmaximize --test x11_alpha --test x11_clipboard
+          --test x11_configure --test x11_dnd --test x11_focus --test x11_map
+          --test x11_props --test x11_selection --test x11_shell
+          --test x11_stacking --test x11_windows

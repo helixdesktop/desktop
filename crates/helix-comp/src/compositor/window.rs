@@ -103,7 +103,7 @@ impl Window {
     pub fn geometry(&self) -> Rectangle<i32, Logical> {
         match &self.0.surface {
             Surface::Wayland(w) => w.geometry(),
-            Surface::X11(x) => SpaceElement::geometry(&x.0),
+            Surface::X11(x) => x.space_geometry(),
         }
     }
 
@@ -111,7 +111,7 @@ impl Window {
     pub fn bbox(&self) -> Rectangle<i32, Logical> {
         match &self.0.surface {
             Surface::Wayland(w) => w.bbox(),
-            Surface::X11(x) => x.0.bbox(),
+            Surface::X11(x) => x.bbox(),
         }
     }
 
@@ -120,7 +120,7 @@ impl Window {
         match &self.0.surface {
             Surface::Wayland(w) => w.bbox_with_popups(),
             Surface::X11(x) => {
-                let mut bbox = x.0.bbox();
+                let mut bbox = x.bbox();
                 if let Some(surface) = x.wl_surface() {
                     for (popup, location) in PopupManager::popups_for_surface(&surface) {
                         let offset = self.geometry().loc + location - popup.geometry().loc;
@@ -233,7 +233,7 @@ impl Window {
             Surface::Wayland(w) => w.surface_under(point, surface_type),
             Surface::X11(x) => {
                 if surface_type.contains(WindowSurfaceType::TOPLEVEL) {
-                    x.0.surface_under(point.into(), (0, 0), surface_type)
+                    x.surface_under(point.into(), surface_type)
                 } else {
                     None
                 }
@@ -288,21 +288,21 @@ impl SpaceElement for Window {
     fn output_enter(&self, output: &Output, overlap: Rectangle<i32, Logical>) {
         match &self.0.surface {
             Surface::Wayland(w) => SpaceElement::output_enter(w, output, overlap),
-            Surface::X11(x) => SpaceElement::output_enter(&x.0, output, overlap),
+            Surface::X11(x) => x.output_enter(output, overlap),
         }
     }
 
     fn output_leave(&self, output: &Output) {
         match &self.0.surface {
             Surface::Wayland(w) => SpaceElement::output_leave(w, output),
-            Surface::X11(x) => SpaceElement::output_leave(&x.0, output),
+            Surface::X11(x) => x.output_leave(output),
         }
     }
 
     fn refresh(&self) {
         match &self.0.surface {
             Surface::Wayland(w) => SpaceElement::refresh(w),
-            Surface::X11(x) => SpaceElement::refresh(&x.0),
+            Surface::X11(x) => x.refresh(),
         }
     }
 }
@@ -317,141 +317,234 @@ where
     fn render_elements<C: From<WaylandSurfaceRenderElement<R>>>(&self, renderer: &mut R, location: Point<i32, Physical>, scale: Scale<f64>, alpha: f32) -> Vec<C> {
         match &self.0.surface {
             Surface::Wayland(w) => AsRenderElements::<R>::render_elements(w, renderer, location, scale, alpha),
-            Surface::X11(x) => AsRenderElements::<R>::render_elements(&x.0, renderer, location, scale, alpha),
+            Surface::X11(X11Window::Smithay(s)) => AsRenderElements::<R>::render_elements(s, renderer, location, scale, alpha),
+            Surface::X11(X11Window::Helix(w)) => match w.wl_surface() {
+                Some(surface) => smithay::backend::renderer::element::surface::render_elements_from_surface_tree(renderer, &surface, location, scale, alpha, smithay::backend::renderer::element::Kind::Unspecified),
+                None => Vec::new(),
+            },
         }
     }
 }
 
-/// An X11 window, as Helix uses it. Today it is Smithay's window manager's
-/// `X11Surface` (reached as such only by the window manager glue,
-/// `xwayland.rs`, and the focus targets).
+/// An X11 window, as Helix uses it: Smithay's window manager's
+/// `X11Surface`, or a window of Helix's own (`HELIX_XWM=helix`, #191).
+/// Reached as either only by the window manager glue (`xwayland.rs`) and
+/// the focus targets.
+// Smithay's X11Surface carries its atom table (as in focus.rs).
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
-pub struct X11Window(X11Surface);
+pub enum X11Window {
+    Smithay(X11Surface),
+    Helix(super::xwm::XWin),
+}
+
+macro_rules! either {
+    ($self:ident, $x:ident => $e:expr) => {
+        match $self {
+            X11Window::Smithay($x) => $e,
+            X11Window::Helix($x) => $e,
+        }
+    };
+}
 
 impl X11Window {
     pub fn new(surface: X11Surface) -> Self {
-        Self(surface)
+        Self::Smithay(surface)
     }
 
-    /// Smithay's surface, for the window manager glue.
-    pub fn smithay(&self) -> &X11Surface {
-        &self.0
+    /// Smithay's surface, for its window manager's glue.
+    pub fn smithay(&self) -> Option<&X11Surface> {
+        match self {
+            Self::Smithay(s) => Some(s),
+            Self::Helix(_) => None,
+        }
+    }
+
+    /// Helix's window, for its window manager's glue.
+    pub fn helix(&self) -> Option<&super::xwm::XWin> {
+        match self {
+            Self::Smithay(_) => None,
+            Self::Helix(w) => Some(w),
+        }
     }
 
     /// The X window.
     pub fn window_id(&self) -> X11WindowId {
-        self.0.window_id()
+        either!(self, x => x.window_id())
     }
 
     /// The Wayland surface Xwayland shows it in, once paired.
     pub fn wl_surface(&self) -> Option<WlSurface> {
-        self.0.wl_surface()
+        either!(self, x => x.wl_surface())
     }
 
     pub fn alive(&self) -> bool {
-        self.0.alive()
+        either!(self, x => x.alive())
     }
 
     pub fn is_override_redirect(&self) -> bool {
-        self.0.is_override_redirect()
+        either!(self, x => x.is_override_redirect())
     }
 
     pub fn title(&self) -> String {
-        self.0.title()
+        either!(self, x => x.title())
     }
 
     pub fn class(&self) -> String {
-        self.0.class()
+        either!(self, x => x.class())
     }
 
     pub fn instance(&self) -> String {
-        self.0.instance()
+        either!(self, x => x.instance())
     }
 
     /// `_NET_WM_PID`.
     pub fn pid(&self) -> Option<u32> {
-        self.0.pid()
+        either!(self, x => x.pid())
     }
 
     pub fn window_type(&self) -> Option<WmWindowType> {
-        self.0.window_type()
+        either!(self, x => x.window_type())
     }
 
     /// The window it is transient for (`WM_TRANSIENT_FOR`).
     pub fn transient_for(&self) -> Option<X11WindowId> {
-        self.0.is_transient_for()
+        match self {
+            Self::Smithay(s) => s.is_transient_for(),
+            Self::Helix(w) => w.transient_for(),
+        }
     }
 
     pub fn min_size(&self) -> Option<Size<i32, Logical>> {
-        self.0.min_size()
+        either!(self, x => x.min_size())
     }
 
     pub fn max_size(&self) -> Option<Size<i32, Logical>> {
-        self.0.max_size()
+        either!(self, x => x.max_size())
     }
 
     /// Whether it wants a title bar (`_MOTIF_WM_HINTS`).
     pub fn is_decorated(&self) -> bool {
-        self.0.is_decorated()
+        either!(self, x => x.is_decorated())
     }
 
     pub fn is_modal(&self) -> bool {
-        self.0.is_modal()
+        either!(self, x => x.is_modal())
     }
 
     pub fn is_above(&self) -> bool {
-        self.0.is_above()
+        either!(self, x => x.is_above())
     }
 
     pub fn is_skip_taskbar(&self) -> bool {
-        self.0.is_skip_taskbar()
+        either!(self, x => x.is_skip_taskbar())
     }
 
     pub fn is_fullscreen(&self) -> bool {
-        self.0.is_fullscreen()
+        either!(self, x => x.is_fullscreen())
     }
 
     pub fn is_maximized(&self) -> bool {
-        self.0.is_maximized()
+        either!(self, x => x.is_maximized())
     }
 
     pub fn is_activated(&self) -> bool {
-        self.0.is_activated()
+        either!(self, x => x.is_activated())
     }
 
     /// Whether its `WM_HINTS` urgency flag is set.
     pub fn is_urgent(&self) -> bool {
-        self.0.hints().is_some_and(|h| h.urgent)
+        match self {
+            Self::Smithay(s) => s.hints().is_some_and(|h| h.urgent),
+            Self::Helix(w) => w.hints().urgent,
+        }
     }
 
     /// The rectangle last given to it.
     pub fn last_configure(&self) -> Rectangle<i32, Logical> {
-        self.0.last_configure()
+        either!(self, x => x.last_configure())
     }
 
     /// Moves and resizes it.
     pub fn configure(&self, rect: impl Into<Option<Rectangle<i32, Logical>>>) -> Result<(), smithay::xwayland::xwm::X11SurfaceError> {
-        self.0.configure(rect)
+        match self {
+            Self::Smithay(s) => s.configure(rect),
+            Self::Helix(w) => w.configure(rect.into()).map_err(Into::into),
+        }
     }
 
     pub fn set_activated(&self, activated: bool) -> Result<(), ConnectionError> {
-        self.0.set_activated(activated)
+        either!(self, x => x.set_activated(activated))
     }
 
     pub fn set_fullscreen(&self, fullscreen: bool) -> Result<(), ConnectionError> {
-        self.0.set_fullscreen(fullscreen)
+        either!(self, x => x.set_fullscreen(fullscreen))
     }
 
     pub fn set_maximized(&self, maximized: bool) -> Result<(), ConnectionError> {
-        self.0.set_maximized(maximized)
+        either!(self, x => x.set_maximized(maximized))
     }
 
     pub fn set_above(&self, above: bool) -> Result<(), ConnectionError> {
-        self.0.set_above(above)
+        either!(self, x => x.set_above(above))
+    }
+
+    pub fn set_modal(&self, modal: bool) -> Result<(), ConnectionError> {
+        either!(self, x => x.set_modal(modal))
     }
 
     /// Asks it to close (`WM_DELETE_WINDOW`, or destroys it).
     pub fn close(&self) -> Result<(), ConnectionError> {
-        self.0.close()
+        either!(self, x => x.close())
+    }
+
+    /// Says how tall the title bar Helix draws above it is
+    /// (`_NET_FRAME_EXTENTS`; Helix's window manager only).
+    pub fn set_frame_extents(&self, top: i32) {
+        if let Self::Helix(w) = self {
+            let _ = w.set_frame_extents(top);
+        }
+    }
+
+    fn bbox(&self) -> Rectangle<i32, Logical> {
+        either!(self, x => x.bbox())
+    }
+
+    fn space_geometry(&self) -> Rectangle<i32, Logical> {
+        match self {
+            Self::Smithay(s) => SpaceElement::geometry(s),
+            Self::Helix(w) => w.geometry(),
+        }
+    }
+
+    fn surface_under(&self, point: Point<f64, Logical>, surface_type: WindowSurfaceType) -> Option<(WlSurface, Point<i32, Logical>)> {
+        match self {
+            Self::Smithay(s) => s.surface_under(point, (0, 0), surface_type),
+            Self::Helix(w) => {
+                let surface = w.wl_surface()?;
+                smithay::desktop::utils::under_from_surface_tree(&surface, point, (0, 0), surface_type)
+            }
+        }
+    }
+
+    fn output_enter(&self, output: &Output, overlap: Rectangle<i32, Logical>) {
+        match self {
+            Self::Smithay(s) => SpaceElement::output_enter(s, output, overlap),
+            Self::Helix(w) => w.output_enter(output, overlap),
+        }
+    }
+
+    fn output_leave(&self, output: &Output) {
+        match self {
+            Self::Smithay(s) => SpaceElement::output_leave(s, output),
+            Self::Helix(w) => w.output_leave(output),
+        }
+    }
+
+    fn refresh(&self) {
+        match self {
+            Self::Smithay(s) => SpaceElement::refresh(s),
+            Self::Helix(w) => w.refresh(),
+        }
     }
 }

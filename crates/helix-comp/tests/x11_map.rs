@@ -55,8 +55,10 @@ fn a_synthetic_unmap_of_a_menu_is_ignored() {
 
 /// X3: mapped three times without unmapping (GTK 4 apps do): listed once.
 #[test]
-#[ignore = "fails on Smithay's xwm: a window mapped again while mapped is listed twice in _NET_CLIENT_LIST_STACKING (#191)"]
 fn a_window_mapped_three_times_is_listed_once() {
+    if common::known_failure(&[common::Xwm::Smithay], "a window mapped again while mapped is listed twice in _NET_CLIENT_LIST_STACKING (#191)") {
+        return;
+    }
     let Some(session) = xwm::session() else { return };
     let x = X::new(&session);
     let window = x.window();
@@ -92,8 +94,10 @@ fn wm_state_follows_the_window() {
 /// X4: EWMH: the window manager removes `_NET_WM_STATE` from a withdrawn
 /// window (the app starts afresh when it maps it again).
 #[test]
-#[ignore = "fails on Smithay's xwm: _NET_WM_STATE stays on a withdrawn window (#191)"]
 fn net_wm_state_is_removed_when_withdrawn() {
+    if common::known_failure(&[common::Xwm::Smithay], "_NET_WM_STATE stays on a withdrawn window (#191)") {
+        return;
+    }
     let Some(session) = xwm::session() else { return };
     let x = X::new(&session);
     let window = x.mapped();
@@ -108,6 +112,9 @@ fn net_wm_state_is_removed_when_withdrawn() {
 /// minimized, `WM_STATE` Iconic and `_NET_WM_STATE_HIDDEN`.
 #[test]
 fn a_window_asking_to_start_iconic_starts_minimized() {
+    if common::not_yet("#191 step 3, next part: Iconic and minimize") {
+        return;
+    }
     let Some(session) = xwm::session() else { return };
     let x = X::new(&session);
     let window = x.window();
@@ -123,8 +130,10 @@ fn a_window_asking_to_start_iconic_starts_minimized() {
 /// HIDDEN; restored: Normal, no HIDDEN. Asking for Normal does not
 /// minimize (Dishonored 2 restores this way).
 #[test]
-#[ignore = "fails today: Helix minimizes X11 windows without telling them (no WM_STATE Iconic, no _NET_WM_STATE_HIDDEN) (#191)"]
 fn minimize_and_restore() {
+    if common::known_failure(&[common::Xwm::Smithay, common::Xwm::Helix], "Helix minimizes X11 windows without telling them (no WM_STATE Iconic, no _NET_WM_STATE_HIDDEN) (#191)") {
+        return;
+    }
     let Some(session) = xwm::session() else { return };
     let x = X::new(&session);
     let window = x.mapped();
@@ -261,20 +270,25 @@ fn a_menu_that_moves_gets_the_pointer_where_it_is() {
 /// X12: an override-redirect window shown, hidden and shown again (GTK
 /// reuses one for each popup menu): it works every time.
 #[test]
-#[ignore = "fails on Smithay's xwm: an override-redirect window shown a second time never gets the pointer (#191)"]
 fn a_menu_shown_again_works_again() {
     let Some(mut session) = xwm::session() else { return };
     let x = X::new(&session);
     let menu = x.create_with(300, 300, 100, 100, CreateWindowAux::new().override_redirect(1));
-    x.conn.change_window_attributes(menu, &ChangeWindowAttributesAux::new().event_mask(EventMask::ENTER_WINDOW | EventMask::STRUCTURE_NOTIFY)).unwrap();
+    x.conn.change_window_attributes(menu, &ChangeWindowAttributesAux::new().event_mask(EventMask::ENTER_WINDOW | EventMask::POINTER_MOTION | EventMask::STRUCTURE_NOTIFY)).unwrap();
     for round in 0..3 {
         session.input("move 20 20");
         x.map(menu);
         until("the menu is not shown", || viewable(&x, menu));
-        std::thread::sleep(Duration::from_millis(200));
+        // Time for the menu's surface to take its place on the screen.
+        std::thread::sleep(Duration::from_millis(1000));
         x.drain();
+        // The pointer comes in and moves over the menu: the menu gets its
+        // motion. (Not EnterNotify: X still has the pointer where it last
+        // saw it, over the menu shown before, so it may enter the menu as
+        // soon as it is mapped there, before the pointer really comes.)
         session.input("move 350 350");
-        x.wait_event(&format!("the pointer never entered the menu shown again ({round})"), |e| matches!(e, Event::EnterNotify(n) if n.event == menu).then_some(()));
+        session.input("move 360 360");
+        x.wait_event(&format!("the pointer never reached the menu shown again ({round})"), |e| matches!(e, Event::MotionNotify(n) if n.event == menu).then_some(()));
         x.conn.unmap_window(menu).unwrap();
         x.flush();
         until("the menu is still shown", || !viewable(&x, menu));

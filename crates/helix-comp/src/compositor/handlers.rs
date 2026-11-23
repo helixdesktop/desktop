@@ -70,6 +70,7 @@ impl CompositorHandler for Helix {
 
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
+        self.helix_xwm_commit(surface);
         super::activation_report::count_commit(surface);
         helix_comp::color_management::commit(surface);
         if !is_sync_subsurface(surface) {

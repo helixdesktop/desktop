@@ -86,8 +86,10 @@ fn closing_asks_a_window_that_takes_part() {
 /// (`WM_PROTOCOLS` deleted), disconnects the app (ICCCM: `KillClient`),
 /// rather than leaving it running without its window.
 #[test]
-#[ignore = "fails on Smithay's xwm: it destroys the window instead of disconnecting the app, which keeps running without it (#191)"]
 fn closing_disconnects_an_app_that_does_not_take_part() {
+    if common::known_failure(&[common::Xwm::Smithay], "it destroys the window instead of disconnecting the app, which keeps running without it (#191)") {
+        return;
+    }
     let Some((session, mut shell)) = xwm::session_with_shell("x11-kill") else { return };
     let rude = X::new(&session);
     let window = rude.window();

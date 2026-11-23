@@ -58,6 +58,7 @@ mod workspaces;
 #[cfg(test)]
 mod placement_tests;
 mod xwayland;
+pub mod xwm;
 mod xsettings;
 mod input_capture;
 
@@ -198,6 +199,9 @@ pub struct Helix {
     pub headless_gpu: Option<Box<headless::HeadlessGpu>>,
     /// The X11 window manager for Xwayland, once it is running.
     pub xwm: Option<X11Wm>,
+    /// Helix's own X11 window manager, when chosen (`HELIX_XWM=helix`, #191).
+    pub hxwm: Option<xwm::Xwm>,
+    pub hxwm_source: Option<smithay::reexports::calloop::RegistrationToken>,
     /// The X root cursor's theme, size and scale, as last set.
     pub x11_cursor: Option<(String, u32, i32)>,
     /// The running Xwayland's event source (removing it gives its display
@@ -380,6 +384,8 @@ impl Helix {
             headless: false,
             headless_gpu: None,
             xwm: None,
+            hxwm: None,
+            hxwm_source: None,
             xdisplay: None,
             xwayland_client: None,
             xsettings: None,
