@@ -27,7 +27,7 @@ impl Helix {
         let windows: Vec<Window> = self
             .space
             .elements()
-            .chain(self.minimized.iter())
+            .chain(self.minimized_windows())
             .chain(self.workspaces.parked())
             .filter(|w| matches!(w.x11_surface(), Some(X11Window::Helix(x)) if !x.is_override_redirect()))
             .cloned()
