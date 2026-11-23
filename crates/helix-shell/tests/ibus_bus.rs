@@ -76,6 +76,10 @@ impl Context {
     async fn update_property(emitter: &SignalEmitter<'_>, prop: zbus::zvariant::Value<'_>) -> zbus::Result<()>;
     async fn process_key_event(&self, keyval: u32, keycode: u32, state: u32) -> bool {
         self.calls.lock().unwrap().push(format!("ProcessKeyEvent {keyval:#x} {keycode} {state:#x}"));
+        if keyval == 0x7a {
+            // A hung engine: 'z' is never answered.
+            std::future::pending::<()>().await;
+        }
         keyval == 0x61 // the engine takes 'a'
     }
     #[zbus(signal)]
@@ -158,4 +162,37 @@ async fn keys_text_and_engines() {
     ibus.handle(ImRequest::FocusOut).await;
     assert!(calls.lock().unwrap().ends_with(&["Reset".to_owned(), "FocusOut".to_owned()]));
     let _ = OwnedValue::from(0u32);
+}
+
+/// A hung engine doesn't stop typing (helixdesktop/desktop#243): a key it
+/// never answers counts as not taken (so it reaches the app), and the keys
+/// after it still go to IBus.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hung_engine_does_not_stop_typing() {
+    let Some(bus) = TestBus::start() else { return };
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let _ibus_conn = bus
+        .builder()
+        .serve_at("/org/freedesktop/IBus", Bus { calls: calls.clone() })
+        .unwrap()
+        .serve_at(IC, Context { calls: calls.clone() })
+        .unwrap()
+        .name("org.freedesktop.IBus")
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let (ui, mut ui_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut ibus = Ibus::with_connection(ui, bus.connect().await);
+    ibus.handle(ImRequest::Engine(Some("table:cangjie5".into()))).await;
+    assert_eq!(next_ime(&mut ui_rx).await, ImEvent::Properties(Vec::new()));
+
+    let started = std::time::Instant::now();
+    let handled = tokio::time::timeout(Duration::from_secs(10), ibus.handle(ImRequest::Key { seq: 1, keyval: 0x7a, keycode: 44, state: 0 })).await;
+    assert!(handled.is_ok(), "an unanswered key held the input method up");
+    assert_eq!(next_ime(&mut ui_rx).await, ImEvent::KeyHandled { seq: 1, handled: false }, "the unanswered key goes to the app");
+    assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+
+    tokio::time::timeout(Duration::from_secs(10), ibus.handle(ImRequest::Key { seq: 2, keyval: 0x61, keycode: 30, state: 0 })).await.expect("the next key is handled");
+    assert_eq!(next_ime(&mut ui_rx).await, ImEvent::KeyHandled { seq: 2, handled: true }, "the next key still goes to IBus");
 }

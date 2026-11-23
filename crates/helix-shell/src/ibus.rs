@@ -18,6 +18,23 @@ const BUS_NAME: &str = "org.freedesktop.IBus";
 const PATH: &str = "/org/freedesktop/IBus";
 const IFACE: &str = "org.freedesktop.IBus";
 const IC_IFACE: &str = "org.freedesktop.IBus.InputContext";
+
+/// How long IBus gets to answer a key. A hung engine must not stop all
+/// typing (helixdesktop/desktop#243): an unanswered key counts as not
+/// taken, so it reaches the app. Engines answer in milliseconds, but may
+/// take longer on their first key (loading a dictionary).
+const KEY_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long IBus gets for anything else (connecting, focus, engines):
+/// requests are handled one at a time, so a stuck one would hold back the
+/// keys behind it.
+const CALL_TIMEOUT: Duration = Duration::from_secs(5);
+
+async fn bounded<T>(limit: Duration, what: &str, call: impl std::future::Future<Output = zbus::Result<T>>) -> zbus::Result<T> {
+    match tokio::time::timeout(limit, call).await {
+        Ok(result) => result,
+        Err(_) => Err(zbus::Error::Failure(format!("IBus did not answer {what} in {} ms", limit.as_millis()))),
+    }
+}
 /// Pre-edit text, lookup table, focus, properties, surrounding text.
 pub const CAPABILITIES: u32 = 1 | 4 | 8 | 16 | 32;
 /// `state` bit of a key release.
@@ -313,8 +330,9 @@ impl Ibus {
     where
         B: serde::Serialize + zbus::zvariant::DynamicType,
     {
-        let (conn, path) = self.context().await?;
-        conn.call_method(Some(BUS_NAME), path.as_str(), Some(IC_IFACE), method, body).await
+        let limit = if method == "ProcessKeyEvent" { KEY_TIMEOUT } else { CALL_TIMEOUT };
+        let (conn, path) = bounded(CALL_TIMEOUT, "the input context", self.context()).await?;
+        bounded(limit, method, conn.call_method(Some(BUS_NAME), path.as_str(), Some(IC_IFACE), method, body)).await
     }
 
     pub async fn handle(&mut self, request: ImRequest) {
@@ -327,10 +345,10 @@ impl Ibus {
                 // The new engine registers its own properties.
                 self.send(ImEvent::Properties(Vec::new()));
                 match engine {
-                    Some(name) => match self.connect().await {
+                    Some(name) => match bounded(CALL_TIMEOUT, "connecting", self.connect()).await {
                         Ok(conn) => {
                             tracing::info!(name, "IBus engine");
-                            conn.call_method(Some(BUS_NAME), PATH, Some(IFACE), "SetGlobalEngine", &(name.as_str(),)).await.map(drop)
+                            bounded(CALL_TIMEOUT, "SetGlobalEngine", conn.call_method(Some(BUS_NAME), PATH, Some(IFACE), "SetGlobalEngine", &(name.as_str(),))).await.map(drop)
                         }
                         Err(err) => Err(err),
                     },
