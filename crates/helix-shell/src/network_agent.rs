@@ -208,8 +208,53 @@ pub fn prompt_for(need: &Need, user: &str, warning: String) -> Prompt {
     }
 }
 
-/// Open dialogs by (connection path, setting), to cancel them.
-type Pending = Arc<Mutex<HashMap<(String, String), oneshot::Sender<()>>>>;
+/// Open requests by (connection path, setting), to cancel them. Several
+/// may be open for one key (NetworkManager asking again before the first
+/// is answered): each has its own id, so one ending or a new one coming
+/// doesn't cancel the others (#246); NetworkManager's cancel cancels all.
+#[derive(Default, Clone)]
+struct Pending(Arc<Mutex<PendingRequests>>);
+
+/// (connection path, setting)
+type RequestKey = (String, String);
+
+#[derive(Default)]
+struct PendingRequests {
+    next: u64,
+    /// The open requests' ids and cancels, by key.
+    open: HashMap<RequestKey, Vec<(u64, oneshot::Sender<()>)>>,
+}
+
+impl Pending {
+    /// A request for `key` opens: its id, and what tells it it was canceled.
+    fn open(&self, key: &RequestKey) -> (u64, oneshot::Receiver<()>) {
+        let (tx, rx) = oneshot::channel();
+        let mut p = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        p.next += 1;
+        let id = p.next;
+        p.open.entry(key.clone()).or_default().push((id, tx));
+        (id, rx)
+    }
+
+    /// Request `id` for `key` is over (only it is forgotten).
+    fn close(&self, key: &RequestKey, id: u64) {
+        let mut p = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(open) = p.open.get_mut(key) {
+            open.retain(|(i, _)| *i != id);
+            if open.is_empty() {
+                p.open.remove(key);
+            }
+        }
+    }
+
+    /// NetworkManager cancels `key`'s requests.
+    fn cancel(&self, key: &RequestKey) {
+        let open = self.0.lock().unwrap_or_else(|e| e.into_inner()).open.remove(key).unwrap_or_default();
+        for (_, tx) in open {
+            let _ = tx.send(());
+        }
+    }
+}
 
 pub struct Agent {
     ui: mpsc::UnboundedSender<UiEvent>,
@@ -285,8 +330,7 @@ impl Agent {
         let name = need.name.clone();
         tracing::info!(name, wanted = ?need.wanted, flags, "network secrets asked");
         let key = (connection_path.to_string(), setting_name.clone());
-        let (cancel_tx, mut cancel_rx) = oneshot::channel();
-        self.pending.lock().unwrap_or_else(|e| e.into_inner()).insert(key.clone(), cancel_tx);
+        let (request, mut cancel_rx) = self.pending.open(&key);
         let _turn = prompt::turn().await;
         let mut warning = if flags & REQUEST_NEW != 0 { tr("Wrong password? Try again.").to_owned() } else { String::new() };
         let mut user = need.user.clone();
@@ -318,15 +362,13 @@ impl Agent {
             }
         };
         prompt::done(&self.ui);
-        self.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
+        self.pending.close(&key, request);
         tracing::info!(name, answered = result.is_ok(), "network secrets");
         result
     }
 
     async fn cancel_get_secrets(&self, connection_path: OwnedObjectPath, setting_name: String) {
-        if let Some(cancel) = self.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&(connection_path.to_string(), setting_name)) {
-            let _ = cancel.send(());
-        }
+        self.pending.cancel(&(connection_path.to_string(), setting_name));
     }
 
     async fn save_secrets(&self, connection: Settings, _connection_path: OwnedObjectPath) {
@@ -420,8 +462,7 @@ impl Agent {
         let wanted = wireguard_wanted(&hints);
         tracing::info!(name, asked = wanted.len(), "WireGuard secrets asked");
         let key = (path.to_string(), WIREGUARD.to_owned());
-        let (cancel_tx, mut cancel_rx) = oneshot::channel();
-        self.pending.lock().unwrap_or_else(|e| e.into_inner()).insert(key.clone(), cancel_tx);
+        let (request, mut cancel_rx) = self.pending.open(&key);
         let _turn = prompt::turn().await;
         let mut answers: Vec<(WgSecret, String)> = Vec::new();
         let mut result = Ok(());
@@ -461,7 +502,7 @@ impl Agent {
             }
         }
         prompt::done(&self.ui);
-        self.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
+        self.pending.close(&key, request);
         result?;
         let ov = |v: Value<'_>| OwnedValue::try_from(v).map_err(|e| AgentError::ZBus(e.into()));
         let mut group: HashMap<String, OwnedValue> = HashMap::new();
@@ -497,8 +538,7 @@ impl Agent {
         let input = v::dialog_input(&v::string_dict(vpn, "data"), &v::string_dict(vpn, "secrets"));
         tracing::info!(name, service, external, interactive, "VPN secrets asked");
         let key = (path.to_string(), VPN.to_owned());
-        let (cancel_tx, mut cancel_rx) = oneshot::channel();
-        self.pending.lock().unwrap_or_else(|e| e.into_inner()).insert(key.clone(), cancel_tx);
+        let (request, mut cancel_rx) = self.pending.open(&key);
         let canceled = || AgentError::AgentCanceled("canceled by NetworkManager".into());
         let result = async {
             let out = tokio::select! {
@@ -536,7 +576,7 @@ impl Agent {
             Ok(v::secrets_of(&described.fields))
         }
         .await;
-        self.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
+        self.pending.close(&key, request);
         tracing::info!(name, answered = result.is_ok(), "VPN secrets");
         let secrets: HashMap<String, String> = result?.into_iter().collect();
         let secrets = OwnedValue::try_from(Value::from(secrets)).map_err(|e| AgentError::ZBus(e.into()))?;
@@ -575,6 +615,24 @@ pub async fn run_with_secrets(system: Connection, session: Option<Connection>, u
 
 #[cfg(test)]
 mod tests {
+
+    /// Two requests for one connection and setting: neither cancels the
+    /// other, and NetworkManager's cancel reaches both (#246).
+    #[test]
+    fn overlapping_requests_keep_their_own_cancel() {
+        use super::{oneshot, Pending};
+        let pending = Pending::default();
+        let key = ("/org/freedesktop/NetworkManager/Settings/1".to_owned(), "802-11-wireless-security".to_owned());
+        let (first, mut first_rx) = pending.open(&key);
+        let (second, mut second_rx) = pending.open(&key);
+        assert_eq!(first_rx.try_recv(), Err(oneshot::error::TryRecvError::Empty), "a second request canceled the first");
+        pending.close(&key, first);
+        assert_eq!(second_rx.try_recv(), Err(oneshot::error::TryRecvError::Empty), "the first ending canceled the second");
+        pending.cancel(&key);
+        assert_eq!(second_rx.try_recv(), Ok(()), "NetworkManager's cancel reaches the open request");
+        pending.close(&key, second);
+        assert!(pending.0.lock().unwrap().open.is_empty());
+    }
 
     #[test]
     fn named_eap_secrets_and_agent_owned() {
