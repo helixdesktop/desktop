@@ -269,15 +269,30 @@ fn typing_reaches_an_app_whose_focused_window_takes_no_input() {
     // The app keeps the X focus on its main window, as Java does.
     x.conn.set_input_focus(InputFocus::PARENT, main, x11rb::CURRENT_TIME).unwrap();
     x.conn.flush().unwrap();
-    std::thread::sleep(Duration::from_millis(500));
+    // Until a key gets through (the popup focused and paired with its
+    // surface takes a moment, longer under load), not a fixed wait (#269).
+    let ready = Instant::now() + Duration::from_secs(10);
+    let probe = 'through: loop {
+        assert!(Instant::now() < ready, "no key ever reached the app's focused main window");
+        session.input("type x");
+        let until = Instant::now() + Duration::from_millis(200);
+        while Instant::now() < until {
+            match x.conn.poll_for_event().unwrap() {
+                Some(Event::KeyPress(press)) if press.event == main => break 'through press.detail,
+                Some(_) => {}
+                None => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+    };
     while x.conn.poll_for_event().unwrap().is_some() {}
 
+    // Three keys, not counting a late probe key.
     session.input("type abc");
     let mut keys = 0;
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
         match x.conn.poll_for_event().unwrap() {
-            Some(Event::KeyPress(press)) if press.event == main => keys += 1,
+            Some(Event::KeyPress(press)) if press.event == main && press.detail != probe => keys += 1,
             Some(_) => {}
             None => std::thread::sleep(Duration::from_millis(10)),
         }
