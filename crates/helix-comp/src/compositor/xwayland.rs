@@ -476,6 +476,26 @@ impl Helix {
         if x11.starts_iconic() {
             self.minimize(&window);
         }
+        self.x11_initial_desktop(&window, &x11);
+    }
+
+    /// The workspace an app window asked to start on (`_NET_WM_DESKTOP`
+    /// set, or asked for by message, before mapping; #279), as mutter:
+    /// `u32::MAX` puts it on every workspace, one there is puts it there
+    /// (hidden, and focus goes back, unless that is the active one), and
+    /// any other number leaves it on the active one. `_NET_WM_DESKTOP` is
+    /// then written back as it is ([`Helix::publish_x11_desktop`]).
+    fn x11_initial_desktop(&mut self, window: &Window, x11: &X11Window) {
+        let Some(desktop) = x11.initial_desktop() else { return };
+        // The count as it is with this window (dynamic workspaces).
+        self.tidy_workspaces();
+        if desktop == u32::MAX {
+            self.set_on_all_workspaces(window, true);
+        } else if (desktop as usize) < self.workspaces.layout.count && desktop as usize != self.workspaces.layout.active {
+            tracing::debug!(desktop, "X11 window starts on another workspace");
+            self.move_to_workspace(window, desktop as usize);
+        }
+        self.publish_x11_desktop();
     }
 
     /// Maps a managed X11 window on the X server (`WM_STATE` Normal, the

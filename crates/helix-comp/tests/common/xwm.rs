@@ -36,8 +36,14 @@ pub fn session() -> Option<HeadlessSession> {
 /// [`session`] with `env` for the compositor (e.g. two monitors side by
 /// side: `HELIX_HEADLESS_OUTPUTS=2`).
 pub fn session_env(env: Vec<(String, String)>) -> Option<HeadlessSession> {
+    session_settings_env("", env)
+}
+
+/// [`session`] with `settings` (`GSETTINGS_BACKEND=keyfile` contents:
+/// `[org/gnome/…]` groups) and `env` for the compositor.
+pub fn session_settings_env(settings: &str, env: Vec<(String, String)>) -> Option<HeadlessSession> {
     let comp = PathBuf::from(env!("CARGO_BIN_EXE_helix-comp"));
-    let session = HeadlessSession::start(Options { comp: &comp, shell: None, size: (u32::from(SCREEN.0), u32::from(SCREEN.1)), settings: "", env })?;
+    let session = HeadlessSession::start(Options { comp: &comp, shell: None, size: (u32::from(SCREEN.0), u32::from(SCREEN.1)), settings, env })?;
     if super::no_xwayland(&session) {
         return None;
     }
