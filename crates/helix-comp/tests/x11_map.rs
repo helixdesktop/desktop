@@ -112,9 +112,6 @@ fn net_wm_state_is_removed_when_withdrawn() {
 /// minimized, `WM_STATE` Iconic and `_NET_WM_STATE_HIDDEN`.
 #[test]
 fn a_window_asking_to_start_iconic_starts_minimized() {
-    if common::not_yet("#191 step 3, next part: Iconic and minimize") {
-        return;
-    }
     let Some(session) = xwm::session() else { return };
     let x = X::new(&session);
     let window = x.window();

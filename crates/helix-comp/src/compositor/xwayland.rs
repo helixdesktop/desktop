@@ -66,7 +66,9 @@ impl Helix {
         if self.x11_cursor.as_ref() == Some(&key) {
             return;
         }
-        let Some(wm) = self.xwm.as_mut() else { return };
+        if self.xwm.is_none() && self.hxwm.is_none() {
+            return;
+        }
         let frame = self.cursors.frame(smithay::input::pointer::CursorIcon::Default, f64::from(scale));
         let (straight, w, h) = &*frame.bgra;
         // X takes the pixels as 32-bit ARGB, B, G, R, A in memory, with
@@ -82,7 +84,12 @@ impl Helix {
             })
             .collect();
         let hotspot = (frame.hotspot.0.max(0) as u16, frame.hotspot.1.max(0) as u16);
-        match wm.set_cursor(&pixels, Size::from((*w as u16, *h as u16)), hotspot.into()) {
+        let set = match (self.xwm.as_mut(), self.hxwm.as_ref()) {
+            (Some(wm), _) => wm.set_cursor(&pixels, Size::from((*w as u16, *h as u16)), hotspot.into()).map_err(|e| e.to_string()),
+            (None, Some(wm)) => wm.set_cursor(&pixels, (*w as u16, *h as u16), hotspot).map_err(|e| e.to_string()),
+            (None, None) => return,
+        };
+        match set {
             Ok(()) => {
                 tracing::debug!(width = w, height = h, scale, "X11 cursor");
                 self.x11_cursor = Some(key);
@@ -349,20 +356,16 @@ impl Helix {
     /// A client wants its window shown: placed and focused as an app
     /// window, or shown where it asked (splash screens, notifications).
     fn x11_map_request(&mut self, x11: X11Window) {
-        let mapped = match &x11 {
-            X11Window::Smithay(s) => s.set_mapped(true).map_err(|e| e.to_string()),
-            X11Window::Helix(w) => match self.hxwm.as_mut() {
-                Some(xwm) => xwm.set_mapped(w, true).map_err(|e| e.to_string()),
-                None => Err("no window manager".into()),
-            },
-        };
-        if let Err(err) = mapped {
-            tracing::warn!(%err, "cannot map X11 window");
+        let window = Window::new_x11_window(x11.clone());
+        let kind = x11_kind(&x11);
+        // Maximized or full screen before mapping (EWMH; #167): the app
+        // gets that size before it shows, so it doesn't draw at another
+        // size first; mapped once it has it.
+        let taken_over = kind == X11Kind::App && (x11.is_fullscreen() || x11.is_maximized());
+        if !taken_over && !self.x11_show(&x11) {
             return;
         }
-        let window = Window::new_x11_window(x11.clone());
         x11.set_frame_extents(super::frames::frame_top(&window));
-        let kind = x11_kind(&x11);
         if kind != X11Kind::App {
             self.map_unfocused_x11(&window, &x11, kind);
             return;
@@ -371,19 +374,44 @@ impl Helix {
         // Room for the title bar Helix draws above it.
         let location: smithay::utils::Point<i32, Logical> = (x, y + super::frames::frame_top(&window)).into();
         let size = x11.last_configure().size;
-        let _ = x11.configure(Rectangle::new(location, size));
+        if !taken_over {
+            let _ = x11.configure(Rectangle::new(location, size));
+        }
         tracing::info!(title = x11.title(), class = x11.class(), ?location, ?size, "new X11 window");
         self.map_new_window(&window, location);
-        // States the app set before mapping (EWMH; #167).
         if x11.is_fullscreen() {
             self.fullscreen(&window, None);
         } else if x11.is_maximized() {
             self.maximize(&window);
         }
+        if taken_over && !self.x11_show(&x11) {
+            self.forget_window(&window);
+            return;
+        }
         self.place_new_window(&window);
         if x11.is_above() {
             self.set_above(&window, true);
         }
+        // Asked to start minimized (WM_HINTS Iconic), as GNOME does.
+        if x11.starts_iconic() {
+            self.minimize(&window);
+        }
+    }
+
+    /// Maps a managed X11 window on the X server (`WM_STATE` Normal, the
+    /// client lists); false if it can't be.
+    fn x11_show(&mut self, x11: &X11Window) -> bool {
+        let mapped = match x11 {
+            X11Window::Smithay(s) => s.set_mapped(true).map_err(|e| e.to_string()),
+            X11Window::Helix(w) => match self.hxwm.as_mut() {
+                Some(xwm) => xwm.set_mapped(w, true).map_err(|e| e.to_string()),
+                None => Err("no window manager".into()),
+            },
+        };
+        if let Err(err) = &mapped {
+            tracing::warn!(%err, "cannot map X11 window");
+        }
+        mapped.is_ok()
     }
 
     fn x11_mapped_override(&mut self, x11: X11Window) {
@@ -606,6 +634,29 @@ impl Helix {
                     self.helix_xwm_action(action);
                 }
             }
+        }
+    }
+
+    /// A resize waits for an X11 app to draw the last one
+    /// (`_NET_WM_SYNC_REQUEST`): wake up when it goes anyway, so an app
+    /// that never answers can't hold it.
+    pub fn helix_xwm_sync_timer(&mut self) {
+        use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
+        if self.hxwm_sync_timer {
+            return;
+        }
+        let Some(deadline) = self.hxwm.as_ref().and_then(|x| x.sync_deadline()) else { return };
+        self.hxwm_sync_timer = true;
+        let inserted = self.loop_handle.insert_source(Timer::from_deadline(deadline), |_, _, state| {
+            state.hxwm_sync_timer = false;
+            if let Some(xwm) = state.hxwm.as_ref() {
+                xwm.sync_expired();
+            }
+            state.helix_xwm_sync_timer();
+            TimeoutAction::Drop
+        });
+        if inserted.is_err() {
+            self.hxwm_sync_timer = false;
         }
     }
 

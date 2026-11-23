@@ -96,10 +96,10 @@ Apps are the ones the upstream reports name.
 | X37 | W25 | Stacking-only requests are answered; odd stack modes do no harm | Wine | `x11_configure::stacking_requests_are_answered` |
 | X38 | S15, W27 | The window is told its real root position each time it is placed | Firefox, tooltips | `x11_configure::the_window_is_told_where_it_is` |
 | X39 | W10 | A size set before mapping is kept | | `x11_configure::a_size_asked_for_before_mapping_is_kept` |
-| X40 | W15 | Maximized before mapping: told its final size before it shows | | `x11_configure::maximized_before_mapping_gets_its_size_first` (ignored) |
+| X40 | W15 | Maximized before mapping: told its final size before it shows | | `x11_configure::maximized_before_mapping_gets_its_size_first` (Helix's window manager; Smithay's maps the window in its frame first) |
 | X41 | W34 | Size hints: the minimum is kept; a base size stands in for a missing minimum | | `x11_configure::the_minimum_size_is_kept`, `x11_configure::the_base_size_stands_in_for_a_minimum` (ignored) |
-| X42 | S17 | `_GTK_FRAME_EXTENTS`: a maximized window's shadow goes off screen | GTK CSD apps | `x11_configure::a_maximized_window_puts_its_shadow_off_screen` (ignored) |
-| X43 | S18, W86 | `_NET_WM_SYNC_REQUEST` before each resize for apps that sync | | `x11_configure::resizes_are_announced_to_apps_that_sync` (ignored) |
+| X42 | S17 | `_GTK_FRAME_EXTENTS`: a maximized window's shadow goes off screen | GTK CSD apps | `x11_configure::a_maximized_window_puts_its_shadow_off_screen` |
+| X43 | S18, W86 | `_NET_WM_SYNC_REQUEST` before each resize for apps that sync | | `x11_configure::resizes_are_announced_to_apps_that_sync` (Helix's window manager), `x11_configure::an_app_that_never_answers_a_sync_request_still_resizes` |
 | X44 | W88 | `_NET_WM_MOVERESIZE`: move follows the pointer; unknown directions ignored | Steam, Chromium, Electron | `x11_configure::an_app_moves_its_window_from_its_own_title_bar` |
 | X73 | S19 | The frame's visual dropped the client's alpha | | not applicable: no frame windows |
 | X75 | S16 | Coordinates rounded wrongly with an Xwayland client scale | `x11_configure::coordinates_at_an_xwayland_scale_of_two` (Helix's Xwayland scale is always whole, see `xwayland_scale`, so the fractional rounding of S16 can't happen; this checks both directions at scale 2) |

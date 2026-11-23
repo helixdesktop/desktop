@@ -38,6 +38,14 @@ impl ConfigureWhenReady for smithay::wayland::shell::xdg::ToplevelSurface {
 /// screen unless `autohide-in-fullscreen` lets the pointer reveal it.
 const SHOWN_IN_FULLSCREEN: &[&str] = &["helix-osk", "helix-dock", "helix-dock-edge"];
 
+/// Puts `x11`'s visible part at `rect`: the shadow the app draws around
+/// itself (`_GTK_FRAME_EXTENTS`) goes beyond it, as in GNOME (a maximized
+/// window's shadow is off the screen).
+fn configure_visible(x11: &super::window::X11Window, rect: Rectangle<i32, Logical>) {
+    let [l, r, t, b] = x11.shadow();
+    let _ = x11.configure(Rectangle::new((rect.loc.x - l, rect.loc.y - t).into(), (rect.size.w + l + r, rect.size.h + t + b).into()));
+}
+
 /// Whether `layer` is hidden on an output in full screen: top-layer
 /// surfaces are (the panel, notification banners, other clients' bars),
 /// except [`SHOWN_IN_FULLSCREEN`]. Overlay surfaces (OSDs, menus, the
@@ -322,7 +330,7 @@ impl Helix {
         } else if let Some(x11) = window.x11_surface() {
             let _ = x11.set_maximized(kind == Takeover::Maximized);
             let _ = x11.set_fullscreen(kind == Takeover::Fullscreen);
-            let _ = x11.configure(area);
+            configure_visible(x11, area);
         }
         self.animate_resize(window, area);
         self.space.map_element(window.clone(), area.loc, true);
@@ -372,7 +380,7 @@ impl Helix {
         } else if let Some(x11) = window.x11_surface() {
             let _ = x11.set_maximized(false);
             let _ = x11.set_fullscreen(false);
-            let _ = x11.configure(geometry);
+            configure_visible(x11, geometry);
         }
         self.animate_resize(window, geometry);
         self.space.map_element(window.clone(), geometry.loc, true);

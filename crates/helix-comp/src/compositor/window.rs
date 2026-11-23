@@ -460,6 +460,27 @@ impl X11Window {
         }
     }
 
+    /// The shadow the app draws around itself (`_GTK_FRAME_EXTENTS`):
+    /// left, right, top, bottom, in logical pixels.
+    pub fn shadow(&self) -> [i32; 4] {
+        match self {
+            Self::Smithay(s) => {
+                let e = s.frame_extents();
+                [e.left, e.right, e.top, e.bottom]
+            }
+            Self::Helix(w) => w.shadow(),
+        }
+    }
+
+    /// Whether its `WM_HINTS` asks to start iconic (minimized; ICCCM
+    /// 4.1.2.4, XCOM 2).
+    pub fn starts_iconic(&self) -> bool {
+        match self {
+            Self::Smithay(s) => s.hints().is_some_and(|h| matches!(h.initial_state, Some(x11rb::properties::WmHintsState::Iconic))),
+            Self::Helix(w) => w.hints().iconic,
+        }
+    }
+
     /// The rectangle last given to it.
     pub fn last_configure(&self) -> Rectangle<i32, Logical> {
         either!(self, x => x.last_configure())

@@ -160,6 +160,9 @@ impl Xwm {
             conn.composite_query_version(0, 4)?.reply()?;
             conn.composite_redirect_subwindows(root, Redirect::MANUAL)?;
         }
+        // For apps that sync their redraws with resizes
+        // (`_NET_WM_SYNC_REQUEST`).
+        x11rb::protocol::sync::ConnectionExt::sync_initialize(&*conn, 3, 1)?.reply()?;
         let supported = [
             atoms._NET_SUPPORTED,
             atoms._NET_SUPPORTING_WM_CHECK,
@@ -179,9 +182,12 @@ impl Xwm {
             atoms._NET_WM_STATE_FULLSCREEN,
             atoms._NET_WM_STATE_ABOVE,
             atoms._NET_WM_STATE_FOCUSED,
+            atoms._NET_WM_STATE_HIDDEN,
             atoms._NET_WM_WINDOW_TYPE,
             atoms._NET_WM_PID,
             atoms._NET_WM_PING,
+            atoms._NET_WM_SYNC_REQUEST,
+            atoms._NET_WM_SYNC_REQUEST_COUNTER,
             atoms._NET_WM_STATE_DEMANDS_ATTENTION,
         ];
         conn.change_property32(PropMode::REPLACE, root, atoms._NET_SUPPORTED, AtomEnum::ATOM, &supported)?;
@@ -281,6 +287,10 @@ impl Xwm {
             Event::DestroyNotify(e) => {
                 if let Some(win) = self.windows.remove(&e.window) {
                     win.state().destroyed = true;
+                    let alarm = std::mem::take(&mut win.state().sync.alarm);
+                    if alarm != 0 {
+                        x11rb::protocol::sync::ConnectionExt::sync_destroy_alarm(&*self.conn, alarm)?;
+                    }
                     self.unlist(e.window)?;
                     self.window_serials.retain(|_, w| *w != e.window);
                     actions.push(Action::Destroyed(win));
@@ -364,6 +374,11 @@ impl Xwm {
             }
             Event::ClientMessage(e) => self.client_message(e, &mut actions)?,
             Event::FocusIn(e) => self.focus_in(e)?,
+            Event::SyncAlarmNotify(e) => {
+                if let Some(win) = self.windows.values().find(|w| w.state().sync.alarm == e.alarm).cloned() {
+                    win.sync_done()?;
+                }
+            }
             _ => {}
         }
         Ok(actions)
@@ -743,6 +758,59 @@ impl Xwm {
     pub fn focus(&self, win: &XWin) {
         if let Err(err) = win.focus() {
             tracing::debug!(%err, "cannot focus the X11 window");
+        }
+    }
+
+    /// The root window's cursor, which X11 windows without one of their
+    /// own show: `pixels` as 32-bit ARGB (B, G, R, A in memory,
+    /// premultiplied), `size` and `hotspot` in X pixels (#171).
+    pub fn set_cursor(&self, pixels: &[u8], size: (u16, u16), hotspot: (u16, u16)) -> Result<(), ReplyOrIdError> {
+        use x11rb::protocol::render::{ConnectionExt as _, CreatePictureAux, PictType};
+        use x11rb::protocol::xproto::{CreateGCAux, ImageFormat};
+        let (w, h) = size;
+        if pixels.len() < usize::from(w) * usize::from(h) * 4 || w == 0 || h == 0 {
+            return Ok(());
+        }
+        let formats = self.conn.render_query_pict_formats()?.reply()?;
+        let Some(format) = formats
+            .formats
+            .iter()
+            .find(|f| f.type_ == PictType::DIRECT && f.depth == 32 && f.direct.alpha_mask == 0xff && f.direct.alpha_shift == 24 && f.direct.red_shift == 16)
+            .map(|f| f.id)
+        else {
+            return Ok(());
+        };
+        let pixmap = self.conn.generate_id()?;
+        self.conn.create_pixmap(32, pixmap, self.root, w, h)?;
+        let gc = self.conn.generate_id()?;
+        self.conn.create_gc(gc, pixmap, &CreateGCAux::new())?;
+        self.conn.put_image(ImageFormat::Z_PIXMAP, pixmap, gc, w, h, 0, 0, 0, 32, &pixels[..usize::from(w) * usize::from(h) * 4])?;
+        let picture = self.conn.generate_id()?;
+        self.conn.render_create_picture(picture, pixmap, format, &CreatePictureAux::new())?;
+        let cursor = self.conn.generate_id()?;
+        self.conn.render_create_cursor(cursor, picture, hotspot.0, hotspot.1)?;
+        self.conn.change_window_attributes(self.root, &ChangeWindowAttributesAux::new().cursor(cursor))?;
+        self.conn.free_cursor(cursor)?;
+        self.conn.render_free_picture(picture)?;
+        self.conn.free_gc(gc)?;
+        self.conn.free_pixmap(pixmap)?;
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    /// When a resize waiting for an app's redraw (`_NET_WM_SYNC_REQUEST`)
+    /// goes anyway, the earliest.
+    pub fn sync_deadline(&self) -> Option<std::time::Instant> {
+        self.windows.values().filter_map(XWin::sync_deadline).min()
+    }
+
+    /// Resizes that waited long enough for an app's redraw go.
+    pub fn sync_expired(&self) {
+        let now = std::time::Instant::now();
+        for win in self.windows.values() {
+            if let Err(err) = win.sync_expired(now) {
+                tracing::debug!(%err, "cannot resize an X11 window");
+            }
         }
     }
 

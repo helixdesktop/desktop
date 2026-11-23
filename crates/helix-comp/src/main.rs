@@ -254,6 +254,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let result = event_loop.run(None, &mut state, |state| {
         // X events read while waiting for a reply are handled too.
         state.dispatch_helix_xwm();
+        state.helix_xwm_sync_timer();
         if state.sync_pointer_focus() {
             let _ = state.display_handle.flush_clients();
         }
@@ -442,6 +443,12 @@ async fn announce_socket(conn: &zbus::Connection, socket: &str, xdisplay: Option
                 sm.setenv("XAUTHORITY", &auth.path.to_string_lossy()).await?;
             }
             sm.setenv("DISPLAY", &format!(":{n}")).await?;
+            if compositor::xwm::helix_selected() {
+                // Java takes a window manager it doesn't know by name for
+                // a reparenting one, and shows blank windows under one
+                // that isn't (Helix's own; #191).
+                sm.setenv("_JAVA_AWT_WM_NONREPARENTING", "1").await?;
+            }
         }
         sm.setenv("WAYLAND_DISPLAY", socket).await
     }
