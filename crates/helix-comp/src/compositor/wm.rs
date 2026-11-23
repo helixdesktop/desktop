@@ -425,6 +425,7 @@ impl Helix {
             return;
         };
         let (_, mut geometry, _) = self.restore.remove(pos);
+        self.wm.legacy_fullscreen.retain(|w| w != window);
         if let (Some(pointer), Some(location)) = (grabbed, self.space.element_location(window)) {
             let before = Rectangle::new(location, window.geometry().size);
             geometry.loc = anchored(before, geometry.size, pointer);
@@ -701,6 +702,7 @@ impl Helix {
         self.frames.forget(window);
         self.above.retain(|w| w != window);
         self.minimized.retain(|(w, _)| w != window);
+        self.wm.legacy_fullscreen.retain(|w| w != window);
         if let Some(hidden) = self.shown_desktop.as_mut() {
             hidden.retain(|w| w != window);
         }

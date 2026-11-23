@@ -31,6 +31,10 @@ pub struct WmState {
     raise_at: Option<(Window, Instant)>,
     /// New Wayland windows waiting for their first buffer to be placed.
     pub unplaced: Vec<Window>,
+    /// X11 windows full screen because they cover a monitor exactly,
+    /// undecorated (borderless full screen; #226): they leave it when they
+    /// stop covering it.
+    pub legacy_fullscreen: Vec<Window>,
     /// New Wayland windows to focus at their initial commit (they get no
     /// keyboard focus or configure before it).
     pub focus_on_commit: Vec<Window>,
