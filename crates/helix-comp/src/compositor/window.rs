@@ -519,7 +519,10 @@ impl X11Window {
     }
 
     pub fn set_fullscreen(&self, fullscreen: bool) -> Result<(), ConnectionError> {
-        either!(self, x => x.set_fullscreen(fullscreen))
+        either!(self, x => x.set_fullscreen(fullscreen))?;
+        // No title bar while full screen (`_NET_FRAME_EXTENTS`, #227).
+        self.set_frame_extents(super::frames::x11_frame_top(self));
+        Ok(())
     }
 
     pub fn set_maximized(&self, maximized: bool) -> Result<(), ConnectionError> {

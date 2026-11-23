@@ -42,10 +42,22 @@ smithay::backend::renderer::element::render_elements! {
 /// (not splash screens, notifications, docks) that do not ask for none and
 /// are not fullscreen.
 pub fn framed(window: &Window) -> bool {
-    window.x11_surface().is_some_and(|x| {
-        // Smithay's `is_decorated`: the Motif hints say the client draws its own.
-        !x.is_override_redirect() && !x.is_decorated() && !x.is_fullscreen() && super::xwayland::x11_kind(x) == super::xwayland::X11Kind::App
-    })
+    window.x11_surface().is_some_and(x11_framed)
+}
+
+/// [`framed`], for the X11 window itself.
+pub fn x11_framed(x: &super::window::X11Window) -> bool {
+    // Smithay's `is_decorated`: the Motif hints say the client draws its own.
+    !x.is_override_redirect() && !x.is_decorated() && !x.is_fullscreen() && super::xwayland::x11_kind(x) == super::xwayland::X11Kind::App
+}
+
+/// [`frame_top`], for the X11 window itself.
+pub fn x11_frame_top(x: &super::window::X11Window) -> i32 {
+    if x11_framed(x) {
+        TITLE_H
+    } else {
+        0
+    }
 }
 
 /// How far a window's frame reaches above its own area.

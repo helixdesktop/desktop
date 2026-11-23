@@ -93,6 +93,27 @@ pub struct State {
     pub dnd: Option<(wl_data_offer::WlDataOffer, Vec<String>, u32)>,
     /// Whether that drag was dropped here.
     pub dropped: bool,
+    /// Layer surfaces' (`Client::panel`) configures not answered yet:
+    /// serial and size.
+    layer_configures: Vec<(wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, u32, (u32, u32))>,
+}
+
+impl Dispatch<wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1, ()> for State {
+    fn event(_: &mut Self, _: &wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1, _: wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+}
+
+impl Dispatch<wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for State {
+    fn event(state: &mut Self, layer: &wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, event: wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+        if let wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::Event::Configure { serial, width, height } = event {
+            state.layer_configures.push((layer.clone(), serial, (width, height)));
+        }
+    }
+}
+
+/// A panel along the top of the screen ([`Client::panel`]).
+pub struct Panel {
+    pub surface: wl_surface::WlSurface,
+    pub layer: wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
 }
 
 macro_rules! quiet {
@@ -272,6 +293,7 @@ pub struct Client {
     data_manager: wl_data_device_manager::WlDataDeviceManager,
     /// The primary selection device, when the compositor offers one.
     pub primary_device: Option<primary_device::ZwpPrimarySelectionDeviceV1>,
+    layer_shell: Option<wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1>,
 }
 
 pub struct Toplevel {
@@ -330,6 +352,28 @@ impl Client {
         t.surface.commit();
         self.roundtrip();
         (t, made)
+    }
+
+    /// A panel along the top of the screen, `height` tall, that keeps
+    /// windows below it (a top-layer surface with an exclusive zone).
+    pub fn panel(&mut self, height: i32) -> Panel {
+        use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1::Anchor};
+        let shell = self.layer_shell.clone().expect("helix-comp offers zwlr_layer_shell_v1");
+        let surface = self.compositor.create_surface(&self.qh, ());
+        let layer = shell.get_layer_surface(&surface, None, zwlr_layer_shell_v1::Layer::Top, "test-panel".into(), &self.qh, ());
+        layer.set_size(0, height as u32);
+        layer.set_anchor(Anchor::Top | Anchor::Left | Anchor::Right);
+        layer.set_exclusive_zone(height);
+        surface.commit();
+        let l = layer.clone();
+        self.until("the panel was never configured", |s| s.layer_configures.iter().any(|(x, _, _)| x == &l));
+        let (_, serial, (w, _)) = self.state.layer_configures.iter().rev().find(|(x, _, _)| x == &l).cloned().unwrap();
+        self.state.layer_configures.retain(|(x, _, _)| x != &l);
+        layer.ack_configure(serial);
+        surface.attach(Some(&filled(&self.shm, &self.qh, (w.max(1) as i32, height))), 0, 0);
+        surface.commit();
+        self.roundtrip();
+        Panel { surface, layer }
     }
 
     /// A token asked for from `from` (none: no surface) with `serial` on
@@ -455,7 +499,9 @@ pub fn connect(session: &HeadlessSession) -> Client {
     let manager: wl_data_device_manager::WlDataDeviceManager = globals.bind(&qh, 3..=3, ()).unwrap();
     let data_device = manager.get_data_device(&seat, &qh, ());
     let primary_device = globals.bind::<primary_manager::ZwpPrimarySelectionDeviceManagerV1, _, _>(&qh, 1..=1, ()).ok().map(|m| m.get_device(&seat, &qh, ()));
+    let layer_shell = globals.bind(&qh, 1..=4, ()).ok();
     Client {
+        layer_shell,
         primary_device,
         compositor: globals.bind(&qh, 4..=6, ()).unwrap(),
         shm: globals.bind(&qh, 1..=1, ()).unwrap(),

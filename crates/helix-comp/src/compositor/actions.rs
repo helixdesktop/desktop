@@ -256,7 +256,7 @@ impl Helix {
 
     /// Move (or resize from the bottom-right corner) with the pointer, no
     /// button held: a click ends it, Escape undoes it.
-    fn begin_follow(&mut self, window: Window, resize: bool) {
+    pub(super) fn begin_follow(&mut self, window: Window, resize: bool) {
         if self.is_taken_over(&window, Takeover::Maximized) || self.is_taken_over(&window, Takeover::Fullscreen) {
             return;
         }

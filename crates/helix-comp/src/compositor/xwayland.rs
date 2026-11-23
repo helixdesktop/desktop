@@ -374,7 +374,7 @@ impl Helix {
         });
     }
 
-    fn x11_window(&self, x11: &X11Window) -> Option<Window> {
+    pub(super) fn x11_window(&self, x11: &X11Window) -> Option<Window> {
         self.space
             .elements()
             .chain(self.minimized.iter())
@@ -401,6 +401,7 @@ impl Helix {
             return;
         }
         x11.set_frame_extents(super::frames::frame_top(&window));
+        self.publish_x11_desktop();
         if kind != X11Kind::App {
             self.map_unfocused_x11(&window, &x11, kind);
             return;
@@ -851,6 +852,12 @@ impl Helix {
             A::Close(w) => {
                 let _ = w.close();
             }
+            A::KeyboardMove(w) => self.x11_keyboard_move_resize(x(w), false),
+            A::KeyboardResize(w) => self.x11_keyboard_move_resize(x(w), true),
+            A::CancelMoveResize(w) => self.x11_cancel_move_resize(x(w)),
+            A::RequestFrameExtents(w) | A::DecorationsChanged(w) => self.refresh_x11_frame_extents(&x(w)),
+            A::SwitchDesktop(n) => self.x11_switch_desktop(n),
+            A::MoveToDesktop(w, n) => self.x11_move_to_desktop(x(w), n),
             A::SelectionOffered(selection, types) => self.x11_new_selection(selection, types),
             A::SelectionCleared(selection) => self.x11_selection_cleared(selection),
             A::SelectionWanted { selection, mime, fd } => self.x11_serve_selection(selection, mime, fd),

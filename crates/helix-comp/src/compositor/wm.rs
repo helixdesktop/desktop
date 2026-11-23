@@ -458,6 +458,7 @@ impl Helix {
     /// appeared): move windows out from under reserved zones and resize
     /// maximized ones to the new area.
     pub fn constrain_to_work_area(&mut self) {
+        self.publish_x11_desktop();
         // (output, usable area, full area)
         type Areas = Vec<(String, Rectangle<i32, Logical>, Rectangle<i32, Logical>)>;
         let areas: Areas = self

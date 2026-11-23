@@ -73,6 +73,10 @@ pub(super) struct State {
     pub last_configure: Rectangle<i32, Logical>,
     pub outputs: Vec<(WeakOutput, Rectangle<i32, Logical>)>,
     pub sync: SyncState,
+    /// What `_NET_FRAME_EXTENTS` and `_NET_WM_DESKTOP` say now (written
+    /// again only when they change).
+    pub frame_top: Option<u32>,
+    pub desktop: Option<u32>,
 }
 
 /// `_NET_WM_SYNC_REQUEST` (EWMH): a client that takes part is told a
@@ -291,7 +295,7 @@ impl XWin {
 
     /// Xwayland's scale: X11 pixels per Helix logical pixel.
     fn scale(&self) -> f64 {
-        self.0.client.as_ref().and_then(|c| c.get_data::<XWaylandClientData>()).map_or(1.0, |d| d.compositor_state.client_scale()).max(1.0)
+        client_scale(self.0.client.as_ref())
     }
 
     pub(super) fn x_to_logical(&self, v: i32) -> i32 {
@@ -558,7 +562,24 @@ impl XWin {
     pub fn set_frame_extents(&self, top: i32) -> Result<(), ConnectionError> {
         let Some(conn) = self.conn() else { return Err(ConnectionError::UnknownError) };
         let top = self.logical_to_x(top).max(0) as u32;
+        if self.state().frame_top.replace(top) == Some(top) {
+            return Ok(());
+        }
         conn.change_property32(PropMode::REPLACE, self.0.id, self.0.atoms._NET_FRAME_EXTENTS, AtomEnum::CARDINAL, &[0, 0, top, 0])?;
+        conn.flush()
+    }
+
+    /// Says which workspace it is on (`_NET_WM_DESKTOP`; `u32::MAX`: on
+    /// all of them).
+    pub fn set_desktop(&self, desktop: u32) -> Result<(), ConnectionError> {
+        let Some(conn) = self.conn() else { return Err(ConnectionError::UnknownError) };
+        {
+            let mut state = self.state();
+            if !state.managed || state.desktop.replace(desktop) == Some(desktop) {
+                return Ok(());
+            }
+        }
+        conn.change_property32(PropMode::REPLACE, self.0.id, self.0.atoms._NET_WM_DESKTOP, AtomEnum::CARDINAL, &[desktop])?;
         conn.flush()
     }
 
@@ -599,6 +620,11 @@ impl IsAlive for XWin {
     fn alive(&self) -> bool {
         !self.state().destroyed && self.0.conn.strong_count() > 0
     }
+}
+
+/// Xwayland's scale (X11 pixels per Helix logical pixel) for its client.
+pub(super) fn client_scale(client: Option<&Client>) -> f64 {
+    client.and_then(|c| c.get_data::<XWaylandClientData>()).map_or(1.0, |d| d.compositor_state.client_scale()).max(1.0)
 }
 
 /// Whether `surface` came from the Xwayland client this window manager
