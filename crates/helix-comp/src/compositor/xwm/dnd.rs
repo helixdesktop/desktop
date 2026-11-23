@@ -34,6 +34,10 @@ use super::{parse, Atoms, Later, XWin};
 /// The XDND version spoken.
 const VERSION: u32 = 5;
 
+/// How long a Wayland drag dropped on an X11 window waits for its
+/// XdndFinished (moved on while the window is still fetching the data).
+const FINISH_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// What an X11 app's drag source asks of the window manager, from the
 /// seat's grab (through the compositor's event loop).
 #[derive(Debug)]
@@ -182,7 +186,14 @@ struct ToX {
     to: XId,
     state: Arc<Mutex<ToXState>>,
     action: DndAction,
+    /// The action the window last said it would take (XdndStatus).
+    last_action: Option<DndAction>,
+    /// The XDND version the window speaks (XdndAware, at most ours).
+    version: u32,
     dropped: bool,
+    /// Dropped: the drag is given up if the window hasn't finished by
+    /// then (it may never answer).
+    deadline: Option<std::time::Instant>,
     /// Which drag this is (an answer about an earlier one is stale).
     serial: u64,
     /// XdndEnter sent: what the window answered about taking drops came.
@@ -281,13 +292,26 @@ impl Dnd {
         }
     }
 
-    /// When an X11 app's drag is given up if it hasn't finished.
+    /// When a drag is given up if it hasn't finished: an X11 app's after
+    /// the grab ended, a Wayland one dropped on an X11 window.
     pub fn deadline(&self) -> Option<std::time::Instant> {
-        self.from_x.as_ref().and_then(|d| d.deadline)
+        [self.from_x.as_ref().and_then(|d| d.deadline), self.to_x.as_ref().and_then(|d| d.deadline)].into_iter().flatten().min()
     }
 
-    /// An X11 app's drag that didn't finish in time is given up.
-    pub fn expired(&mut self) {
+    /// A drag that didn't finish in time is given up.
+    pub fn expired(&mut self, selections: &mut Selections) {
+        let now = std::time::Instant::now();
+        if self.to_x.as_ref().and_then(|d| d.deadline).is_some_and(|d| d <= now) {
+            if selections.serving_dnd() {
+                // Still fetching the data: give it longer.
+                if let Some(drag) = self.to_x.as_mut() {
+                    drag.deadline = Some(now + FINISH_WAIT);
+                }
+            } else {
+                tracing::debug!("an X11 drop target never finished");
+                self.end_to_x(false, selections);
+            }
+        }
         if self.from_x.as_ref().and_then(|d| d.deadline).is_some_and(|d| d <= std::time::Instant::now()) {
             tracing::debug!("an X11 drag never finished");
             if self.from_x.as_ref().is_some_and(|d| d.dropped.is_some()) {
@@ -514,7 +538,7 @@ impl Dnd {
         let state = Arc::new(Mutex::new(ToXState::default()));
         self.serial += 1;
         let serial = self.serial;
-        self.to_x = Some(ToX { source, target, to: target, state: state.clone(), action, dropped: false, serial, entered: false, motion: Some((win.clone(), at, x11rb::CURRENT_TIME)) });
+        self.to_x = Some(ToX { source, target, to: target, state: state.clone(), action, last_action: None, version: VERSION, dropped: false, deadline: None, serial, entered: false, motion: Some((win.clone(), at, x11rb::CURRENT_TIME)) });
         self.later.push((
             vec![aware, proxy],
             Box::new(move |xwm, replies, _| {
@@ -558,6 +582,7 @@ impl Dnd {
         }
         drag.to = to;
         drag.entered = true;
+        drag.version = version.min(VERSION);
         let (target, source, motion) = (drag.target, drag.source.clone(), drag.motion.take());
         let version = version.min(VERSION);
         self.conn.set_selection_owner(self.owner, a.XdndSelection, x11rb::CURRENT_TIME)?;
@@ -619,6 +644,7 @@ impl Dnd {
         }
         let Some(drag) = self.to_x.as_mut() else { return };
         drag.dropped = true;
+        drag.deadline = Some(std::time::Instant::now() + FINISH_WAIT);
         let (to, target) = (drag.to, drag.target);
         let _ = self.message(to, target, self.atoms.XdndDrop, [self.owner, 0, x11rb::CURRENT_TIME, 0, 0]);
     }
@@ -652,23 +678,52 @@ impl Dnd {
                 drag.source.accepted(if accepted { mime } else { None });
             }
             if accepted {
+                drag.last_action = Some(action);
                 drag.source.choose_action(action);
             }
         } else if e.type_ == a.XdndFinished {
             if !drag.dropped {
                 return Ok(());
             }
-            let source = drag.source.clone();
-            self.to_x = None;
-            selections.dnd = None;
-            if data[1] & 1 == 1 {
-                source.choose_action(finished_action);
-                source.finished();
-            } else {
-                source.cancel();
+            // Before XDND 5 XdndFinished says nothing more: it took it, with
+            // the action it last said. A version-5 one without an action
+            // means that too.
+            let taken = drag.version < 5 || data[1] & 1 == 1;
+            let action = match finished_action {
+                DndAction::None => drag.last_action.unwrap_or(drag.action),
+                action => action,
+            };
+            if taken {
+                drag.source.choose_action(action);
             }
+            self.end_to_x(taken, selections);
         }
         Ok(())
+    }
+
+    /// A Wayland drag on an X11 window ends: finished (`taken`) or
+    /// cancelled.
+    fn end_to_x(&mut self, taken: bool, selections: &mut Selections) {
+        let Some(drag) = self.to_x.take() else { return };
+        selections.dnd = None;
+        if taken {
+            drag.source.finished();
+        } else {
+            drag.source.cancel();
+        }
+    }
+
+    /// A window went away: a Wayland drag over it, or dropped on it, ends
+    /// there (one dropped is cancelled: it can't finish any more).
+    pub fn window_destroyed(&mut self, window: XId, selections: &mut Selections) {
+        let Some(drag) = self.to_x.as_ref().filter(|d| d.target == window || d.to == window) else { return };
+        if drag.dropped {
+            tracing::debug!(window, "the X11 drop target went away before it finished");
+            self.end_to_x(false, selections);
+        } else {
+            self.to_x = None;
+            selections.dnd = None;
+        }
     }
 }
 

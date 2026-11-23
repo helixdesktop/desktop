@@ -439,6 +439,9 @@ impl DndFocus<Helix> for PointerFocusTarget {
                 if let Some(xwm) = data.hxwm.as_mut() {
                     xwm.drag_drop();
                 }
+                // The drop now waits for the window's XdndFinished, for a
+                // while (#230).
+                data.helix_xwm_selection_timer();
             }
             _ => {}
         }

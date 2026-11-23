@@ -535,7 +535,11 @@ impl Xwm {
                 }
                 self.add(e.window, e.override_redirect, e.x.into(), e.y.into(), e.width.into(), e.height.into());
             }
-            Event::DestroyNotify(e) => self.forget(e.window, &mut actions)?,
+            Event::DestroyNotify(e) => {
+                // A Wayland drag over it, or dropped on it, ends (#230).
+                self.dnd.window_destroyed(e.window, &mut self.selections);
+                self.forget(e.window, &mut actions)?;
+            }
             // A top-level window put into another window (XEmbed tray
             // icons, Wine switching a window between child and top level,
             // Java's embedded frames) is no longer one Helix manages; its
@@ -1385,7 +1389,7 @@ impl Xwm {
     pub fn selection_expired(&mut self) -> Vec<Action> {
         let mut actions = Vec::new();
         self.selections.expired(&mut actions);
-        self.dnd.expired();
+        self.dnd.expired(&mut self.selections);
         self.absorb();
         actions
     }

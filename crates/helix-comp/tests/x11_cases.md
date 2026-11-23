@@ -157,7 +157,7 @@ Apps are the ones the upstream reports name.
 | X62 | S43 | One answer per request, no stray refusal after | | `x11_selection::each_request_gets_one_answer`, `x11_clipboard::an_x11_app_pastes_more_than_once` |
 | X63 | S44 | A Wayland app pastes an X11 copy again and again | | `x11_selection::a_wayland_app_pastes_an_x11_copy_again_and_again` |
 | X64 | W67 | A large X11 copy pasted twice in a row | | `x11_selection::a_large_x11_copy_pastes_whole_twice` |
-| X119 | review (#228) | A large X11 copy into a Wayland app that reads slowly: arrives whole after the owner is done, and the X11 app waits for the reader instead of the compositor buffering it all | GIMP, Krita | `x11_selection::a_large_x11_copy_reaches_a_slow_reader_whole` (Smithay's window manager buffers it all) |
+| X121 | review (#228) | A large X11 copy into a Wayland app that reads slowly: arrives whole after the owner is done, and the X11 app waits for the reader instead of the compositor buffering it all | GIMP, Krita | `x11_selection::a_large_x11_copy_reaches_a_slow_reader_whole` (Smithay's window manager buffers it all) |
 | X65 | S41 | A paste given up halfway doesn't stall the X11 owner | | `x11_selection::a_paste_given_up_halfway_does_not_stall_the_owner` (intermittent before #218) |
 | X66 | W66 | Two pastes of an X11 copy at once | | `x11_selection::two_pastes_at_once` |
 | X67 | W69 | An app asking twice and reading neither doesn't hold up others | fcitx, Slack, Telegram | `x11_selection::an_app_abandoning_its_requests_does_not_hold_up_others` |
@@ -188,6 +188,7 @@ Apps are the ones the upstream reports name.
 | X117 | W79 | The X11 target window destroyed mid-drag | `x11_dnd::a_drag_whose_x11_target_goes_away_goes_on` (shutting the window manager down mid-drag: not testable headlessly, Xwayland only goes away by crashing) |
 | X118 | W80 | Several targets asked for at once during a drag | Chromium | `x11_dnd::several_types_fetched_at_once` (fixed in #207), `x11_dnd::several_types_fetched_one_after_another` |
 | X119 | review (#231) | A top-level window reparented into another window (XEmbed tray icons, Wine child windows, Java embedded frames) stops being managed; its id given out again later is a new window | Wine, Java, tray apps | `x11_map::a_window_put_into_another_is_no_longer_listed`, `x11_map::an_id_given_out_again_is_a_new_window` |
+| X120 | review (#230) | A Wayland drop on an X11 window that never sends XdndFinished, or goes away first; an XDND 4 target's XdndFinished (no flags) | | `x11_dnd::a_drop_the_target_never_finishes_ends_after_a_while`, `x11_dnd::a_drop_whose_target_goes_away_before_finishing_ends` (both fail on Smithay's window manager), `x11_dnd::an_xdnd4_target_finishing_takes_the_drop` |
 
 ## Xwayland itself
 
