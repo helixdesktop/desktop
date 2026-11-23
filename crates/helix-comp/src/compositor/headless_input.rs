@@ -28,6 +28,8 @@
 //!   fingers still down; `finger stop`: they lift (the axis stop).
 //! - `touch down|move X Y` and `touch up`: one finger (slot 0) of the
 //!   virtual touchscreen on the monitor under (X, Y).
+//! - `unplug CONNECTOR`: the monitor goes away, as an unplugged one does
+//!   (windows on it are rescued).
 
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -47,6 +49,9 @@ pub enum Command {
     Click(f64, f64, u32),
     /// A finger down or moved to (x, y); `None`: lifted.
     Touch(Option<(f64, f64)>, bool),
+    /// A monitor unplugged (its connector name): windows on it are
+    /// rescued, as when a real one goes away.
+    Unplug(String),
 }
 
 fn number<T: std::str::FromStr>(word: Option<&str>) -> Result<T, String> {
@@ -95,6 +100,7 @@ pub fn parse(line: &str) -> Result<Command, String> {
             Command::Input(down.chain(up).collect())
         }
         "move" => Command::Move(number(words.next())?, number(words.next())?),
+        "unplug" => Command::Unplug(words.next().ok_or("missing connector")?.to_owned()),
         "button" => Command::Input(vec![RemoteInput::Button { button: number(words.next())?, pressed: pressed(words.next())? }]),
         "click" => {
             let (x, y) = (number(words.next())?, number(words.next())?);
@@ -215,6 +221,14 @@ impl Helix {
                 }
                 self.headless_touch(at, down);
             }
+            Command::Unplug(connector) => {
+                let output = self.space.outputs().find(|o| o.name() == connector).cloned();
+                if let Some(output) = output {
+                    self.close_layers(&output);
+                    self.space.unmap_output(&output);
+                    self.rescue_windows();
+                }
+            }
         }
         let _ = self.display_handle.flush_clients();
     }
@@ -274,6 +288,7 @@ mod tests {
             ]))
         );
         assert_eq!(parse("move 10 20.5"), Ok(Command::Move(10.0, 20.5)));
+        assert_eq!(parse("unplug HEADLESS-2"), Ok(Command::Unplug("HEADLESS-2".into())));
         assert_eq!(parse("click 1 2"), Ok(Command::Click(1.0, 2.0, 0x110)));
         assert_eq!(parse("click 1 2 274"), Ok(Command::Click(1.0, 2.0, 274)));
         assert_eq!(parse("touch down 10 20"), Ok(Command::Touch(Some((10.0, 20.0)), true)));

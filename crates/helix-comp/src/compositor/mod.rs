@@ -143,9 +143,10 @@ pub struct Helix {
     pub clock: smithay::utils::Clock<smithay::utils::Monotonic>,
     pub protocols: protocols::ProtocolState,
 
-    /// Minimized windows (unmapped) and where they were.
-    pub minimized: Vec<Window>,
-    pub minimized_at: Vec<Point<i32, Logical>>,
+    /// Minimized windows (unmapped) and where they go back. A window is
+    /// in at most one of the space, this list and the parked windows
+    /// (`wm::Presence`, #240).
+    pub minimized: Vec<(Window, Point<i32, Logical>)>,
     /// Geometry to restore after maximize/fullscreen.
     pub restore: Vec<(Window, Rectangle<i32, Logical>, wm::Takeover)>,
     /// Interactive resize awaiting the client's commits.
@@ -372,7 +373,6 @@ impl Helix {
             popups: PopupManager::default(),
             seat,
             minimized: Vec::new(),
-            minimized_at: Vec::new(),
             restore: Vec::new(),
             resize: None,
             above: Vec::new(),

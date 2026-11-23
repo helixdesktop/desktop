@@ -326,7 +326,7 @@ impl Helix {
     /// (#169), at most [`XWAYLAND_RESTARTS`] times a minute.
     fn xwayland_gone(&mut self) {
         tracing::error!("Xwayland is gone; X11 apps have closed");
-        let windows: Vec<Window> = self.space.elements().chain(self.minimized.iter()).chain(self.workspaces.parked()).filter(|w| w.x11_surface().is_some()).cloned().collect();
+        let windows: Vec<Window> = self.space.elements().chain(self.minimized_windows()).chain(self.workspaces.parked()).filter(|w| w.x11_surface().is_some()).cloned().collect();
         for window in &windows {
             self.forget_window(window);
         }
@@ -377,7 +377,7 @@ impl Helix {
     fn x11_window(&self, x11: &X11Window) -> Option<Window> {
         self.space
             .elements()
-            .chain(self.minimized.iter())
+            .chain(self.minimized_windows())
             .find(|w| w.x11_surface() == Some(x11))
             .cloned()
     }

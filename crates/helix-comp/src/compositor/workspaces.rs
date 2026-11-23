@@ -41,6 +41,19 @@ impl WorkspaceState {
     pub fn is_parked(&self, window: &Window) -> bool {
         self.parked.iter().any(|(w, _)| w == window)
     }
+
+    /// Change where a parked window will be shown again.
+    pub fn set_parked_at(&mut self, window: &Window, at: Point<i32, Logical>) {
+        if let Some(entry) = self.parked.iter_mut().find(|(w, _)| w == window) {
+            entry.1 = at;
+        }
+    }
+
+    /// Take `window` out of the parked windows without showing it (it is
+    /// being minimized instead).
+    pub fn unpark_hidden(&mut self, window: &Window) {
+        self.parked.retain(|(w, _)| w != window);
+    }
 }
 
 impl Helix {
@@ -62,7 +75,7 @@ impl Helix {
     fn workspace_windows(&self) -> Vec<Window> {
         self.space
             .elements()
-            .chain(self.minimized.iter())
+            .chain(self.minimized_windows())
             .chain(self.workspaces.parked())
             .filter(|w| !is_override_redirect(w))
             .cloned()
