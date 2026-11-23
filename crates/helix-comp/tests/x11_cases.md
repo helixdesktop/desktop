@@ -157,6 +157,7 @@ Apps are the ones the upstream reports name.
 | X62 | S43 | One answer per request, no stray refusal after | | `x11_selection::each_request_gets_one_answer`, `x11_clipboard::an_x11_app_pastes_more_than_once` |
 | X63 | S44 | A Wayland app pastes an X11 copy again and again | | `x11_selection::a_wayland_app_pastes_an_x11_copy_again_and_again` |
 | X64 | W67 | A large X11 copy pasted twice in a row | | `x11_selection::a_large_x11_copy_pastes_whole_twice` |
+| X119 | review (#228) | A large X11 copy into a Wayland app that reads slowly: arrives whole after the owner is done, and the X11 app waits for the reader instead of the compositor buffering it all | GIMP, Krita | `x11_selection::a_large_x11_copy_reaches_a_slow_reader_whole` (Smithay's window manager buffers it all) |
 | X65 | S41 | A paste given up halfway doesn't stall the X11 owner | | `x11_selection::a_paste_given_up_halfway_does_not_stall_the_owner` (intermittent before #218) |
 | X66 | W66 | Two pastes of an X11 copy at once | | `x11_selection::two_pastes_at_once` |
 | X67 | W69 | An app asking twice and reading neither doesn't hold up others | fcitx, Slack, Telegram | `x11_selection::an_app_abandoning_its_requests_does_not_hold_up_others` |

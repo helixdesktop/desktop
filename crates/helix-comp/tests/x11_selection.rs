@@ -317,6 +317,60 @@ fn a_large_x11_copy_pastes_whole_twice() {
     }
 }
 
+/// #228: a large X11 copy pasted into a Wayland app that reads slowly
+/// arrives whole, however long the app takes once the X11 app has sent it
+/// all; and the compositor doesn't hold all of it meanwhile: the X11 app
+/// is made to wait for the reader.
+#[test]
+fn a_large_x11_copy_reaches_a_slow_reader_whole() {
+    if common::known_failure(&[common::Xwm::Smithay], "Smithay's window manager reads a whole incremental X11 copy ahead of the Wayland reader (#228)") {
+        return;
+    }
+    let Some(session) = xwm::session() else { return };
+    let picture = data(16 * 1024 * 1024 + 5, 6);
+    let finished = x11_owner(&session, vec![("image/png", picture.clone())], false);
+    assert!(session.wait_for_log("selection set by an X11 app", Duration::from_secs(10)), "the compositor never saw the X11 copy");
+    let mut app = wayland_app(&session);
+    app.until("no clipboard offered", |s| s.selection.is_some());
+    let (offer, _) = app.state.selection.clone().unwrap();
+    let (read, write) = std::io::pipe().unwrap();
+    offer.receive("image/png".to_owned(), write.as_fd());
+    drop(write);
+    app.roundtrip();
+    // A few MB a second: well past the 5 s a stalled transfer is given.
+    let (progress, read_so_far) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut got = Vec::new();
+        let mut chunk = vec![0u8; 192 * 1024];
+        loop {
+            match std::io::Read::read(&mut { &read }, &mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    got.extend_from_slice(&chunk[..n]);
+                    let _ = progress.send(got.len());
+                }
+            }
+            std::thread::sleep(Duration::from_millis(64));
+        }
+        got
+    });
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut checked = false;
+    while !reader.is_finished() {
+        assert!(Instant::now() < deadline, "the paste never ended");
+        app.roundtrip();
+        if !checked && read_so_far.try_iter().last().is_some_and(|n| n >= 2 * 1024 * 1024) {
+            // 2 MB in: the X11 app can't have sent all 16 MB already.
+            assert!(finished.try_recv().is_err(), "the X11 app sent all of it while the reader had 2 MB: the compositor buffers the whole copy");
+            checked = true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let got = reader.join().unwrap();
+    assert!(got == picture, "{} of {} bytes, not the same (cut off?)", got.len(), picture.len());
+    assert!(checked, "the reader never got 2 MB in");
+}
+
 /// X65: a Wayland app that stops reading a large X11 copy halfway: the
 /// X11 app's transfer still runs to its end (it would wait forever), and
 /// the next paste works.
