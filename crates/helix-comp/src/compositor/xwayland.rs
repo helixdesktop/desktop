@@ -161,11 +161,15 @@ impl Helix {
             ready(self, None);
             return;
         };
+        // Kept since it went away (`xwayland_gone`): let go just before
+        // Xwayland takes it again, on this thread.
+        let reserved = self.xwayland_reserved.take();
         let spawn = |display: Option<u32>| XWayland::spawn(&self.display_handle, display, envs.clone(), std::iter::empty::<&str>(), false, Stdio::null(), Stdio::null(), |_| ());
         // Smithay looks for a free display among :0 to :32; when those are
         // all taken (by other X servers or locks that stay behind), the next
         // ones are tried one by one.
         // Again on the display it had (restarted: DISPLAY is exported).
+        drop(reserved);
         let mut spawned = match prefer.map(|d| spawn(Some(d))) {
             Some(Ok(spawned)) => Ok(spawned),
             Some(Err(err)) => {
@@ -221,6 +225,13 @@ impl Helix {
                             state.start_x11_settings(display_number);
                             state.set_x11_root_cursor();
                             state.start_x11_ping(display_number);
+                            // A Wayland copy made before Xwayland went
+                            // away and came back: X11 apps paste it again.
+                            for selection in [SelectionTarget::Clipboard, SelectionTarget::Primary] {
+                                if let Some(types) = state.x11_offered[offered_index(selection)].clone() {
+                                    state.x11_offer_selection(selection, Some(types));
+                                }
+                            }
                             tracing::info!(display = display_number, "Xwayland ready");
                             Some(display_number)
                         }
@@ -337,6 +348,9 @@ impl Helix {
         self.x11_selection_cleared(SelectionTarget::Clipboard);
         self.x11_selection_cleared(SelectionTarget::Primary);
         self.xwm = None;
+        if let Some(xwm) = self.hxwm.as_mut() {
+            xwm.xwayland_gone();
+        }
         self.hxwm = None;
         if let Some(token) = self.hxwm_source.take() {
             self.loop_handle.remove(token);
@@ -357,6 +371,10 @@ impl Helix {
         if let Some(token) = self.xwayland_source.take() {
             self.loop_handle.remove(token);
         }
+        // Kept until Xwayland is started again on it: X11 apps and the
+        // session keep DISPLAY, and another X server (another session's
+        // Xwayland) could take it in the second before.
+        self.xwayland_reserved = old.and_then(DisplayReservation::take);
         helix_comp::xauth::set_current(None);
         self.sync_window_list();
 
@@ -364,6 +382,7 @@ impl Helix {
         self.xwayland_restarts.retain(|t| now.duration_since(*t) < std::time::Duration::from_secs(60));
         if self.xwayland_restarts.len() >= XWAYLAND_RESTARTS {
             tracing::error!("Xwayland keeps going away; not starting it again this session");
+            self.xwayland_reserved = None;
             return;
         }
         self.xwayland_restarts.push(now);
@@ -784,6 +803,7 @@ impl Helix {
     /// offered it.
     fn x11_new_selection(&mut self, selection: SelectionTarget, mime_types: Vec<String>) {
         tracing::info!(?selection, types = mime_types.len(), "selection set by an X11 app");
+        self.x11_offered[offered_index(selection)] = None;
         match selection {
             SelectionTarget::Clipboard => {
                 set_data_device_selection(&self.display_handle, &self.seat, mime_types.clone(), super::ServerSelection::X11);
@@ -799,6 +819,7 @@ impl Helix {
     /// The Wayland selection changed (a copy, with its types, or none):
     /// X11 apps are offered it, by whichever window manager runs.
     pub(super) fn x11_offer_selection(&mut self, selection: SelectionTarget, types: Option<Vec<String>>) {
+        self.x11_offered[offered_index(selection)] = types.clone();
         if let Some(xwm) = self.xwm.as_mut() {
             if let Err(err) = xwm.new_selection(selection, types.clone()) {
                 tracing::warn!(?err, ?selection, "cannot offer the selection to X11");
@@ -1291,4 +1312,57 @@ fn xwayland_wrapper(settings: &helix_comp::wm_settings::WmSettings, auth: &std::
 fn wrapper_dir() -> Option<std::path::PathBuf> {
     let runtime = std::env::var("XDG_RUNTIME_DIR").ok().filter(|d| !d.is_empty())?;
     Some(std::path::Path::new(&runtime).join(format!("helix-xwayland-{}", std::process::id())))
+}
+
+/// Where [`Helix::x11_offered`] keeps `selection`'s types.
+fn offered_index(selection: SelectionTarget) -> usize {
+    match selection {
+        SelectionTarget::Clipboard => 0,
+        SelectionTarget::Primary => 1,
+    }
+}
+
+/// An X display kept free (its `/tmp/.X{n}-lock` naming the compositor,
+/// as an X server's names itself) while Xwayland is started again on it.
+/// X servers, Smithay's included, leave a display whose lock names a live
+/// process alone; if the compositor dies the lock is stale and taken
+/// over as any other. Let go (the lock removed, if still ours) on drop.
+pub struct DisplayReservation {
+    display: u32,
+    pid: String,
+}
+
+impl DisplayReservation {
+    fn path(display: u32) -> String {
+        format!("/tmp/.X{display}-lock")
+    }
+
+    /// Keep display `number`, unless something else has its lock.
+    pub fn take(number: u32) -> Option<Self> {
+        use std::io::Write;
+        let path = Self::path(number);
+        let pid = format!("{:>10}\n", std::process::id());
+        let mut file = match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => file,
+            Err(err) => {
+                tracing::warn!(%err, display = number, "cannot keep Xwayland's display while it starts again");
+                return None;
+            }
+        };
+        if file.write_all(pid.as_bytes()).is_err() {
+            let _ = std::fs::remove_file(&path);
+            return None;
+        }
+        tracing::debug!(display = number, "Xwayland's display kept");
+        Some(Self { display: number, pid })
+    }
+}
+
+impl Drop for DisplayReservation {
+    fn drop(&mut self) {
+        let path = Self::path(self.display);
+        if std::fs::read_to_string(&path).is_ok_and(|now| now == self.pid) {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }

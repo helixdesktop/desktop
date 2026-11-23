@@ -53,12 +53,18 @@ pub fn session_with_shell(name: &str) -> Option<(HeadlessSession, Shell)> {
 /// [`session_with_shell`] with `env` for the compositor (e.g. two monitors:
 /// `HELIX_HEADLESS_OUTPUTS=2`).
 pub fn session_with_shell_env(name: &str, env: Vec<(String, String)>) -> Option<(HeadlessSession, Shell)> {
+    session_with_shell_settings(name, env, "")
+}
+
+/// [`session_with_shell_env`] with `settings` (a GSettings keyfile, e.g.
+/// `[org/gnome/mutter]\ncheck-alive-timeout=uint32 1000\n`).
+pub fn session_with_shell_settings(name: &str, env: Vec<(String, String)>, settings: &str) -> Option<(HeadlessSession, Shell)> {
     let comp = PathBuf::from(env!("CARGO_BIN_EXE_helix-comp"));
     let dir = std::env::temp_dir().join(format!("helix-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let (program, listener) = stand_in_shell(&dir);
-    let session = HeadlessSession::start(Options { comp: &comp, shell: Some(&program), size: (u32::from(SCREEN.0), u32::from(SCREEN.1)), settings: "", env })?;
+    let session = HeadlessSession::start(Options { comp: &comp, shell: Some(&program), size: (u32::from(SCREEN.0), u32::from(SCREEN.1)), settings, env })?;
     if super::no_xwayland(&session) {
         return None;
     }
@@ -392,6 +398,43 @@ impl X {
     }
 }
 
+/// The session's Xwayland process (`Xwayland :N ...`).
+pub fn xwayland_pid(session: &HeadlessSession) -> Option<i32> {
+    std::fs::read_dir("/proc").ok()?.flatten().find_map(|entry| {
+        let pid: i32 = entry.file_name().to_str()?.parse().ok()?;
+        let cmdline = std::fs::read(entry.path().join("cmdline")).ok()?;
+        let mut args = cmdline.split(|b| *b == 0);
+        let program = args.next()?;
+        let ours = program.ends_with(b"Xwayland") && args.next() == Some(session.x_display.as_bytes());
+        ours.then_some(pid)
+    })
+}
+
+/// Kill the session's Xwayland (as a crash would); returns its pid.
+pub fn kill_xwayland(session: &HeadlessSession) -> i32 {
+    let pid = xwayland_pid(session).expect("the session's Xwayland");
+    // SAFETY: signalling the Xwayland of this test's own session.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+    pid
+}
+
+/// Wait until Xwayland `killed` was replaced by a new one that takes
+/// clients, and return a client of it.
+pub fn restarted_xwayland(session: &HeadlessSession, killed: i32) -> X {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while xwayland_pid(session).is_none_or(|pid| pid == killed) {
+        assert!(Instant::now() < deadline, "Xwayland was not started again on {}", session.x_display);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    loop {
+        if let Ok(x) = std::panic::catch_unwind(|| X::new(session)) {
+            return x;
+        }
+        assert!(Instant::now() < deadline, "cannot connect to the new Xwayland");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// The window manager still works: a new window from a new client gets
 /// managed.
 pub fn wm_still_works(session: &HeadlessSession) {
@@ -419,6 +462,8 @@ pub struct ShellState {
     pub windows: Vec<Listed>,
     pub focused: Option<u32>,
     pub not_responding: Vec<u32>,
+    /// Windows that want attention (`helix_window_list_v1.attention`).
+    pub attention: Vec<u32>,
     /// The session lock (`Shell::lock`): whether it is locked, whether a
     /// lock surface has the keyboard, and the keys pressed on it.
     pub locked: bool,
@@ -494,13 +539,23 @@ impl Dispatch<HelixWindowListV1, ()> for ShellState {
                 entry.app_id = app_id;
                 entry.title = title;
             }
-            E::Closed { id } => state.windows.retain(|w| w.id != id),
+            E::Closed { id } => {
+                state.windows.retain(|w| w.id != id);
+                state.attention.retain(|i| *i != id);
+                state.not_responding.retain(|i| *i != id);
+            }
             E::Icon { id, size, .. } => state.entry(id).icon_size = size,
             E::Focused { id } => state.focused = (id != 0).then_some(id),
             E::Geometry { id, x, y, width, height, minimized } => {
                 let entry = state.entry(id);
                 entry.geometry = Some((x, y, width, height));
                 entry.minimized = minimized != 0;
+            }
+            E::Attention { id, wanting } => {
+                state.attention.retain(|i| *i != id);
+                if wanting != 0 {
+                    state.attention.push(id);
+                }
             }
             E::NotResponding { id, responding } => {
                 state.not_responding.retain(|i| *i != id);
@@ -652,6 +707,7 @@ pub mod action {
     pub const MAXIMIZE: u32 = 2;
     pub const UNMAXIMIZE: u32 = 3;
     pub const TOGGLE_FULLSCREEN: u32 = 7;
+    pub const FORCE_QUIT: u32 = 31;
     pub const RAISE: u32 = 25;
     pub const LOWER: u32 = 26;
     pub const SHOW_DESKTOP: u32 = 28;

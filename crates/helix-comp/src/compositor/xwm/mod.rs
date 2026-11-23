@@ -24,6 +24,7 @@
 mod atoms;
 mod dnd;
 mod focus;
+mod pairing;
 mod props;
 mod selection;
 pub mod window;
@@ -180,10 +181,8 @@ pub struct Xwm {
     id_mask: u32,
     /// Every window the X server told us about, by id.
     windows: HashMap<XId, XWin>,
-    /// Serials an X11 window was given before its surface committed one,
-    /// and surfaces whose serial came before the window's.
-    window_serials: HashMap<u64, XId>,
-    surface_serials: HashMap<u64, WlSurface>,
+    /// Windows paired with their surfaces, by serial.
+    pairing: pairing::Pairing<XId, WlSurface>,
     /// Managed windows, in the order they were mapped, and bottom to top:
     /// what `_NET_CLIENT_LIST` and `_NET_CLIENT_LIST_STACKING` publish.
     /// Only the X stacking of managed windows is tracked here; Helix's
@@ -367,8 +366,7 @@ impl Xwm {
             focus_seq: Arc::new(AtomicU32::new(0)),
             id_mask,
             windows: HashMap::new(),
-            window_serials: HashMap::new(),
-            surface_serials: HashMap::new(),
+            pairing: pairing::Pairing::default(),
             client_list: Vec::new(),
             stacking: Vec::new(),
             selections,
@@ -850,11 +848,11 @@ impl Xwm {
             state.managed = false;
             // Xwayland makes a new surface (and serial) when it is shown again.
             state.wl_surface = None;
-            state.serial = None;
             // Written again when it is shown again.
             state.desktop = None;
             was
         };
+        self.pairing.unpair(id);
         if managed {
             // Withdrawn (ICCCM 4.1.3.1), and its EWMH states go (EWMH
             // "_NET_WM_STATE": removed when the window is withdrawn).
@@ -883,7 +881,7 @@ impl Xwm {
             x11rb::protocol::sync::ConnectionExt::sync_destroy_alarm(&*self.conn, alarm)?;
         }
         self.unlist(id)?;
-        self.window_serials.retain(|_, w| *w != id);
+        self.pairing.unpair(id);
         actions.push(Action::Destroyed(win));
         self.log_table("gone");
         Ok(())
@@ -1163,20 +1161,11 @@ impl Xwm {
 
     /// A window was given a serial (Xwayland's `WL_SURFACE_SERIAL`): pair
     /// it with the surface that commits the same one, whichever comes
-    /// first. A serial is used once; another window naming one already
-    /// paired (a forged message) is ignored.
+    /// first ([`pairing::Pairing`]).
     fn window_serial(&mut self, win: &XWin, serial: u64, actions: &mut Vec<Action>) {
-        if win.state().wl_surface.is_some() || self.windows.values().any(|w| w.state().serial == Some(serial)) {
-            tracing::debug!(window = win.window_id(), serial, "ignoring a serial already used");
-            return;
-        }
-        win.state().serial = Some(serial);
-        match self.surface_serials.remove(&serial) {
-            Some(surface) if surface.is_alive() => self.associate(win, surface, actions),
-            _ => {
-                self.window_serials.retain(|_, w| *w != win.window_id());
-                self.window_serials.insert(serial, win.window_id());
-            }
+        match self.pairing.window_serial(win.window_id(), serial, |s| s.is_alive()) {
+            Some(surface) => self.associate(win, surface, actions),
+            None => tracing::debug!(window = win.window_id(), serial, "X11 window given a serial; not paired yet"),
         }
     }
 
@@ -1187,15 +1176,9 @@ impl Xwm {
         if !window::from_client(surface, &self.client) {
             return actions;
         }
-        if self.windows.values().any(|w| w.state().wl_surface.as_ref() == Some(surface)) {
-            return actions;
-        }
-        match self.window_serials.remove(&serial).and_then(|id| self.windows.get(&id).cloned()) {
-            Some(win) if win.state().serial == Some(serial) => self.associate(&win, surface.clone(), &mut actions),
-            _ => {
-                self.surface_serials.retain(|_, s| s.is_alive());
-                self.surface_serials.insert(serial, surface.clone());
-            }
+        let paired = self.pairing.surface_serial(surface, serial, |s| s.is_alive());
+        if let Some(win) = paired.and_then(|id| self.windows.get(&id).cloned()) {
+            self.associate(&win, surface.clone(), &mut actions);
         }
         actions
     }
@@ -1322,6 +1305,12 @@ impl Xwm {
         let viewports: Vec<u32> = (0..count).flat_map(|_| [0, 0]).collect();
         self.conn.change_property32(PropMode::REPLACE, self.root, self.atoms._NET_DESKTOP_VIEWPORT, AtomEnum::CARDINAL, &viewports)?;
         self.conn.flush()
+    }
+
+    /// Xwayland went away (it crashed): a Wayland drag dropped on an X11
+    /// window can't finish any more, and is cancelled.
+    pub fn xwayland_gone(&mut self) {
+        self.dnd.xwayland_gone(&mut self.selections);
     }
 
     /// A Wayland copy (its types), or none, for `selection`.

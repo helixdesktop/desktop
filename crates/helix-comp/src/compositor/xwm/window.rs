@@ -54,7 +54,6 @@ pub(super) struct State {
     pub viewable: bool,
     pub destroyed: bool,
     pub wl_surface: Option<WlSurface>,
-    pub serial: Option<u64>,
     pub class: String,
     pub instance: String,
     pub pid: Option<u32>,

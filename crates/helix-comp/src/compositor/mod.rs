@@ -240,10 +240,17 @@ pub struct Helix {
     pub x_drag_tx: Option<smithay::reexports::calloop::channel::Sender<xwm::DragCmd>>,
     /// The X root cursor's theme, size and scale, as last set.
     pub x11_cursor: Option<(String, u32, i32)>,
+    /// The Wayland clipboard and primary selection's types, as last
+    /// offered to X11 apps (`None`: nothing, or an X11 app's): offered
+    /// again to a window manager started after Xwayland went away.
+    pub x11_offered: [Option<Vec<String>>; 2],
     /// The running Xwayland's event source (removing it gives its display
     /// back), and when it was started again after going away.
     pub xwayland_source: Option<smithay::reexports::calloop::RegistrationToken>,
     pub xwayland_restarts: Vec<std::time::Instant>,
+    /// Xwayland's display, kept while it is started again after going
+    /// away, so no other X server takes it meanwhile.
+    pub xwayland_reserved: Option<xwayland::DisplayReservation>,
     /// Xwayland's display number (`DISPLAY=:N`), once it is running.
     pub xdisplay: Option<u32>,
     /// Xwayland's Wayland client, once it is running.
@@ -433,7 +440,9 @@ impl Helix {
             x11_settings: helix_comp::xsettings::read(),
             xwayland_source: None,
             xwayland_restarts: Vec::new(),
+            xwayland_reserved: None,
             x11_cursor: None,
+            x11_offered: [None, None],
             xwayland_scale: 0,
             input_capture: Default::default(),
             xwayland_shell_state: XWaylandShellState::new::<Self>(&dh),
