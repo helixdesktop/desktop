@@ -125,9 +125,6 @@ fn x11_copy_wayland_pastes(len: u32) {
 
 #[test]
 fn an_x11_image_pastes_into_a_wayland_app() {
-    if common::not_yet("#191 step 4: selections") {
-        return;
-    }
     x11_copy_wayland_pastes(10_000);
 }
 
@@ -135,9 +132,6 @@ fn an_x11_image_pastes_into_a_wayland_app() {
 /// is not data (#161).
 #[test]
 fn a_large_x11_image_pastes_whole() {
-    if common::not_yet("#191 step 4: selections") {
-        return;
-    }
     x11_copy_wayland_pastes(400_000);
 }
 
@@ -198,9 +192,6 @@ fn wayland_copy_x11_reads(session: &HeadlessSession, text: &[u8], times: usize) 
 
 #[test]
 fn an_x11_client_reads_the_clipboard_without_focus() {
-    if common::not_yet("#191 step 4: selections") {
-        return;
-    }
     let comp = std::path::PathBuf::from(env!("CARGO_BIN_EXE_helix-comp"));
     let Some(session) = HeadlessSession::start(Options { comp: &comp, shell: None, size: (800, 600), settings: "", env: Vec::new() }) else { return };
     if session.x_display.is_empty() {
@@ -214,9 +205,6 @@ fn an_x11_client_reads_the_clipboard_without_focus() {
 /// GTK 3, Qt and Java apps paste with one window over and over (#160).
 #[test]
 fn an_x11_app_pastes_more_than_once() {
-    if common::not_yet("#191 step 4: selections") {
-        return;
-    }
     let comp = std::path::PathBuf::from(env!("CARGO_BIN_EXE_helix-comp"));
     let Some(session) = HeadlessSession::start(Options { comp: &comp, shell: None, size: (800, 600), settings: "", env: Vec::new() }) else { return };
     if session.x_display.is_empty() {

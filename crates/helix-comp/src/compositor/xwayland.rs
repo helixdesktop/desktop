@@ -308,6 +308,9 @@ impl Helix {
         if let Some(token) = self.hxwm_source.take() {
             self.loop_handle.remove(token);
         }
+        for (_, token) in self.hxwm_watches.drain() {
+            self.loop_handle.remove(token);
+        }
         self.xwayland_client = None;
         self.x11ping = None;
         self.xsettings = None;
@@ -610,6 +613,89 @@ impl Helix {
         }
     }
 
+    /// An X11 app pastes the Wayland selection: write it as `mime_type`
+    /// to `fd`, from what Helix itself put there or from the Wayland app.
+    pub(super) fn x11_serve_selection(&mut self, selection: SelectionTarget, mime_type: String, fd: OwnedFd) {
+        if selection == SelectionTarget::Clipboard {
+            let current = current_data_device_selection_userdata(&self.seat).map(|r| r.clone());
+            match current.as_ref() {
+                Some(super::ServerSelection::Image(png)) => {
+                    super::capture::serve_image(png.clone(), &mime_type, fd);
+                    return;
+                }
+                Some(super::ServerSelection::Text(text)) => {
+                    super::capture::serve_text(text.clone(), &mime_type, fd);
+                    return;
+                }
+                Some(super::ServerSelection::Data { mime_type: offered, data }) => {
+                    super::capture::serve_data(data.clone(), offered, &mime_type, fd);
+                    return;
+                }
+                Some(super::ServerSelection::Remote { session }) => {
+                    let session = *session;
+                    self.start_transfer(session, mime_type, fd);
+                    return;
+                }
+                _ => {}
+            }
+        }
+        let result = match selection {
+            SelectionTarget::Clipboard => request_data_device_client_selection(&self.seat, mime_type, fd)
+                .map_err(|e| e.to_string()),
+            SelectionTarget::Primary => request_primary_client_selection(&self.seat, mime_type, fd)
+                .map_err(|e| e.to_string()),
+        };
+        if let Err(err) = result {
+            tracing::warn!(%err, ?selection, "cannot hand the Wayland selection to X11");
+        }
+    }
+
+    /// An X11 app took the selection, with these types: Wayland apps are
+    /// offered it.
+    fn x11_new_selection(&mut self, selection: SelectionTarget, mime_types: Vec<String>) {
+        tracing::info!(?selection, types = mime_types.len(), "selection set by an X11 app");
+        match selection {
+            SelectionTarget::Clipboard => {
+                set_data_device_selection(&self.display_handle, &self.seat, mime_types.clone(), super::ServerSelection::X11);
+                let source = self.x11_clipboard_source();
+                self.clipboard_changed(mime_types, source);
+            }
+            SelectionTarget::Primary => {
+                set_primary_selection(&self.display_handle, &self.seat, mime_types, super::ServerSelection::X11)
+            }
+        }
+    }
+
+    /// The Wayland selection changed (a copy, with its types, or none):
+    /// X11 apps are offered it, by whichever window manager runs.
+    pub(super) fn x11_offer_selection(&mut self, selection: SelectionTarget, types: Option<Vec<String>>) {
+        if let Some(xwm) = self.xwm.as_mut() {
+            if let Err(err) = xwm.new_selection(selection, types.clone()) {
+                tracing::warn!(?err, ?selection, "cannot offer the selection to X11");
+            }
+        }
+        if let Some(xwm) = self.hxwm.as_mut() {
+            xwm.set_selection(selection, types);
+        }
+    }
+
+    /// A Wayland app pastes the selection an X11 app owns.
+    pub(super) fn x11_paste_selection(&mut self, selection: SelectionTarget, mime_type: String, fd: OwnedFd) {
+        if let Some(xwm) = self.xwm.as_mut() {
+            if let Err(err) = xwm.send_selection(selection, mime_type, fd) {
+                tracing::warn!(?err, "cannot transfer selection from X11");
+            }
+            return;
+        }
+        if let Some(xwm) = self.hxwm.as_mut() {
+            let actions = xwm.receive_selection(selection, &mime_type, fd);
+            for action in actions {
+                self.helix_xwm_action(action);
+            }
+            self.helix_xwm_selection_timer();
+        }
+    }
+
     // ----- Helix's own window manager (HELIX_XWM=helix, #191) -------------
 
     /// Run what Helix's window manager has waiting: X events, turned into
@@ -634,6 +720,7 @@ impl Helix {
                     self.helix_xwm_action(action);
                 }
             }
+            self.helix_xwm_selection_timer();
         }
     }
 
@@ -676,7 +763,7 @@ impl Helix {
         }
     }
 
-    fn helix_xwm_action(&mut self, action: super::xwm::Action) {
+    pub(super) fn helix_xwm_action(&mut self, action: super::xwm::Action) {
         use super::xwm::Action as A;
         let x = X11Window::Helix;
         match action {
@@ -724,6 +811,60 @@ impl Helix {
             A::Close(w) => {
                 let _ = w.close();
             }
+            A::SelectionOffered(selection, types) => self.x11_new_selection(selection, types),
+            A::SelectionCleared(selection) => self.x11_selection_cleared(selection),
+            A::SelectionWanted { selection, mime, fd } => self.x11_serve_selection(selection, mime, fd),
+            A::Watch { id, fd, write } => {
+                use smithay::reexports::calloop::generic::Generic;
+                use smithay::reexports::calloop::{Interest, Mode, PostAction};
+                let interest = if write { Interest::WRITE } else { Interest::READ };
+                let inserted = self.loop_handle.insert_source(Generic::new(fd, interest, Mode::Level), move |_, _, state| {
+                    let Some(xwm) = state.hxwm.as_mut() else { return Ok(PostAction::Remove) };
+                    let (keep, actions) = xwm.selection_ready(id);
+                    if !keep {
+                        state.hxwm_watches.remove(&id);
+                    }
+                    for action in actions {
+                        state.helix_xwm_action(action);
+                    }
+                    state.helix_xwm_selection_timer();
+                    Ok(if keep { PostAction::Continue } else { PostAction::Remove })
+                });
+                match inserted {
+                    Ok(token) => {
+                        self.hxwm_watches.insert(id, token);
+                    }
+                    Err(err) => tracing::warn!(%err, "cannot watch a clipboard transfer"),
+                }
+            }
+            A::Unwatch(id) => {
+                if let Some(token) = self.hxwm_watches.remove(&id) {
+                    self.loop_handle.remove(token);
+                }
+            }
+        }
+    }
+
+    /// A clipboard transfer can stall (a hung app on either side): wake
+    /// up when the next one gives up.
+    pub fn helix_xwm_selection_timer(&mut self) {
+        use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
+        if self.hxwm_selection_timer {
+            return;
+        }
+        let Some(deadline) = self.hxwm.as_ref().and_then(|x| x.selection_deadline()) else { return };
+        self.hxwm_selection_timer = true;
+        let inserted = self.loop_handle.insert_source(Timer::from_deadline(deadline), |_, _, state| {
+            state.hxwm_selection_timer = false;
+            let actions = state.hxwm.as_mut().map(|x| x.selection_expired()).unwrap_or_default();
+            for action in actions {
+                state.helix_xwm_action(action);
+            }
+            state.helix_xwm_selection_timer();
+            TimeoutAction::Drop
+        });
+        if inserted.is_err() {
+            self.hxwm_selection_timer = false;
         }
     }
 }
@@ -884,52 +1025,11 @@ impl XwmHandler for Helix {
     }
 
     fn send_selection(&mut self, _xwm: XwmId, selection: SelectionTarget, mime_type: String, fd: OwnedFd) {
-        if selection == SelectionTarget::Clipboard {
-            let current = current_data_device_selection_userdata(&self.seat).map(|r| r.clone());
-            match current.as_ref() {
-                Some(super::ServerSelection::Image(png)) => {
-                    super::capture::serve_image(png.clone(), &mime_type, fd);
-                    return;
-                }
-                Some(super::ServerSelection::Text(text)) => {
-                    super::capture::serve_text(text.clone(), &mime_type, fd);
-                    return;
-                }
-                Some(super::ServerSelection::Data { mime_type: offered, data }) => {
-                    super::capture::serve_data(data.clone(), offered, &mime_type, fd);
-                    return;
-                }
-                Some(super::ServerSelection::Remote { session }) => {
-                    let session = *session;
-                    self.start_transfer(session, mime_type, fd);
-                    return;
-                }
-                _ => {}
-            }
-        }
-        let result = match selection {
-            SelectionTarget::Clipboard => request_data_device_client_selection(&self.seat, mime_type, fd)
-                .map_err(|e| e.to_string()),
-            SelectionTarget::Primary => request_primary_client_selection(&self.seat, mime_type, fd)
-                .map_err(|e| e.to_string()),
-        };
-        if let Err(err) = result {
-            tracing::warn!(%err, ?selection, "cannot hand the Wayland selection to X11");
-        }
+        self.x11_serve_selection(selection, mime_type, fd);
     }
 
     fn new_selection(&mut self, _xwm: XwmId, selection: SelectionTarget, mime_types: Vec<String>) {
-        tracing::info!(?selection, types = mime_types.len(), "selection set by an X11 app");
-        match selection {
-            SelectionTarget::Clipboard => {
-                set_data_device_selection(&self.display_handle, &self.seat, mime_types.clone(), super::ServerSelection::X11);
-                let source = self.x11_clipboard_source();
-                self.clipboard_changed(mime_types, source);
-            }
-            SelectionTarget::Primary => {
-                set_primary_selection(&self.display_handle, &self.seat, mime_types, super::ServerSelection::X11)
-            }
-        }
+        self.x11_new_selection(selection, mime_types);
     }
 
     fn disconnected(&mut self, _xwm: XwmId) {
