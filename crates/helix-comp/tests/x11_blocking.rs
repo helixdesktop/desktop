@@ -172,3 +172,37 @@ fn a_stuck_xwayland_does_not_stop_the_desktop() {
     app.roundtrip();
     xwm::wm_still_works(&session);
 }
+
+/// #249: Helix's other X11 connection (pings and icons, `x11ping`) must
+/// not wait for Xwayland on the compositor's thread either. With Xwayland
+/// stopped (busy or stuck), the shell activates an X11 window: Helix then
+/// checks its app answers pings, which needs to know whether the window
+/// takes pings. The activation is answered at once, not after Xwayland
+/// comes back. (A client holding the X server doesn't stop Helix's
+/// connections: Xwayland answers them during XGrabServer.)
+#[test]
+fn a_stuck_xwayland_does_not_stop_pings() {
+    let Some((session, mut shell)) = xwm::session_with_shell("x11-stuck-ping") else { return };
+    let Some(xwayland) = xwayland_pid(&session) else { panic!("no Xwayland for {}", session.x_display) };
+    let app = X::new(&session);
+    app.mapped_titled("first");
+    let first = shell.window("first");
+    app.mapped_titled("second");
+    let second = shell.window("second");
+    shell.activate(second.id);
+    shell.until("the second window never got focus", |s| s.focused == Some(second.id));
+
+    signal(xwayland, "-STOP");
+    let watchdog = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(3));
+        signal(xwayland, "-CONT");
+    });
+    let asked = Instant::now();
+    shell.activate(first.id);
+    let took = asked.elapsed();
+    signal(xwayland, "-CONT");
+    watchdog.join().unwrap();
+    assert!(took < Duration::from_millis(500), "activating an X11 window took {took:?} while Xwayland didn't answer");
+    shell.until("the first window never got focus", |s| s.focused == Some(first.id));
+    xwm::wm_still_works(&session);
+}

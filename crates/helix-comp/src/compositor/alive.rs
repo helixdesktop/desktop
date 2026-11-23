@@ -97,17 +97,38 @@ impl Helix {
         if self.alive.pings.iter().any(|p| p.target == target) {
             return;
         }
-        let mut x11_client = None;
         let sent = match &target {
             Target::Wayland(client) => client.send_ping(SERIAL_COUNTER.next_serial()).is_ok(),
-            Target::X11(id) => self.x11ping.as_ref().is_some_and(|p| {
-                let client = (*id, p.client_of(*id).1);
-                x11_client = Some(client);
-                self.alive.x11.may_ping(client) && p.ping(*id)
-            }),
+            Target::X11(id) => {
+                // Whether it takes pings needs an X reply: asked on
+                // x11ping's own thread, pinged when it answers (#249).
+                if let Some(p) = self.x11ping.as_ref() {
+                    p.ask_ping(*id);
+                }
+                false
+            }
         };
         if sent {
-            self.alive.pings.push(Ping { target, x11_client, window: window.clone(), since: Instant::now(), told: false });
+            self.alive.pings.push(Ping { target, x11_client: None, window: window.clone(), since: Instant::now(), told: false });
+        }
+    }
+
+    /// Whether an X11 window Helix wants to check takes pings, and its
+    /// app ([`super::x11ping::X11Ping::ask_ping`]): pinged now if so.
+    pub fn x11_ping_info(&mut self, id: u32, takes_pings: bool, client: (u32, u32)) {
+        let target = Target::X11(id);
+        if !takes_pings || self.alive.pings.iter().any(|p| p.target == target) {
+            return;
+        }
+        let Some(window) = self.space.elements().find(|w| w.x11_surface().is_some_and(|x| x.window_id() == id)).cloned() else { return };
+        // Keyed by the window and its app's pid: a client slot reused by
+        // another app is not taken for the old one.
+        let client = (id, client.1);
+        if !self.alive.x11.may_ping(client) {
+            return;
+        }
+        if self.x11ping.as_ref().is_some_and(|p| p.ping(id)) {
+            self.alive.pings.push(Ping { target, x11_client: Some(client), window, since: Instant::now(), told: false });
         }
     }
 

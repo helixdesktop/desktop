@@ -45,8 +45,11 @@ impl Helix {
         if let Some(x11) = window.x11_surface() {
             let id = x11.window_id();
             if !self.icons.x11.contains_key(&id) {
-                let icon = self.x11ping.as_ref().and_then(|p| p.watch_icon(id));
-                self.icons.x11.insert(id, (1, icon));
+                // Read on x11ping's own thread (#249); none until it comes.
+                if let Some(p) = self.x11ping.as_ref() {
+                    p.ask_icon(id, true);
+                }
+                self.icons.x11.insert(id, (0, None));
             }
             return match self.icons.x11.get(&id) {
                 Some((generation, Some(_))) => (String::new(), 0, *generation),
@@ -61,10 +64,17 @@ impl Helix {
 
     /// An X11 window's `_NET_WM_ICON` changed.
     pub fn x11_icon_changed(&mut self, id: u32) {
-        let icon = self.x11ping.as_ref().and_then(|p| p.icon(id));
+        if let Some(p) = self.x11ping.as_ref() {
+            p.ask_icon(id, false);
+        }
+    }
+
+    /// An X11 window's icon, read: shown from now on.
+    pub fn x11_icon_read(&mut self, id: u32, icon: Option<super::x11ping::X11Icon>) {
         let entry = self.icons.x11.entry(id).or_insert((0, None));
         entry.0 += 1;
         entry.1 = icon;
+        self.sync_window_list();
     }
 
     /// Tell `listener` window `id`'s icon.
