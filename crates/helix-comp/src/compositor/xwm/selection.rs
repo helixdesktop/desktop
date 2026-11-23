@@ -302,6 +302,11 @@ impl Selections {
         keep
     }
 
+    /// Whether an X11 app is still fetching a Wayland drag's data.
+    pub(super) fn serving_dnd(&self) -> bool {
+        self.outgoing.values().any(|t| t.request.selection == self.atoms.XdndSelection)
+    }
+
     /// When the next transfer gives up waiting.
     pub fn deadline(&self) -> Option<Instant> {
         self.incoming.values().map(|t| t.deadline).chain(self.outgoing.values().map(|t| t.deadline)).min()

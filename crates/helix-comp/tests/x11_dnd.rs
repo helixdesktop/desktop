@@ -509,6 +509,75 @@ fn a_drop_the_target_refuses_ends_the_drag_and_a_forged_finish_does_not() {
     app.until("the Wayland drag never ended after the X11 target finished without taking it", |s| s.source_ended.is_some());
 }
 
+/// #230: an X11 target dropped on that never sends XdndFinished (a hung
+/// app): the Wayland drag is cancelled after a while instead of waiting
+/// for good.
+#[test]
+fn a_drop_the_target_never_finishes_ends_after_a_while() {
+    if common::known_failure(&[common::Xwm::Smithay], "a Wayland drop on an X11 window that never finishes waits for it for good (#230)") {
+        return;
+    }
+    let Some(mut session) = session() else { return };
+    let how = Target { leave_to_test: true, ..Target::default() };
+    let (saw, _conn, _window, mut app) = wayland_drop_on_x11(&mut session, how, &[("text/plain;charset=utf-8", DATA)]);
+    served(&mut app, &saw, |s| matches!(s, TargetSaw::Drop(..)), "the X11 window never got XdndDrop");
+    let deadline = Instant::now() + Duration::from_secs(25);
+    while app.state.source_ended.is_none() {
+        assert!(Instant::now() < deadline, "a drop the X11 target never finished never ended");
+        app.roundtrip();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(app.state.source_ended, Some("cancelled"));
+}
+
+/// #230: the X11 target window goes away after the drop, before it
+/// finished: the Wayland drag is cancelled at once.
+#[test]
+fn a_drop_whose_target_goes_away_before_finishing_ends() {
+    if common::known_failure(&[common::Xwm::Smithay], "a Wayland drop on an X11 window that goes away before finishing isn't ended (#230)") {
+        return;
+    }
+    let Some(mut session) = session() else { return };
+    let how = Target { leave_to_test: true, ..Target::default() };
+    let (saw, conn, window, mut app) = wayland_drop_on_x11(&mut session, how, &[("text/plain;charset=utf-8", DATA)]);
+    served(&mut app, &saw, |s| matches!(s, TargetSaw::Drop(..)), "the X11 window never got XdndDrop");
+    conn.destroy_window(window).unwrap();
+    conn.flush().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while app.state.source_ended.is_none() {
+        assert!(Instant::now() < deadline, "the drop never ended after its X11 target went away");
+        app.roundtrip();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(app.state.source_ended, Some("cancelled"));
+}
+
+/// #230: an XDND 4 target's XdndFinished says nothing more (no "taken"
+/// flag, no action): the drop is done, not refused.
+#[test]
+fn an_xdnd4_target_finishing_takes_the_drop() {
+    let Some(mut session) = session() else { return };
+    let x = X11::new(&session, (300, 200), true);
+    x.conn.change_property32(PropMode::REPLACE, x.window, x.atoms.aware, AtomEnum::ATOM, &[4]).unwrap();
+    x.conn.flush().unwrap();
+    let x_rect = x.rect();
+    let (conn, window) = (x.conn.clone(), x.window);
+    let (mut app, surface, start) = wayland_window_by(&mut session);
+    let over_x = point_over_x(&mut session, &mut app, x_rect, &[]);
+    let saw = xdnd_target_with(x, Target { leave_to_test: true, ..Target::default() });
+    begin_wayland_drag(&mut session, &mut app, &surface, start, &[("text/plain;charset=utf-8", DATA)]);
+    glide(&mut session, start, over_x);
+    served(&mut app, &saw, |s| matches!(s, TargetSaw::Entered(..)), "the X11 window never got XdndEnter");
+    session.input(&format!("move {} {}", over_x.0 + 1, over_x.1 + 1));
+    std::thread::sleep(Duration::from_millis(200));
+    session.input(&format!("button {BTN_LEFT} 0"));
+    let TargetSaw::Drop(source, _) = served(&mut app, &saw, |s| matches!(s, TargetSaw::Drop(..)), "the X11 window never got XdndDrop") else { unreachable!() };
+    let finished = conn.intern_atom(false, b"XdndFinished").unwrap().reply().unwrap().atom;
+    message_as(&conn, source, source, finished, [window, 0, 0, 0, 0]);
+    app.until("the drop never ended after the XDND 4 target finished", |s| s.source_ended.is_some());
+    assert_eq!(app.state.source_ended, Some("dnd_finished"), "an XDND 4 target's XdndFinished was taken as a refusal");
+}
+
 /// X116 (W78): an X11 target that asks for the data a while after the
 /// drop still gets it.
 #[test]
