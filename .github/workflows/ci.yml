@@ -119,6 +119,8 @@ jobs:
       BINDGEN_EXTRA_CLANG_ARGS: -I/usr/lib/gcc/x86_64-linux-gnu/15/include
     steps:
       - name: Install system packages
+        # mutter-common: mutter's settings schemas, for the scale tests'
+        # xwayland-scaling-factor.
         run: |
           # A bare container has no X socket directory, so Xwayland can't
           # make its socket; a normal system has one (systemd's tmpfiles).
@@ -129,7 +131,8 @@ jobs:
             pkg-config libglib2.0-dev libwayland-dev libxkbcommon-dev \
             libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libegl-dev \
             libpipewire-0.3-dev libspa-0.2-dev clang \
-            dbus gsettings-desktop-schemas xwayland
+            dbus gsettings-desktop-schemas xwayland \
+            mutter-common
           Xwayland -version 2>&1 | head -n 1
 
       - uses: actions/checkout@v4
