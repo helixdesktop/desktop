@@ -425,6 +425,41 @@ pub fn expect<T: std::fmt::Debug + PartialEq>(rx: &mpsc::Receiver<T>, want: impl
     }
 }
 
+/// Move the pointer to `at` (root coordinates) and wait until `window`
+/// of `conn`'s app has it there (an EnterNotify or MotionNotify): the
+/// compositor shows the window there and Xwayland knows the pointer is
+/// in it. Until then it is moved off by one and back.
+pub fn pointer_at(session: &mut HeadlessSession, conn: &RustConnection, window: Window, at: (i32, i32), what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let here = |x: i16, y: i16| (i32::from(x), i32::from(y)) == at;
+    loop {
+        session.input(&format!("move {} {}", at.0 + 1, at.1));
+        session.input(&format!("move {} {}", at.0, at.1));
+        let until = Instant::now() + Duration::from_millis(100);
+        while Instant::now() < until {
+            match conn.poll_for_event().unwrap() {
+                Some(Event::EnterNotify(e)) if e.event == window && here(e.root_x, e.root_y) => return,
+                Some(Event::MotionNotify(e)) if e.event == window && here(e.root_x, e.root_y) => return,
+                Some(_) => {}
+                None => std::thread::sleep(Duration::from_millis(5)),
+            }
+        }
+        assert!(Instant::now() < deadline, "{what}");
+    }
+}
+
+/// Wait until the window manager carries an X11 app's drag: its drop
+/// window (XDND-aware, over the whole screen) is up at `at`. Pointer
+/// motion before then would not reach it.
+pub fn drop_window_up(session: &HeadlessSession, at: (i32, i32), what: &str) {
+    let probe = X11::unmapped(session, (1, 1), false);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while find_target(&probe, (at.0 as i16, at.1 as i16), &[], false).is_none() {
+        assert!(Instant::now() < deadline, "{what}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Move the pointer to `to` in steps (the drag follows each).
 pub fn glide(session: &mut HeadlessSession, from: (i32, i32), to: (i32, i32)) {
     for i in 1..=8 {

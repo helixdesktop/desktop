@@ -101,6 +101,9 @@ pub struct State {
     /// (`dnd_drop_performed`).
     pub source_ended: Option<&'static str>,
     pub source_dropped: bool,
+    /// The action last chosen for this client's drag (`action`): a
+    /// target took it, as this.
+    pub source_action: Option<wl_data_device_manager::DndAction>,
     /// The primary selection offered (while focused) and its types.
     pub primary: Option<(primary_offer::ZwpPrimarySelectionOfferV1, Vec<String>)>,
     primary_offers: Vec<(primary_offer::ZwpPrimarySelectionOfferV1, Vec<String>)>,
@@ -246,6 +249,7 @@ impl Dispatch<wl_data_source::WlDataSource, ()> for State {
             wl_data_source::Event::Cancelled => state.source_ended = Some("cancelled"),
             wl_data_source::Event::DndFinished => state.source_ended = Some("dnd_finished"),
             wl_data_source::Event::DndDropPerformed => state.source_dropped = true,
+            wl_data_source::Event::Action { dnd_action } => state.source_action = dnd_action.into_result().ok(),
             _ => {}
         }
     }
@@ -461,6 +465,7 @@ impl Client {
         self.state.copied_as = types.iter().map(|(m, d)| ((*m).to_owned(), d.to_vec())).collect();
         self.state.source_ended = None;
         self.state.source_dropped = false;
+        self.state.source_action = None;
         let source = self.data_manager.create_data_source(&self.qh, ());
         for (mime, _) in types {
             source.offer((*mime).to_owned());
