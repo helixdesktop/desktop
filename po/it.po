@@ -5179,3 +5179,7 @@ msgstr "Helix"
 #: session/helix.desktop
 msgid "Helix desktop session"
 msgstr "Sessione desktop Helix"
+
+#: crates/helix-shell/src/ui.rs:2685
+msgid "Checking the password is taking too long. Try again."
+msgstr "La verifica della password sta richiedendo troppo tempo. Riprova."

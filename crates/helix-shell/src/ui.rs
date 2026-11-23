@@ -803,8 +803,11 @@ struct LockScreen {
     user: String,
     /// What the lock screen calls the user, and their picture.
     identity: crate::user_identity::Identity,
-    /// Results of password checks, from the worker thread.
-    results: channel::Sender<Result<(), AuthError>>,
+    /// Results of password checks, from the worker thread, with their
+    /// check's serial.
+    results: channel::Sender<(u64, Result<(), AuthError>)>,
+    /// Which check runs, and what to make of late results (#244).
+    checks: crate::password_check::Checks,
     /// Restart or Power Off asked on the lock screen, to be confirmed.
     confirming: Option<PowerAction>,
     /// Apps holding up logout while confirming.
@@ -2668,11 +2671,27 @@ impl Ui {
         let auth = self.lock.auth.clone();
         let user = self.lock.user.clone();
         let results = self.lock.results.clone();
+        let serial = self.lock.checks.start();
         std::thread::spawn(move || {
             let result = auth.authenticate(&user, &secret);
             drop(secret);
-            let _ = results.send(result);
+            let _ = results.send((serial, result));
         });
+        // PAM can't be stopped: a check that hangs (sssd, LDAP, a
+        // fingerprint reader) gives the keyboard back after a while.
+        if let Some(handle) = self.loop_handle.as_ref() {
+            let _ = handle.insert_source(Timer::from_duration(crate::password_check::TIMEOUT), move |_, _, ui: &mut Ui| {
+                if ui.lock.checks.timed_out(serial) {
+                    tracing::warn!(serial, "the password check is taking too long; taking input again");
+                    ui.lock.checking = false;
+                    ui.lock.checked_len = 0;
+                    ui.lock.message = Some(tr("Checking the password is taking too long. Try again.").into());
+                    ui.lock.failed = true;
+                    ui.draw_lock();
+                }
+                TimeoutAction::Drop
+            });
+        }
     }
 
     fn password_checked(&mut self, result: Result<(), AuthError>) {
@@ -4358,6 +4377,7 @@ pub fn run(
             user: crate::auth::current_user(),
             identity: Default::default(),
             results: auth_tx,
+            checks: Default::default(),
             confirming: None,
             blockers: Vec::new(),
             hover: None,
@@ -4414,9 +4434,13 @@ pub fn run(
         .map_err(|e| format!("cannot watch background work: {e}"))?;
     handle
         .insert_source(auth_rx, |event, _, ui| {
-            if let channel::Event::Msg(result) = event {
+            if let channel::Event::Msg((serial, result)) = event {
                 let _busy = crate::watchdog::scope("password checked");
-                ui.password_checked(result);
+                if ui.lock.checks.result(serial, result.is_ok()) == crate::password_check::Outcome::Apply {
+                    ui.password_checked(result);
+                } else {
+                    tracing::info!(serial, "a password check's late result was dropped");
+                }
             }
         })
         .map_err(|e| format!("cannot watch password checks: {e}"))?;

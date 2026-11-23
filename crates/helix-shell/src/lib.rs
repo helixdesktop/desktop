@@ -70,6 +70,7 @@ pub mod polkit;
 pub mod portal_dialog;
 pub mod power;
 pub mod privacy;
+pub mod password_check;
 pub mod prompt;
 pub mod notify_store;
 pub mod recording;
