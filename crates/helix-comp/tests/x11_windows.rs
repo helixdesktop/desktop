@@ -48,8 +48,7 @@ use x11rb::wrapper::ConnectionExt as _;
 fn session() -> Option<HeadlessSession> {
     let comp = std::path::PathBuf::from(env!("CARGO_BIN_EXE_helix-comp"));
     let session = HeadlessSession::start(Options { comp: &comp, shell: None, size: (800, 600), settings: "", env: Vec::new() })?;
-    if session.x_display.is_empty() {
-        eprintln!("no Xwayland; skipped");
+    if common::no_xwayland(&session) {
         return None;
     }
     Some(session)
@@ -611,8 +610,7 @@ fn helper_windows_stay_out_of_the_window_list() {
     std::fs::create_dir_all(&dir).unwrap();
     let (program, listener) = shell::program(&dir);
     let Some(session) = HeadlessSession::start(Options { comp: &comp, shell: Some(&program), size: (800, 600), settings: "", env: Vec::new() }) else { return };
-    if session.x_display.is_empty() {
-        eprintln!("no Xwayland; skipped");
+    if common::no_xwayland(&session) {
         return;
     }
     let (mut queue, mut listed, _list) = shell::window_list(shell::socket(&listener));
@@ -640,8 +638,7 @@ fn the_window_list_drops_x11_windows_when_xwayland_goes() {
     std::fs::create_dir_all(&dir).unwrap();
     let (program, listener) = shell::program(&dir);
     let Some(session) = HeadlessSession::start(Options { comp: &comp, shell: Some(&program), size: (800, 600), settings: "", env: Vec::new() }) else { return };
-    if session.x_display.is_empty() {
-        eprintln!("no Xwayland; skipped");
+    if common::no_xwayland(&session) {
         return;
     }
     let (mut queue, mut listed, _list) = shell::window_list(shell::socket(&listener));

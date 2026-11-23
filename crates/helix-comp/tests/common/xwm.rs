@@ -38,8 +38,7 @@ pub fn session() -> Option<HeadlessSession> {
 pub fn session_env(env: Vec<(String, String)>) -> Option<HeadlessSession> {
     let comp = PathBuf::from(env!("CARGO_BIN_EXE_helix-comp"));
     let session = HeadlessSession::start(Options { comp: &comp, shell: None, size: (u32::from(SCREEN.0), u32::from(SCREEN.1)), settings: "", env })?;
-    if session.x_display.is_empty() {
-        eprintln!("no Xwayland; skipped");
+    if super::no_xwayland(&session) {
         return None;
     }
     Some(session)
@@ -60,8 +59,7 @@ pub fn session_with_shell_env(name: &str, env: Vec<(String, String)>) -> Option<
     std::fs::create_dir_all(&dir).unwrap();
     let (program, listener) = stand_in_shell(&dir);
     let session = HeadlessSession::start(Options { comp: &comp, shell: Some(&program), size: (u32::from(SCREEN.0), u32::from(SCREEN.1)), settings: "", env })?;
-    if session.x_display.is_empty() {
-        eprintln!("no Xwayland; skipped");
+    if super::no_xwayland(&session) {
         return None;
     }
     let shell = Shell::new(shell_socket(&listener), dir);
@@ -263,6 +261,32 @@ impl X {
     }
 
     /// Activate `window` as a pager does, and wait until it is active.
+    /// Waits until the window manager has handled every X event this
+    /// client's requests so far caused, and acted on them (#235): it
+    /// handles events in order, and answers `_NET_REQUEST_FRAME_EXTENTS`
+    /// (for a window it hasn't shown) only once it got there. Not for
+    /// what comes through the compositor (pointer input): those events
+    /// aren't ordered with this client's. Smithay's window manager doesn't
+    /// answer the request: a fixed wait there.
+    pub fn sync(&self) {
+        if super::xwm_running() != super::Xwm::Helix {
+            std::thread::sleep(Duration::from_millis(300));
+            return;
+        }
+        let probe = self.conn.generate_id().unwrap();
+        self.conn.create_window(x11rb::COPY_DEPTH_FROM_PARENT, probe, self.root, -10, -10, 1, 1, 0, WindowClass::INPUT_OUTPUT, 0, &CreateWindowAux::new()).unwrap();
+        let request = self.atom("_NET_REQUEST_FRAME_EXTENTS");
+        let message = ClientMessageEvent::new(32, probe, request, [0, 0, 0, 0, 0]);
+        self.conn.send_event(false, self.root, EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY, message).unwrap();
+        self.flush();
+        let extents = self.atom("_NET_FRAME_EXTENTS");
+        until("the window manager never got to a frame-extents request (sync)", || {
+            self.conn.get_property(false, probe, extents, AtomEnum::CARDINAL, 0, 4).unwrap().reply().is_ok_and(|r| r.value_len == 4)
+        });
+        self.conn.destroy_window(probe).unwrap();
+        self.flush();
+    }
+
     pub fn focus(&self, window: Window) {
         self.activate(window, 2, x11rb::NONE);
         until("the window never became active", || self.active() == Some(window));

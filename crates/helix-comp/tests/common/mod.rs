@@ -20,6 +20,18 @@ pub fn xwm_running() -> Xwm {
     if std::env::var("HELIX_XWM").is_ok_and(|v| v == "helix") { Xwm::Helix } else { Xwm::Smithay }
 }
 
+/// Whether `session` has no Xwayland, so an X11 test is skipped; with
+/// `HELIX_REQUIRE_X11=1` (the CI X11 job) that's a failure instead, so the
+/// job can't pass with nothing tested (#235).
+pub fn no_xwayland(session: &helix_test_support::headless::HeadlessSession) -> bool {
+    if !session.x_display.is_empty() {
+        return false;
+    }
+    assert!(std::env::var("HELIX_REQUIRE_X11").map_or(true, |v| v != "1"), "no Xwayland, and HELIX_REQUIRE_X11=1");
+    eprintln!("no Xwayland; skipped");
+    true
+}
+
 /// Whether to skip a test that fails, for `why`, on the window managers
 /// in `on` (it passes as skipped there). `HELIX_RUN_KNOWN_FAILURES=1`
 /// runs it anyway.

@@ -21,8 +21,7 @@ pub fn session() -> Option<HeadlessSession> {
     let comp = std::path::PathBuf::from(env!("CARGO_BIN_EXE_helix-comp"));
     let options = helix_test_support::headless::Options { comp: &comp, shell: None, size: (800, 600), settings: "", env: Vec::new() };
     let session = HeadlessSession::start(options)?;
-    if session.x_display.is_empty() {
-        eprintln!("no Xwayland; skipped");
+    if super::no_xwayland(&session) {
         return None;
     }
     Some(session)

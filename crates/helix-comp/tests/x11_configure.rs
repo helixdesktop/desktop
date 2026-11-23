@@ -67,12 +67,19 @@ fn a_refused_move_is_answered() {
     let Some(session) = xwm::session() else { return };
     let x = X::new(&session);
     let window = x.mapped();
-    std::thread::sleep(Duration::from_millis(300));
+    x.sync();
     x.drain();
     let (px, py) = x.position(window);
-    x.conn.configure_window(window, &ConfigureWindowAux::new().x(i32::from(px) + 37).y(i32::from(py) + 23)).unwrap();
+    let asked = x.conn.configure_window(window, &ConfigureWindowAux::new().x(i32::from(px) + 37).y(i32::from(py) + 23)).unwrap().sequence_number() as u16;
     x.flush();
-    let answer = next_configure(&x, window, "the move request got no ConfigureNotify");
+    // The answer to this request, not a ConfigureNotify from before it
+    // (#235). ICCCM 4.1.5 has a synthetic one when the window doesn't
+    // move; a real one (the window manager configuring it where it is)
+    // tells the same without reparenting, in root coordinates.
+    let answer = x.wait_event("the move request got no ConfigureNotify", |e| match e {
+        Event::ConfigureNotify(c) if c.window == window && (c.sequence.wrapping_sub(asked) as i16) >= 0 => Some(*c),
+        _ => None,
+    });
     let (nx, ny) = x.position(window);
     assert_eq!((answer.x, answer.y), (nx, ny), "the answer is not where the window is");
 }
@@ -143,8 +150,9 @@ fn a_size_asked_for_before_mapping_is_kept() {
     let window = x.window();
     x.conn.configure_window(window, &ConfigureWindowAux::new().width(333).height(222)).unwrap();
     x.map_managed(window);
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(x.size(window), (333, 222));
+    until("the size asked for before mapping was not kept", || x.size(window) == (333, 222));
+    x.sync();
+    assert_eq!(x.size(window), (333, 222), "the size changed after mapping");
 }
 
 /// X40: maximized before it is shown: the app is told its final size
@@ -180,11 +188,14 @@ fn the_base_size_stands_in_for_a_minimum() {
     hints.base_size = Some((200, 100));
     hints.set_normal_hints(&x.conn, window).unwrap();
     x.map_managed(window);
+    // A resize above it is honoured (else refusing every resize passed).
+    x.conn.configure_window(window, &ConfigureWindowAux::new().width(310).height(170)).unwrap();
+    x.flush();
+    until("a resize above the base size was not honoured", || x.size(window) == (310, 170));
     x.conn.configure_window(window, &ConfigureWindowAux::new().width(50).height(40)).unwrap();
     x.flush();
-    std::thread::sleep(Duration::from_millis(500));
-    let (w, h) = x.size(window);
-    assert!(w >= 200 && h >= 100, "{w}×{h}, below the base size");
+    x.sync();
+    until("a resize below the base size was not clamped to it", || x.size(window) == (200, 100));
 }
 
 /// X41: a minimum size is kept (Helix clamps requests to the hints).
@@ -197,11 +208,14 @@ fn the_minimum_size_is_kept() {
     hints.min_size = Some((220, 120));
     hints.set_normal_hints(&x.conn, window).unwrap();
     x.map_managed(window);
+    // A resize above it is honoured (else refusing every resize passed).
+    x.conn.configure_window(window, &ConfigureWindowAux::new().width(330).height(180)).unwrap();
+    x.flush();
+    until("a resize above the minimum size was not honoured", || x.size(window) == (330, 180));
     x.conn.configure_window(window, &ConfigureWindowAux::new().width(50).height(40)).unwrap();
     x.flush();
-    std::thread::sleep(Duration::from_millis(500));
-    let (w, h) = x.size(window);
-    assert!(w >= 220 && h >= 120, "{w}×{h}, below the minimum size");
+    x.sync();
+    until("a resize below the minimum size was not clamped to it", || x.size(window) == (220, 120));
 }
 
 /// X42: a GTK window drawing its own shadow (`_GTK_FRAME_EXTENTS`)
@@ -314,7 +328,7 @@ fn coordinates_at_an_xwayland_scale_of_two() {
     let settings = "[org/gnome/mutter/wayland]\nxwayland-scaling-factor=2.0\n";
     let options = helix_test_support::headless::Options { comp: &comp, shell: None, size: (u32::from(xwm::SCREEN.0), u32::from(xwm::SCREEN.1)), settings, env: Vec::new() };
     let Some(mut session) = helix_test_support::headless::HeadlessSession::start(options) else { return };
-    if session.x_display.is_empty() {
+    if common::no_xwayland(&session) {
         return;
     }
     let x = X::new(&session);
@@ -370,7 +384,7 @@ fn odd_sizes_survive_an_xwayland_scale_of_two() {
     let settings = "[org/gnome/mutter/wayland]\nxwayland-scaling-factor=2.0\n";
     let options = helix_test_support::headless::Options { comp: &comp, shell: None, size: (u32::from(xwm::SCREEN.0), u32::from(xwm::SCREEN.1)), settings, env: Vec::new() };
     let Some(session) = helix_test_support::headless::HeadlessSession::start(options) else { return };
-    if session.x_display.is_empty() {
+    if common::no_xwayland(&session) {
         return;
     }
     let x = X::new(&session);

@@ -95,6 +95,9 @@ jobs:
         working-directory: helix-desktop
         env:
           HELIX_XWM: ${{ matrix.xwm }}
+          # A session without Xwayland fails instead of skipping: the job
+          # can't pass with nothing tested (#235).
+          HELIX_REQUIRE_X11: "1"
         run: >
           cargo test -p helix-comp --locked --no-fail-fast
           --test move_unmaximize --test x11_alpha --test x11_blocking --test x11_clipboard

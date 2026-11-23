@@ -101,8 +101,7 @@ fn x11_owner(session: &HeadlessSession, image: Vec<u8>) {
 fn x11_copy_wayland_pastes(len: u32) {
     let comp = std::path::PathBuf::from(env!("CARGO_BIN_EXE_helix-comp"));
     let Some(session) = HeadlessSession::start(Options { comp: &comp, shell: None, size: (800, 600), settings: "", env: Vec::new() }) else { return };
-    if session.x_display.is_empty() {
-        eprintln!("no Xwayland; skipped");
+    if common::no_xwayland(&session) {
         return;
     }
     x11_owner(&session, picture(len));
@@ -194,8 +193,7 @@ fn wayland_copy_x11_reads(session: &HeadlessSession, text: &[u8], times: usize) 
 fn an_x11_client_reads_the_clipboard_without_focus() {
     let comp = std::path::PathBuf::from(env!("CARGO_BIN_EXE_helix-comp"));
     let Some(session) = HeadlessSession::start(Options { comp: &comp, shell: None, size: (800, 600), settings: "", env: Vec::new() }) else { return };
-    if session.x_display.is_empty() {
-        eprintln!("no Xwayland; skipped");
+    if common::no_xwayland(&session) {
         return;
     }
     // No X11 window exists, let alone has focus.
@@ -207,8 +205,7 @@ fn an_x11_client_reads_the_clipboard_without_focus() {
 fn an_x11_app_pastes_more_than_once() {
     let comp = std::path::PathBuf::from(env!("CARGO_BIN_EXE_helix-comp"));
     let Some(session) = HeadlessSession::start(Options { comp: &comp, shell: None, size: (800, 600), settings: "", env: Vec::new() }) else { return };
-    if session.x_display.is_empty() {
-        eprintln!("no Xwayland; skipped");
+    if common::no_xwayland(&session) {
         return;
     }
     let text = b"again".to_vec();
