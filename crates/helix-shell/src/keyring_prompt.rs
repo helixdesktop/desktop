@@ -94,7 +94,10 @@ struct Active {
     generation: u64,
     exchange: Exchange,
     props: Props,
-    _turn: tokio::sync::OwnedMutexGuard<()>,
+    /// Counts the client's calls; a wait for the client is over when it
+    /// changes (see [`await_client`]).
+    calls: u64,
+    _turn: prompt::Turn,
 }
 
 #[derive(Default)]
@@ -107,12 +110,60 @@ struct State {
 
 type Shared = Arc<Mutex<State>>;
 
+/// How long a client may take to answer a PromptReady (with another
+/// PerformPrompt, or StopPrompting) before its prompting is ended: while it
+/// is active it holds the prompt turn, and nothing else may prompt
+/// (helixdesktop/desktop#242). gcr clients answer at once.
+fn client_timeout() -> std::time::Duration {
+    std::env::var("HELIX_KEYRING_CLIENT_TIMEOUT_MS").ok().and_then(|v| v.parse().ok()).map_or(std::time::Duration::from_secs(30), std::time::Duration::from_millis)
+}
+
 fn lock(state: &Shared) -> std::sync::MutexGuard<'_, State> {
     state.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 async fn call_ready(conn: &Connection, client: &Client, reply: &str, properties: HashMap<&str, Value<'_>>, exchange: &str) -> zbus::Result<()> {
-    conn.call_method(Some(client.0.as_str()), client.1.as_str(), Some(CALLBACK), "PromptReady", &(reply, properties, exchange)).await.map(drop)
+    let body = (reply, properties, exchange);
+    let call = conn.call_method(Some(client.0.as_str()), client.1.as_str(), Some(CALLBACK), "PromptReady", &body);
+    match tokio::time::timeout(client_timeout(), call).await {
+        Ok(reply) => reply.map(drop),
+        Err(_) => Err(zbus::Error::Failure("the client did not take PromptReady".into())),
+    }
+}
+
+/// End `generation`'s prompting if it is still the active one: the dialog
+/// closes, the client is told, and the next client gets its turn.
+fn end_active(state: &Shared, ui: &mpsc::UnboundedSender<UiEvent>, conn: &Connection, generation: u64) {
+    let client = {
+        let mut s = lock(state);
+        if s.active.as_ref().is_none_or(|a| a.generation != generation) {
+            return;
+        }
+        s.active.take().map(|a| a.client)
+    };
+    prompt::done(ui);
+    if let Some(client) = client {
+        let conn2 = conn.clone();
+        tokio::spawn(async move {
+            let _ = tokio::time::timeout(client_timeout(), call_done(&conn2, &client)).await;
+        });
+    }
+    advance(state.clone(), conn.clone(), ui.clone());
+}
+
+/// After a PromptReady: unless the client calls again within the timeout,
+/// its prompting ends.
+fn await_client(state: &Shared, ui: &mpsc::UnboundedSender<UiEvent>, conn: &Connection, generation: u64) {
+    let Some(calls) = lock(state).active.as_ref().filter(|a| a.generation == generation).map(|a| a.calls) else { return };
+    let (state, ui, conn) = (state.clone(), ui.clone(), conn.clone());
+    tokio::spawn(async move {
+        tokio::time::sleep(client_timeout()).await;
+        let idle = lock(&state).active.as_ref().is_some_and(|a| a.generation == generation && a.calls == calls);
+        if idle {
+            tracing::warn!("keyring prompt client stopped answering; ending its prompting");
+            end_active(&state, &ui, &conn, generation);
+        }
+    });
 }
 
 async fn call_done(conn: &Connection, client: &Client) {
@@ -120,7 +171,7 @@ async fn call_done(conn: &Connection, client: &Client) {
 }
 
 /// Start the next waiting client, if none is active.
-fn advance(state: Shared, conn: Connection) {
+fn advance(state: Shared, conn: Connection, ui: mpsc::UnboundedSender<UiEvent>) {
     {
         let mut s = lock(&state);
         if s.active.is_some() || s.starting || s.waiting.is_empty() {
@@ -130,7 +181,7 @@ fn advance(state: Shared, conn: Connection) {
     }
     tokio::spawn(async move {
         let turn = prompt::turn().await;
-        let (client, begin) = {
+        let (client, begin, generation) = {
             let mut s = lock(&state);
             s.starting = false;
             let Some(client) = s.waiting.pop_front() else { return };
@@ -138,13 +189,15 @@ fn advance(state: Shared, conn: Connection) {
             let begin = exchange.begin();
             s.generation += 1;
             let generation = s.generation;
-            s.active = Some(Active { client: client.clone(), generation, exchange, props: Props::default(), _turn: turn });
-            (client, begin)
+            s.active = Some(Active { client: client.clone(), generation, exchange, props: Props::default(), calls: 0, _turn: turn });
+            (client, begin, generation)
         };
-        if let Err(err) = call_ready(&conn, &client, "", HashMap::new(), &begin).await {
-            tracing::info!(%err, client = client.0, "keyring prompt client is gone");
-            lock(&state).active = None;
-            advance(state, conn);
+        match call_ready(&conn, &client, "", HashMap::new(), &begin).await {
+            Ok(()) => await_client(&state, &ui, &conn, generation),
+            Err(err) => {
+                tracing::info!(%err, client = client.0, "keyring prompt client is gone");
+                end_active(&state, &ui, &conn, generation);
+            }
         }
     });
 }
@@ -195,7 +248,7 @@ impl Prompter {
                     tracing::info!(client = client.0, "keyring prompt client left");
                     finish(&state, &ui, &client);
                 }
-                advance(state.clone(), conn.clone());
+                advance(state.clone(), conn.clone(), ui.clone());
             }
         });
     }
@@ -211,7 +264,7 @@ impl Prompter {
         let client = client_of(&header, callback);
         tracing::debug!(client = client.0, "keyring prompt requested");
         lock(&self.state).waiting.push_back(client);
-        advance(self.state.clone(), conn.clone());
+        advance(self.state.clone(), conn.clone(), self.ui.clone());
     }
 
     async fn perform_prompt(
@@ -232,6 +285,7 @@ impl Prompter {
         let (props, generation) = {
             let mut s = lock(&self.state);
             let active = s.active.as_mut().filter(|a| a.client == client).ok_or_else(|| PrompterError::InProgress("not this client's turn".into()))?;
+            active.calls += 1;
             active.props.update(&properties);
             active.exchange.receive(exchange).map_err(PrompterError::Failed)?;
             (active.props.clone(), active.generation)
@@ -268,8 +322,14 @@ impl Prompter {
                 let strength = i32::from(secret.as_ref().is_some_and(|s| !s.bytes().is_empty()));
                 changed.insert("password-strength", boxed(Value::from(strength)));
             }
-            if let Err(err) = call_ready(&conn, &client, reply, changed, &sent).await {
-                tracing::info!(%err, "keyring prompt client did not take the answer");
+            match call_ready(&conn, &client, reply, changed, &sent).await {
+                Ok(()) => await_client(&state, &ui, &conn, generation),
+                // Gone or stuck: its prompting ends, and the turn with it
+                // (it held every other prompt back: #242).
+                Err(err) => {
+                    tracing::info!(%err, "keyring prompt client did not take the answer");
+                    end_active(&state, &ui, &conn, generation);
+                }
             }
         });
         Ok(())
@@ -277,10 +337,13 @@ impl Prompter {
 
     async fn stop_prompting(&self, callback: OwnedObjectPath, #[zbus(header)] header: Header<'_>, #[zbus(connection)] conn: &Connection) {
         let client = client_of(&header, callback);
-        if finish(&self.state, &self.ui, &client) {
-            call_done(conn, &client).await;
+        if let Some(active) = lock(&self.state).active.as_mut().filter(|a| a.client == client) {
+            active.calls += 1;
         }
-        advance(self.state.clone(), conn.clone());
+        if finish(&self.state, &self.ui, &client) {
+            let _ = tokio::time::timeout(client_timeout(), call_done(conn, &client)).await;
+        }
+        advance(self.state.clone(), conn.clone(), self.ui.clone());
     }
 }
 

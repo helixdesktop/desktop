@@ -109,11 +109,63 @@ pub async fn ask(ui: &mpsc::UnboundedSender<UiEvent>, prompt: Prompt) -> Answer 
     answer.await.unwrap_or(Answer::Cancel)
 }
 
+/// Who holds the turn: where it was taken, since when, and which hold.
+type Holder = (&'static std::panic::Location<'static>, std::time::Instant, u64);
+
+static HOLDER: Mutex<Option<Holder>> = Mutex::new(None);
+
+/// How long a flow may wait for the turn before the holder is named in
+/// the log (a holder that never gives it back blocks every prompt and file
+/// chooser after it: helixdesktop/desktop#221, #242).
+const WAIT_WARNING: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The turn, while held (see [`turn`]); dropping it gives it back.
+pub struct Turn {
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+    id: u64,
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        let mut holder = HOLDER.lock().unwrap_or_else(|e| e.into_inner());
+        if holder.is_some_and(|h| h.2 == self.id) {
+            *holder = None;
+        }
+    }
+}
+
 /// Whole prompt flows (a polkit authentication, a keyring client's
-/// prompts) take turns: hold this while one runs.
-pub async fn turn() -> tokio::sync::OwnedMutexGuard<()> {
+/// prompts) take turns: hold this while one runs. A flow kept waiting
+/// long logs who holds the turn, and for how long.
+#[track_caller]
+pub fn turn() -> impl std::future::Future<Output = Turn> {
     static FLOW: std::sync::LazyLock<Arc<tokio::sync::Mutex<()>>> = std::sync::LazyLock::new(Default::default);
-    FLOW.clone().lock_owned().await
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let here = std::panic::Location::caller();
+    async move {
+        let lock = FLOW.clone().lock_owned();
+        tokio::pin!(lock);
+        let waited = std::time::Instant::now();
+        let guard = loop {
+            tokio::select! {
+                guard = &mut lock => break guard,
+                _ = tokio::time::sleep(WAIT_WARNING) => {
+                    let holder = *HOLDER.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some((at, since, _)) = holder {
+                        tracing::warn!(waiting = %here, waited_s = waited.elapsed().as_secs(), held_by = %at, held_s = since.elapsed().as_secs(), "a prompt is waiting for the turn");
+                    }
+                }
+            }
+        };
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        *HOLDER.lock().unwrap_or_else(|e| e.into_inner()) = Some((here, std::time::Instant::now(), id));
+        Turn { _guard: guard, id }
+    }
+}
+
+/// Who holds the turn now (where it was taken), if anyone.
+pub fn turn_holder() -> Option<String> {
+    HOLDER.lock().unwrap_or_else(|e| e.into_inner()).map(|h| h.0.to_string())
 }
 
 /// Close the prompt dialog.
