@@ -41,6 +41,10 @@ const CHUNK: usize = 64 * 1024;
 /// How long a transfer may go without progress.
 const STALL: Duration = Duration::from_secs(5);
 
+/// How much of a transfer is held at most before the side that gives it
+/// is made to wait for the side that takes it (#228).
+const BUFFERED: usize = 4 * 1024 * 1024;
+
 /// The text types a Wayland copy may have, best first.
 const TEXT_MIMES: [&str; 5] = ["text/plain;charset=utf-8", "text/plain;charset=UTF-8", "UTF8_STRING", "text/plain", "STRING"];
 
@@ -79,6 +83,12 @@ struct Incoming {
     /// The X11 owner sent all of it.
     done: bool,
     watching: bool,
+    /// An incremental chunk is waiting in the property, not read yet:
+    /// reading it asks for the next, so it waits until the Wayland app has
+    /// taken most of what's buffered.
+    chunk_waiting: bool,
+    /// Progress on either side (the X11 owner sending, the Wayland app
+    /// reading) moves it on.
     deadline: Instant,
 }
 
@@ -98,6 +108,8 @@ struct Outgoing {
     incr: bool,
     /// A chunk is in the requestor's property, not yet deleted.
     waiting: bool,
+    /// Reading the Wayland source paused: enough is buffered for now.
+    paused: bool,
     deadline: Instant,
 }
 
@@ -261,7 +273,7 @@ impl Selections {
         conn.flush()?;
         let id = self.id();
         tracing::debug!(id, mime, "X11 selection asked for");
-        self.incoming.insert(id, Incoming { selection: target, window, fd: Some(std::fs::File::from(fd)), buf: Vec::new(), incr: false, done: false, watching: false, deadline: Instant::now() + STALL });
+        self.incoming.insert(id, Incoming { selection: target, window, fd: Some(std::fs::File::from(fd)), buf: Vec::new(), incr: false, done: false, watching: false, chunk_waiting: false, deadline: Instant::now() + STALL });
         Ok(())
     }
 
@@ -277,7 +289,7 @@ impl Selections {
                 tracing::debug!(%err, "a selection transfer to X11 failed");
                 self.drop_outgoing(id, actions);
             }
-            self.outgoing.get(&id).is_some_and(|t| !t.eof)
+            self.outgoing.get(&id).is_some_and(|t| !t.eof && !t.paused)
         } else {
             false
         };
@@ -340,9 +352,16 @@ impl Selections {
             Event::PropertyNotify(e) => {
                 if e.state == Property::NEW_VALUE && e.atom == self.atoms._HELIX_SELECTION {
                     if let Some(id) = self.incoming_of(e.window) {
-                        if self.incoming[&id].incr {
-                            self.chunk(id, actions)?;
-                            self.conn.flush()?;
+                        let t = self.incoming.get_mut(&id).unwrap();
+                        if t.incr {
+                            if t.buf.len() >= BUFFERED {
+                                // The Wayland app is behind: read it (and
+                                // so ask for the next) once it caught up.
+                                t.chunk_waiting = true;
+                            } else {
+                                self.chunk(id, actions)?;
+                                self.conn.flush()?;
+                            }
                         }
                         return Ok(true);
                     }
@@ -560,6 +579,9 @@ impl Selections {
                     Ok(0) => break,
                     Ok(n) => {
                         t.buf.drain(..n);
+                        // The Wayland app reading is progress too: a slow
+                        // reader isn't cut off once the owner is done.
+                        t.deadline = Instant::now() + STALL;
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
                     Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
@@ -574,6 +596,16 @@ impl Selections {
         } else {
             t.buf.clear();
         }
+        if t.chunk_waiting && t.buf.len() < BUFFERED / 2 {
+            t.chunk_waiting = false;
+            let ok = self.chunk(id, actions).and_then(|()| self.conn.flush().map_err(Into::into));
+            if let Err(err) = ok {
+                tracing::debug!(%err, id, "cannot ask the X11 selection owner for more");
+                self.finish_incoming(id, actions);
+                return;
+            }
+        }
+        let Some(t) = self.incoming.get_mut(&id) else { return };
         if t.buf.is_empty() {
             if t.done {
                 self.finish_incoming(id, actions);
@@ -681,7 +713,7 @@ impl Selections {
         let id = self.id();
         let watch = read.try_clone().map_err(|e| ReplyOrIdError::ConnectionError(e.into()))?;
         tracing::debug!(id, mime, "the Wayland selection asked for by an X11 app");
-        self.outgoing.insert(id, Outgoing { requestor: e.requestor, property, kind, request: e, fd: std::fs::File::from(read), buf: Vec::new(), eof: false, answered: false, incr: false, waiting: false, deadline: Instant::now() + STALL });
+        self.outgoing.insert(id, Outgoing { requestor: e.requestor, property, kind, request: e, fd: std::fs::File::from(read), buf: Vec::new(), eof: false, answered: false, incr: false, waiting: false, paused: false, deadline: Instant::now() + STALL });
         match (dnd, i) {
             // The drag's source writes it.
             (Some((_, source)), _) => source.send(&mime, write),
@@ -730,6 +762,12 @@ impl Selections {
                     Ok(n) => {
                         t.buf.extend_from_slice(&chunk[..n]);
                         t.deadline = Instant::now() + STALL;
+                        if t.buf.len() >= BUFFERED {
+                            // The X11 app is behind: read on once it took
+                            // most of it (send_next).
+                            t.paused = true;
+                            break;
+                        }
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
                     Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
@@ -786,6 +824,16 @@ impl Selections {
             self.conn.change_property8(PropMode::REPLACE, t.requestor, t.property, t.kind, &t.buf[..n])?;
             t.buf.drain(..n);
             t.waiting = true;
+            if t.paused && t.buf.len() < BUFFERED / 2 {
+                // Caught up: read the Wayland source again (from its own
+                // readiness, it just keeps being watched).
+                t.paused = false;
+                if self.in_ready != Some(id) {
+                    if let Ok(fd) = t.fd.try_clone() {
+                        actions.push(Action::Watch { id, fd: fd.into(), write: false });
+                    }
+                }
+            }
         } else if t.eof {
             self.conn.change_property8(PropMode::REPLACE, t.requestor, t.property, t.kind, &[])?;
             tracing::debug!(id, "selection transfer to X11 ended");
