@@ -126,8 +126,12 @@ impl Helix {
             .filter(|(w, _)| ws.assigned.iter().any(|(a, n)| a == w && *n == active))
             .map(|(w, _)| w.clone())
             .collect();
+        let came_back = !back.is_empty();
         for window in back {
             self.unpark(&window);
+        }
+        if came_back {
+            self.sync_x11_stack();
         }
         self.publish_x11_desktop();
     }
@@ -180,6 +184,7 @@ impl Helix {
         for window in arriving {
             self.unpark(&window);
         }
+        self.sync_x11_stack();
         self.tidy_workspaces();
         let target = self.workspaces.layout.active;
         let next = self
@@ -209,6 +214,7 @@ impl Helix {
         let visible = self.space.elements().any(|w| w == window);
         if target != self.workspaces.layout.active && visible && !self.on_all_workspaces(window) {
             self.park(window);
+            self.sync_x11_stack();
             match self.top_window() {
                 Some(top) => self.focus_window(&top),
                 None => self.unfocus_all(),

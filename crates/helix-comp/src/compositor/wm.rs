@@ -10,6 +10,7 @@ use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER};
 use smithay::wayland::seat::WaylandFocus;
 
 use super::Helix;
+use smithay::xwayland::X11Surface;
 
 /// Configuring a toplevel only once it has made its initial commit.
 ///
@@ -291,6 +292,7 @@ impl Helix {
             }
             self.animations.window_opened(self.wm_settings.motion, &window);
             self.space.map_element(window, location, false);
+            self.sync_x11_stack();
         }
     }
 
@@ -627,6 +629,30 @@ impl Helix {
         }
     }
 
+    /// Stack X11 windows on the X server as Helix shows them, hidden ones
+    /// (minimized, on another workspace) at the bottom (#232). X routes
+    /// drags between two X11 apps, and answers XQueryPointer, by its own
+    /// stack: a hidden window left above a shown one would get them.
+    pub fn sync_x11_stack(&mut self) {
+        let order: Vec<Window> = self
+            .space
+            .elements()
+            .rev()
+            .chain(self.minimized_windows())
+            .chain(self.workspaces.parked())
+            .filter(|w| !is_override_redirect(w) && w.x11_surface().is_some())
+            .cloned()
+            .collect();
+        let smithay: Vec<X11Surface> = order.iter().filter_map(|w| w.x11_surface()?.smithay().cloned()).collect();
+        if let (Some(xwm), false) = (self.xwm.as_mut(), smithay.is_empty()) {
+            let _ = xwm.update_stacking_order_downwards(smithay.iter());
+        }
+        let helix: Vec<_> = order.iter().filter_map(|w| Some(w.x11_surface()?.helix()?.window_id())).collect();
+        if let (Some(xwm), false) = (self.hxwm.as_mut(), helix.is_empty()) {
+            let _ = xwm.restack(&helix);
+        }
+    }
+
     /// Hide a window until it is cycled back to. Minimizing a minimized
     /// window does nothing; a window on another workspace becomes
     /// minimized there (#240).
@@ -653,6 +679,7 @@ impl Helix {
             let _ = x11.set_hidden(true);
         }
         self.minimized.push((window.clone(), location));
+        self.sync_x11_stack();
         match self.top_window() {
             Some(top) => self.focus_window(&top),
             None => self.unfocus_all(),
