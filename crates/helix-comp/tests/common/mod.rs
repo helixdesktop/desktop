@@ -27,7 +27,11 @@ pub fn no_xwayland(session: &helix_test_support::headless::HeadlessSession) -> b
     if !session.x_display.is_empty() {
         return false;
     }
-    assert!(std::env::var("HELIX_REQUIRE_X11").map_or(true, |v| v != "1"), "no Xwayland, and HELIX_REQUIRE_X11=1");
+    if std::env::var("HELIX_REQUIRE_X11").is_ok_and(|v| v == "1") {
+        let log = session.log();
+        let tail: Vec<&str> = log.lines().rev().take(40).collect::<Vec<_>>().into_iter().rev().collect();
+        panic!("no Xwayland, and HELIX_REQUIRE_X11=1; the session's log ends:\n{}", tail.join("\n"));
+    }
     eprintln!("no Xwayland; skipped");
     true
 }

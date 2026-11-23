@@ -68,12 +68,20 @@ pub fn session_with_shell_env(name: &str, env: Vec<(String, String)>) -> Option<
 
 /// Whether the `Xwayland` on `PATH` is at least `major.minor` (from
 /// `Xwayland -version`); unknown counts as no.
+///
+/// With `HELIX_REQUIRE_NEW_XWAYLAND=1` (the CI job on a newer Ubuntu, #237)
+/// an older one is a failure, not a skip: that job is there to run them.
 pub fn xwayland_at_least(major: u32, minor: u32) -> bool {
-    let Ok(out) = std::process::Command::new("Xwayland").arg("-version").output() else { return false };
-    let text = String::from_utf8_lossy(&out.stderr).into_owned() + &String::from_utf8_lossy(&out.stdout);
-    let Some(version) = text.split("Xwayland Version ").nth(1).and_then(|v| v.split_whitespace().next()) else { return false };
-    let mut parts = version.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
-    (parts.next().unwrap_or(0), parts.next().unwrap_or(0)) >= (major, minor)
+    let new_enough = (|| {
+        let out = std::process::Command::new("Xwayland").arg("-version").output().ok()?;
+        let text = String::from_utf8_lossy(&out.stderr).into_owned() + &String::from_utf8_lossy(&out.stdout);
+        let version = text.split("Xwayland Version ").nth(1).and_then(|v| v.split_whitespace().next())?.to_owned();
+        let mut parts = version.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+        Some((parts.next().unwrap_or(0), parts.next().unwrap_or(0)) >= (major, minor))
+    })()
+    .unwrap_or(false);
+    assert!(new_enough || std::env::var("HELIX_REQUIRE_NEW_XWAYLAND").map_or(true, |v| v != "1"), "Xwayland older than {major}.{minor}, and HELIX_REQUIRE_NEW_XWAYLAND=1");
+    new_enough
 }
 
 /// Wait until `done` holds (polling), or fail with `what`.
