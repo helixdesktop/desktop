@@ -197,6 +197,6 @@ Apps are the ones the upstream reports name.
 | X86 | S59, W81 | A root cursor from the theme | GTK | `x11_windows::x11_windows_show_the_cursor_theme` |
 | X79 | S57 | Calling back into the WM from its callbacks deadlocked | | not applicable: Smithay's Rust API, not visible to X11 |
 | X80 | W83 | The WM's descriptor closed twice | | not applicable: descriptor ownership inside the compositor, not visible to X11 |
-| X81 | W87 | Waiting on X replies blocks the compositor | StarCraft II | not testable headlessly: needs an X server that delays replies |
+| X81 | W87 | Waiting on X replies blocks the compositor: a busy or stuck Xwayland, or a client holding the server | StarCraft II, ImageMagick `import` | `x11_blocking::a_stuck_xwayland_does_not_stop_the_desktop` (Xwayland stopped with SIGSTOP; Smithay's: known failure), `x11_blocking::a_held_x_server_does_not_stop_the_desktop` (Xwayland keeps answering its window manager during a grab) |
 | X82 | W84 | Xwayland started on demand and stopped when idle | | not applicable: Helix starts Xwayland with the session |
 | X85 | S56 | Setting the RandR primary output again | | not applicable: Helix doesn't set Xwayland's RandR primary |

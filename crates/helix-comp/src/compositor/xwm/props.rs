@@ -2,7 +2,8 @@
 //! Every property is checked for its type and length: any client can
 //! set any bytes.
 
-use x11rb::errors::{ConnectionError, ReplyError};
+use x11rb::connection::SequenceNumber;
+use x11rb::errors::ConnectionError;
 use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _, GetPropertyReply};
 use x11rb::rust_connection::RustConnection;
 
@@ -28,35 +29,34 @@ fn watched(a: &Atoms) -> [u32; 12] {
     ]
 }
 
-/// All of them, plus the EWMH states the client set before mapping
-/// (`_NET_WM_STATE`), in one round trip.
-pub fn read_all(conn: &RustConnection, a: &Atoms, win: &XWin) -> Result<(), ConnectionError> {
-    let mut cookies = Vec::new();
-    for atom in watched(a).into_iter().chain([a._NET_WM_STATE]) {
-        cookies.push((atom, conn.get_property(false, win.window_id(), atom, AtomEnum::ANY, 0, 4096)?));
-    }
-    for (atom, cookie) in cookies {
-        match cookie.reply() {
-            Ok(reply) => apply(a, win, atom, Some(&reply)),
-            Err(ReplyError::ConnectionError(err)) => return Err(err),
-            // The window went away meanwhile.
-            Err(ReplyError::X11Error(_)) => return Ok(()),
-        }
-    }
-    Ok(())
+/// Asks for all of them, plus the EWMH states the client set before
+/// mapping (`_NET_WM_STATE`), at once: which property each request is.
+pub fn request_all(conn: &RustConnection, a: &Atoms, id: u32) -> Result<Vec<(u32, SequenceNumber)>, ConnectionError> {
+    watched(a).into_iter().chain([a._NET_WM_STATE]).map(|atom| Ok((atom, super::keep(conn.get_property(false, id, atom, AtomEnum::ANY, 0, 4096)?)))).collect()
 }
 
-/// One property that changed.
-pub fn read(conn: &RustConnection, a: &Atoms, win: &XWin, atom: u32) -> Result<(), ConnectionError> {
+/// The answers to [`request_all`]. A failed one: the window went away
+/// meanwhile, and the rest are left.
+pub fn apply_all(a: &Atoms, win: &XWin, atoms: &[u32], replies: impl IntoIterator<Item = Option<Vec<u8>>>) {
+    for (atom, reply) in atoms.iter().zip(replies) {
+        let Some(reply) = super::parse::<GetPropertyReply>(reply) else { return };
+        apply(a, win, *atom, Some(&reply));
+    }
+}
+
+/// Asks for one property that changed, if it is one Helix reads.
+pub fn request(conn: &RustConnection, a: &Atoms, id: u32, atom: u32) -> Result<Option<SequenceNumber>, ConnectionError> {
     if !watched(a).contains(&atom) {
-        return Ok(());
+        return Ok(None);
     }
-    match conn.get_property(false, win.window_id(), atom, AtomEnum::ANY, 0, 4096)?.reply() {
-        Ok(reply) => apply(a, win, atom, Some(&reply)),
-        Err(ReplyError::ConnectionError(err)) => return Err(err),
-        Err(ReplyError::X11Error(_)) => {}
+    Ok(Some(super::keep(conn.get_property(false, id, atom, AtomEnum::ANY, 0, 4096)?)))
+}
+
+/// The answer to [`request`].
+pub fn apply_one(a: &Atoms, win: &XWin, atom: u32, reply: Option<Vec<u8>>) {
+    if let Some(reply) = super::parse::<GetPropertyReply>(reply) {
+        apply(a, win, atom, Some(&reply));
     }
-    Ok(())
 }
 
 fn cardinals(reply: Option<&GetPropertyReply>) -> Vec<u32> {

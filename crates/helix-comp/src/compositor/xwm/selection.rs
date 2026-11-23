@@ -34,7 +34,7 @@ use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
-use super::{Action, Atoms};
+use super::{parse, Action, Atoms, Later};
 
 /// A transfer goes incrementally above this many bytes, in chunks of it.
 const CHUNK: usize = 64 * 1024;
@@ -126,6 +126,10 @@ pub struct Selections {
     in_ready: Option<u64>,
     /// A Wayland drag over an X11 window (`dnd`).
     pub(super) dnd: Option<DndServe>,
+    /// Atom names already asked for (TARGETS, requested types).
+    names: HashMap<u32, String>,
+    /// What to do with replies when they come ([`super::Xwm::absorb`]).
+    pub(super) later: Vec<Later>,
 }
 
 impl Selections {
@@ -141,7 +145,7 @@ impl Selections {
             Ok(Sel { target, atom, window, owner: x11rb::NONE, wayland: None, timestamp: x11rb::CURRENT_TIME, targets_for: None, offered: Vec::new() })
         };
         let sels = [make(SelectionTarget::Clipboard, atoms.CLIPBOARD)?, make(SelectionTarget::Primary, atoms.PRIMARY)?];
-        Ok(Self { conn: conn.clone(), atoms, root, sels, incoming: HashMap::new(), outgoing: HashMap::new(), next: 0, own, atom_cache: HashMap::new(), in_ready: None, dnd: None })
+        Ok(Self { conn: conn.clone(), atoms, root, sels, incoming: HashMap::new(), outgoing: HashMap::new(), next: 0, own, atom_cache: HashMap::new(), in_ready: None, dnd: None, names: HashMap::new(), later: Vec::new() })
     }
 
     /// Whether the window manager made this window for selections.
@@ -161,13 +165,32 @@ impl Selections {
         }
     }
 
-    fn intern(&mut self, name: &str) -> Result<u32, ReplyOrIdError> {
-        if let Some(atom) = self.atom_cache.get(name) {
-            return Ok(*atom);
+    /// Interns `names` not known yet; known when the replies come (X
+    /// events wait for them: a TARGETS request finds them).
+    pub(super) fn intern_ahead(&mut self, names: &[String]) -> Result<(), ReplyOrIdError> {
+        let missing: Vec<String> = names.iter().filter(|n| !self.atom_cache.contains_key(*n)).cloned().collect();
+        if missing.is_empty() {
+            return Ok(());
         }
-        let atom = self.conn.intern_atom(false, name.as_bytes())?.reply()?.atom;
-        self.atom_cache.insert(name.to_owned(), atom);
-        Ok(atom)
+        let seqs = missing.iter().map(|n| Ok(super::keep(self.conn.intern_atom(false, n.as_bytes())?))).collect::<Result<Vec<_>, ReplyOrIdError>>()?;
+        self.later.push((
+            seqs,
+            Box::new(move |xwm, replies, _| {
+                for (name, reply) in missing.into_iter().zip(replies) {
+                    if let Some(r) = parse::<x11rb::protocol::xproto::InternAtomReply>(reply) {
+                        xwm.selections.names.insert(r.atom, name.clone());
+                        xwm.selections.atom_cache.insert(name, r.atom);
+                    }
+                }
+                Ok(())
+            }),
+        ));
+        Ok(())
+    }
+
+    /// An interned type's atom (see [`Selections::intern_ahead`]).
+    pub(super) fn atom_of(&self, name: &str) -> Option<u32> {
+        self.atom_cache.get(name).copied()
     }
 
     fn id(&mut self) -> u64 {
@@ -187,9 +210,10 @@ impl Selections {
         sel.targets_for = None;
         match types {
             Some(types) => {
-                sel.wayland = Some(types);
+                sel.wayland = Some(types.clone());
                 sel.offered.clear();
                 conn.set_selection_owner(sel.window, sel.atom, x11rb::CURRENT_TIME)?;
+                self.intern_ahead(&types)?;
             }
             None => {
                 if sel.wayland.take().is_some() && sel.owner == sel.window {
@@ -379,40 +403,80 @@ impl Selections {
     /// The X11 owner's TARGETS: offer them to Wayland apps, if this answer
     /// is still about the selection.
     fn targets(&mut self, i: usize, e: &SelectionNotifyEvent, actions: &mut Vec<Action>) -> Result<(), ReplyOrIdError> {
-        let conn = self.conn.clone();
-        let current = {
-            let sel = &self.sels[i];
-            sel.targets_for == Some((sel.owner, e.time))
-        };
+        let _ = actions;
         if e.property == x11rb::NONE {
             return Ok(());
         }
-        let reply = conn.get_property(true, self.sels[i].window, e.property, AtomEnum::ANY, 0, 4096)?.reply()?;
-        if !current {
-            tracing::debug!("ignoring stale X11 selection TARGETS");
+        let time = e.time;
+        let seq = super::keep(self.conn.get_property(true, self.sels[i].window, e.property, AtomEnum::ANY, 0, 4096)?);
+        self.later.push((
+            vec![seq],
+            Box::new(move |xwm, replies, _| {
+                let s = &mut xwm.selections;
+                let current = s.sels[i].targets_for == Some((s.sels[i].owner, time));
+                if !current {
+                    tracing::debug!("ignoring stale X11 selection TARGETS");
+                    return Ok(());
+                }
+                let Some(reply) = parse::<x11rb::protocol::xproto::GetPropertyReply>(replies.into_iter().next().flatten()) else { return Ok(()) };
+                let Some(atoms) = reply.value32() else { return Ok(()) };
+                let atoms: Vec<u32> = atoms.collect();
+                s.with_names(atoms, move |xwm, named, actions| {
+                    let s = &mut xwm.selections;
+                    if s.sels[i].targets_for != Some((s.sels[i].owner, time)) {
+                        return;
+                    }
+                    let mut offered: Vec<(String, u32)> = Vec::new();
+                    for (atom, name) in named {
+                        let mime = match name.as_str() {
+                            "UTF8_STRING" => "text/plain;charset=utf-8".to_owned(),
+                            "TEXT" | "STRING" => "text/plain".to_owned(),
+                            n if n.contains('/') => name.clone(),
+                            _ => continue,
+                        };
+                        if !offered.iter().any(|(m, _)| *m == mime) {
+                            offered.push((mime, atom));
+                        }
+                    }
+                    let sel = &mut s.sels[i];
+                    sel.offered = offered.clone();
+                    actions.push(Action::SelectionOffered(sel.target, offered.into_iter().map(|(m, _)| m).collect()));
+                })
+            }),
+        ));
+        Ok(())
+    }
+
+    /// The names of `atoms` (asked for those not known yet), in order;
+    /// then `then`. Atoms that have no name are left out.
+    pub(super) fn with_names(&mut self, atoms: Vec<u32>, then: impl FnOnce(&mut super::Xwm, Vec<(u32, String)>, &mut Vec<Action>) + 'static) -> Result<(), ReplyOrIdError> {
+        let missing: Vec<u32> = atoms.iter().copied().filter(|a| !self.names.contains_key(a)).collect::<HashSet<_>>().into_iter().collect();
+        let seqs = missing.iter().map(|a| Ok(super::keep(self.conn.get_atom_name(*a)?))).collect::<Result<Vec<_>, ReplyOrIdError>>()?;
+        let named = move |s: &Selections| atoms.iter().filter_map(|a| s.names.get(a).map(|n| (*a, n.clone()))).collect::<Vec<_>>();
+        if missing.is_empty() {
+            // Known already: still after anything pending, in order.
+            self.later.push((Vec::new(), Box::new(move |xwm, _, actions| {
+                let named = named(&xwm.selections);
+                then(xwm, named, actions);
+                Ok(())
+            })));
             return Ok(());
         }
-        let Some(atoms) = reply.value32() else { return Ok(()) };
-        let atoms: Vec<u32> = atoms.collect();
-        // Names asked for all at once, then collected.
-        let cookies: Vec<_> = atoms.iter().map(|a| conn.get_atom_name(*a)).collect::<Result<_, _>>()?;
-        let mut offered: Vec<(String, u32)> = Vec::new();
-        for (atom, cookie) in atoms.iter().zip(cookies) {
-            let Ok(reply) = cookie.reply() else { continue };
-            let name = String::from_utf8_lossy(&reply.name).into_owned();
-            let mime = match name.as_str() {
-                "UTF8_STRING" => "text/plain;charset=utf-8".to_owned(),
-                "TEXT" | "STRING" => "text/plain".to_owned(),
-                n if n.contains('/') => name.clone(),
-                _ => continue,
-            };
-            if !offered.iter().any(|(m, _)| *m == mime) {
-                offered.push((mime, *atom));
-            }
-        }
-        let sel = &mut self.sels[i];
-        sel.offered = offered.clone();
-        actions.push(Action::SelectionOffered(sel.target, offered.into_iter().map(|(m, _)| m).collect()));
+        self.later.push((
+            seqs,
+            Box::new(move |xwm, replies, actions| {
+                for (atom, reply) in missing.into_iter().zip(replies) {
+                    if let Some(r) = parse::<x11rb::protocol::xproto::GetAtomNameReply>(reply) {
+                        let name = String::from_utf8_lossy(&r.name).into_owned();
+                        xwm.selections.atom_cache.insert(name.clone(), atom);
+                        xwm.selections.names.insert(atom, name);
+                    }
+                }
+                let named = named(&xwm.selections);
+                then(xwm, named, actions);
+                Ok(())
+            }),
+        ));
         Ok(())
     }
 
@@ -429,34 +493,59 @@ impl Selections {
             self.finish_incoming(id, actions);
             return Ok(());
         }
+        let _ = actions;
         let window = self.incoming[&id].window;
-        let reply = self.conn.get_property(true, window, e.property, AtomEnum::ANY, 0, u32::MAX / 4)?.reply()?;
-        let t = self.incoming.get_mut(&id).unwrap();
-        t.deadline = Instant::now() + STALL;
-        if reply.type_ == self.atoms.INCR {
-            // Only a size hint: the data comes in the chunks after.
-            t.incr = true;
-            return Ok(());
-        }
-        t.buf.extend_from_slice(&reply.value);
-        t.done = true;
-        self.drain(id, actions);
+        let seq = super::keep(self.conn.get_property(true, window, e.property, AtomEnum::ANY, 0, u32::MAX / 4)?);
+        self.later.push((
+            vec![seq],
+            Box::new(move |xwm, replies, actions| {
+                let s = &mut xwm.selections;
+                let incr = s.atoms.INCR;
+                let Some(t) = s.incoming.get_mut(&id) else { return Ok(()) };
+                let Some(reply) = parse::<x11rb::protocol::xproto::GetPropertyReply>(replies.into_iter().next().flatten()) else {
+                    s.finish_incoming(id, actions);
+                    return Ok(());
+                };
+                t.deadline = Instant::now() + STALL;
+                if reply.type_ == incr {
+                    // Only a size hint: the data comes in the chunks after.
+                    t.incr = true;
+                    return Ok(());
+                }
+                t.buf.extend_from_slice(&reply.value);
+                t.done = true;
+                s.drain(id, actions);
+                Ok(())
+            }),
+        ));
         Ok(())
     }
 
     /// The next chunk of an incremental transfer. Reading it (and deleting
     /// it) asks the owner for the one after; it is not deleted again.
     fn chunk(&mut self, id: u64, actions: &mut Vec<Action>) -> Result<(), ReplyOrIdError> {
+        let _ = actions;
         let window = self.incoming[&id].window;
-        let reply = self.conn.get_property(true, window, self.atoms._HELIX_SELECTION, AtomEnum::ANY, 0, u32::MAX / 4)?.reply()?;
-        let t = self.incoming.get_mut(&id).unwrap();
-        t.deadline = Instant::now() + STALL;
-        if reply.value.is_empty() {
-            t.done = true;
-        } else {
-            t.buf.extend_from_slice(&reply.value);
-        }
-        self.drain(id, actions);
+        let seq = super::keep(self.conn.get_property(true, window, self.atoms._HELIX_SELECTION, AtomEnum::ANY, 0, u32::MAX / 4)?);
+        self.later.push((
+            vec![seq],
+            Box::new(move |xwm, replies, actions| {
+                let s = &mut xwm.selections;
+                let Some(t) = s.incoming.get_mut(&id) else { return Ok(()) };
+                let Some(reply) = parse::<x11rb::protocol::xproto::GetPropertyReply>(replies.into_iter().next().flatten()) else {
+                    s.finish_incoming(id, actions);
+                    return Ok(());
+                };
+                t.deadline = Instant::now() + STALL;
+                if reply.value.is_empty() {
+                    t.done = true;
+                } else {
+                    t.buf.extend_from_slice(&reply.value);
+                }
+                s.drain(id, actions);
+                Ok(())
+            }),
+        ));
         Ok(())
     }
 
@@ -516,6 +605,7 @@ impl Selections {
 
     /// An X11 app asks for the selection Helix owns for a Wayland copy.
     fn request(&mut self, e: SelectionRequestEvent, actions: &mut Vec<Action>) -> Result<(), ReplyOrIdError> {
+        let _ = actions;
         let dnd = self.dnd.as_ref().filter(|d| d.owner == e.owner && e.selection == self.atoms.XdndSelection).map(|d| (d.types.clone(), d.source.clone()));
         let i = self.sels.iter().position(|s| s.window == e.owner && s.atom == e.selection);
         let (types, timestamp) = match (&dnd, i) {
@@ -534,7 +624,7 @@ impl Selections {
             let mut list = vec![a.TARGETS, a.TIMESTAMP];
             let text = types.iter().any(|t| TEXT_MIMES.contains(&t.as_str()));
             for t in &types {
-                let atom = self.intern(t)?;
+                let Some(atom) = self.atom_of(t) else { continue };
                 if !list.contains(&atom) {
                     list.push(atom);
                 }
@@ -556,7 +646,22 @@ impl Selections {
         if e.target == a.DELETE {
             return self.answer(&e, true);
         }
-        let name = String::from_utf8_lossy(&self.conn.get_atom_name(e.target)?.reply()?.name).into_owned();
+        // The rest once the target's name is known.
+        self.with_names(vec![e.target], move |xwm, named, actions| {
+            let s = &mut xwm.selections;
+            let result = match named.into_iter().next() {
+                Some((_, name)) => s.request_named(e, name, types, dnd, i, actions),
+                None => s.answer(&e, false),
+            };
+            if let Err(err) = result.and_then(|()| Ok(s.conn.flush()?)) {
+                tracing::debug!(%err, "cannot answer an X11 selection request");
+            }
+        })
+    }
+
+    fn request_named(&mut self, e: SelectionRequestEvent, name: String, types: Vec<String>, dnd: Option<(Vec<String>, Arc<dyn smithay::input::dnd::Source>)>, i: Option<usize>, actions: &mut Vec<Action>) -> Result<(), ReplyOrIdError> {
+        let a = self.atoms;
+        let property = e.property;
         let Some(mime) = mime_for(&name, &types) else {
             tracing::debug!(target = name, "an X11 app asked for a type the Wayland copy does not have");
             return self.answer(&e, false);
@@ -645,8 +750,12 @@ impl Selections {
                 // Incrementally (ICCCM 2.7.2): the requestor deletes each
                 // chunk to ask for the next, and the owner listens for that
                 // itself, keeping whatever it listens for already (#193).
-                let mask = self.conn.get_window_attributes(t.requestor)?.reply().map(|r| r.your_event_mask).unwrap_or(EventMask::NO_EVENT);
-                self.conn.change_window_attributes(t.requestor, &ChangeWindowAttributesAux::new().event_mask(mask | EventMask::PROPERTY_CHANGE))?;
+                // What the window manager selects on any client window
+                // (managed ones: property and focus changes; focus changes
+                // on others are ignored), so it is kept without asking.
+                if t.requestor != self.root {
+                    self.conn.change_window_attributes(t.requestor, &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE | EventMask::FOCUS_CHANGE))?;
+                }
                 let hint = u32::try_from(t.buf.len()).unwrap_or(u32::MAX);
                 self.conn.change_property32(PropMode::REPLACE, t.requestor, t.property, a.INCR, &[hint])?;
                 t.incr = true;

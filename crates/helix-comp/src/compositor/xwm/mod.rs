@@ -12,6 +12,14 @@
 //! the client lists, closing, the clipboard and primary selection
 //! (`selection`), and drag and drop between X11 and Wayland apps
 //! (`dnd`).
+//!
+//! It never waits for an X reply on the compositor's thread (#223): a
+//! client holding the X server (XGrabServer) or a busy Xwayland would
+//! stop the whole desktop. Requests are sent from here; their replies are
+//! waited for on a thread of their own ([`Reply`]), and what was to be
+//! done with them runs when they come ([`Xwm::after`]). Until then, later
+//! X events wait in order behind them, so each is handled as it would be
+//! with the reply in hand.
 
 mod atoms;
 mod dnd;
@@ -20,7 +28,7 @@ mod props;
 mod selection;
 pub mod window;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::AtomicU32;
@@ -29,7 +37,7 @@ use std::sync::Arc;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{Client, Resource};
 use smithay::utils::{Logical, Rectangle};
-use x11rb::connection::Connection;
+use x11rb::connection::{Connection, ReplyOrError, RequestConnection, SequenceNumber};
 use x11rb::errors::{ConnectionError, ReplyOrIdError};
 use x11rb::protocol::xproto::{
     AtomEnum, ChangeWindowAttributesAux, ConfigureRequestEvent, ConfigureWindowAux, ConnectionExt as _,
@@ -44,6 +52,36 @@ pub use dnd::{DragCmd, XOffer, XSource};
 pub use window::XWin;
 
 /// Which X11 window manager runs: Smithay's (the default) or Helix's.
+/// Replies to requests the window manager sent, waited for on their own
+/// thread: `replies[i]` for the `i`-th request of a [`Xwm::after`] (`None`
+/// for an error, or when Xwayland went away).
+#[derive(Debug)]
+pub struct Reply {
+    token: u64,
+    replies: Vec<Option<Vec<u8>>>,
+}
+
+/// What to do once a request's replies are in.
+pub(super) type Cont = Box<dyn FnOnce(&mut Xwm, Vec<Option<Vec<u8>>>, &mut Vec<Action>) -> Result<(), ReplyOrIdError>>;
+
+/// A request's sequence numbers and what to do with their replies, from a
+/// part of the window manager without the whole of it at hand
+/// (`selection`, `dnd`): [`Xwm::absorb`] takes them.
+pub(super) type Later = (Vec<SequenceNumber>, Cont);
+
+/// A request's sequence number, its reply kept for the reply thread
+/// (dropping the cookie would throw the reply away).
+pub(super) fn keep<C: RequestConnection + ?Sized, R: x11rb::x11_utils::TryParse>(cookie: x11rb::cookie::Cookie<'_, C, R>) -> SequenceNumber {
+    let seq = cookie.sequence_number();
+    std::mem::forget(cookie);
+    seq
+}
+
+/// A reply's fields, if it came.
+pub(super) fn parse<R: x11rb::x11_utils::TryParse>(reply: Option<Vec<u8>>) -> Option<R> {
+    reply.and_then(|b| R::try_parse(&b).ok().map(|(r, _)| r))
+}
+
 pub fn helix_selected() -> bool {
     std::env::var("HELIX_XWM").is_ok_and(|v| v == "helix")
 }
@@ -123,6 +161,14 @@ pub struct Xwm {
     stacking: Vec<XId>,
     selections: selection::Selections,
     dnd: dnd::Dnd,
+    /// 32-bit ARGB picture format, for cursors (asked once, at start).
+    argb_format: Option<u32>,
+    /// Requests whose replies the reply thread waits for.
+    waiter: std::sync::mpsc::Sender<(u64, Vec<SequenceNumber>)>,
+    pending: HashMap<u64, Cont>,
+    next_token: u64,
+    /// X events handled after the pending replies, in order.
+    queued: VecDeque<Event>,
 }
 
 impl std::fmt::Debug for Xwm {
@@ -151,7 +197,7 @@ impl Xwm {
     /// Become the window manager on the connection Xwayland gave its
     /// window manager. Returns it and a file descriptor that is readable
     /// when X events are waiting.
-    pub fn start(socket: UnixStream, client: Client) -> Result<(Self, OwnedFd), StartError> {
+    pub fn start(socket: UnixStream, client: Client) -> Result<(Self, OwnedFd, smithay::reexports::calloop::channel::Channel<Reply>), StartError> {
         let (stream, _) = DefaultStream::from_unix_stream(socket)?;
         let conn = Arc::new(RustConnection::connect_to_stream(stream, 0)?);
         let atoms = Atoms::new(&*conn)?.reply()?;
@@ -217,9 +263,37 @@ impl Xwm {
         conn.change_property32(PropMode::REPLACE, root, atoms._NET_CLIENT_LIST_STACKING, AtomEnum::WINDOW, &[])?;
         conn.change_property32(PropMode::REPLACE, root, atoms._NET_ACTIVE_WINDOW, AtomEnum::WINDOW, &[x11rb::NONE])?;
 
+        let argb_format = {
+            use x11rb::protocol::render::{ConnectionExt as _, PictType};
+            conn.render_query_pict_formats()?
+                .reply()?
+                .formats
+                .iter()
+                .find(|f| f.type_ == PictType::DIRECT && f.depth == 32 && f.direct.alpha_mask == 0xff && f.direct.alpha_shift == 24 && f.direct.red_shift == 16)
+                .map(|f| f.id)
+        };
         let mut selections = selection::Selections::new(&conn, atoms, root)?;
         let dnd = dnd::Dnd::new(&conn, atoms, root, &mut selections)?;
         let id_mask = conn.setup().resource_id_mask;
+        // The reply thread: waits for each reply in turn (the server
+        // answers in order) and wakes the compositor with them.
+        let (reply_tx, replies) = smithay::reexports::calloop::channel::channel();
+        let (waiter, waits) = std::sync::mpsc::channel::<(u64, Vec<SequenceNumber>)>();
+        let reader = conn.clone();
+        std::thread::Builder::new().name("helix-xwm-replies".into()).spawn(move || {
+            while let Ok((token, seqs)) = waits.recv() {
+                let replies = seqs
+                    .into_iter()
+                    .map(|seq| match reader.wait_for_reply_or_raw_error(seq) {
+                        Ok(ReplyOrError::Reply(buf)) => Some(buf),
+                        _ => None,
+                    })
+                    .collect();
+                if reply_tx.send(Reply { token, replies }).is_err() {
+                    return;
+                }
+            }
+        })?;
         let fd = conn.stream().as_fd().try_clone_to_owned()?;
         let mut xwm = Self {
             conn,
@@ -238,6 +312,11 @@ impl Xwm {
             stacking: Vec::new(),
             selections,
             dnd,
+            argb_format,
+            waiter,
+            pending: HashMap::new(),
+            next_token: 0,
+            queued: VecDeque::new(),
         };
         // Windows made before the window manager started.
         let conn = xwm.conn.clone();
@@ -256,7 +335,7 @@ impl Xwm {
         }
         xwm.conn.flush()?;
         tracing::info!("Helix's X11 window manager is running");
-        Ok((xwm, fd))
+        Ok((xwm, fd, replies))
     }
 
     pub fn client(&self) -> &Client {
@@ -290,14 +369,75 @@ impl Xwm {
         self.windows.get(&id)
     }
 
-    /// Handles one X event.
-    pub fn handle(&mut self, event: Event) -> Vec<Action> {
-        match self.handle_inner(event) {
-            Ok(actions) => actions,
-            Err(err) => {
+    /// Handles X events, in order: each after the replies the ones before
+    /// it wait for (the rest when [`Xwm::resolve`] has them). It stops
+    /// after the first that asks the compositor for something, so the
+    /// compositor answers before the next is handled: call it again
+    /// (with no new events) until it asks nothing.
+    pub fn handle(&mut self, events: Vec<Event>) -> Vec<Action> {
+        self.queued.extend(events);
+        let mut actions = Vec::new();
+        self.run(&mut actions);
+        actions
+    }
+
+    /// Replies came: what waited for them. The X events after them go on
+    /// with [`Xwm::handle`].
+    pub fn resolve(&mut self, reply: Reply) -> Vec<Action> {
+        let mut actions = Vec::new();
+        if let Some(cont) = self.pending.remove(&reply.token) {
+            if let Err(err) = cont(self, reply.replies, &mut actions) {
                 tracing::debug!(%err, "X11 request failed");
-                Vec::new()
             }
+            self.absorb();
+        }
+        let _ = self.conn.flush();
+        actions
+    }
+
+    /// Whether X events wait for replies.
+    pub fn waiting(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    fn run(&mut self, actions: &mut Vec<Action>) {
+        while self.pending.is_empty() {
+            let Some(event) = self.queued.pop_front() else { break };
+            // A property changed again before this change was read: one
+            // read, of the newest (titles change all the time).
+            if let Event::PropertyNotify(e) = &event {
+                if self.queued.iter().any(|q| matches!(q, Event::PropertyNotify(n) if n.window == e.window && n.atom == e.atom)) {
+                    continue;
+                }
+            }
+            match self.handle_inner(event) {
+                Ok(mut more) => actions.append(&mut more),
+                Err(err) => tracing::debug!(%err, "X11 request failed"),
+            }
+            self.absorb();
+            if !actions.is_empty() {
+                break;
+            }
+        }
+        let _ = self.conn.flush();
+    }
+
+    /// Does `cont` with the replies to the requests `seqs` (sent already)
+    /// when they come. X events wait until then.
+    pub(super) fn after(&mut self, seqs: Vec<SequenceNumber>, cont: Cont) {
+        let token = self.next_token;
+        self.next_token += 1;
+        let _ = self.conn.flush();
+        self.pending.insert(token, cont);
+        if self.waiter.send((token, seqs)).is_err() {
+            tracing::warn!("the X11 window manager's reply thread is gone");
+        }
+    }
+
+    /// What `selection` and `dnd` asked to do with replies.
+    fn absorb(&mut self) {
+        for (seqs, cont) in std::mem::take(&mut self.selections.later).into_iter().chain(std::mem::take(&mut self.dnd.later)) {
+            self.after(seqs, cont);
         }
     }
 
@@ -351,10 +491,21 @@ impl Xwm {
                 };
                 tracing::debug!(window = e.window, override_redirect = e.override_redirect, "X11 window shown");
                 if e.override_redirect {
-                    let geo = self.conn.get_geometry(e.window)?.reply()?;
-                    win.state().last_configure = Rectangle::new((win.x_to_logical(geo.x.into()), win.x_to_logical(geo.y.into())).into(), (win.x_to_logical(geo.width.into()), win.x_to_logical(geo.height.into())).into());
-                    props::read_all(&self.conn, &self.atoms, &win)?;
-                    actions.push(Action::MappedOverride(win));
+                    // Where it is and what it is, then shown.
+                    let geo = keep(self.conn.get_geometry(e.window)?);
+                    let asked = props::request_all(&self.conn, &self.atoms, e.window)?;
+                    let (atoms, seqs): (Vec<u32>, Vec<SequenceNumber>) = asked.into_iter().unzip();
+                    self.after(
+                        std::iter::once(geo).chain(seqs).collect(),
+                        Box::new(move |xwm, replies, actions| {
+                            let mut replies = replies.into_iter();
+                            let Some(geo) = parse::<x11rb::protocol::xproto::GetGeometryReply>(replies.next().flatten()) else { return Ok(()) };
+                            win.state().last_configure = Rectangle::new((win.x_to_logical(geo.x.into()), win.x_to_logical(geo.y.into())).into(), (win.x_to_logical(geo.width.into()), win.x_to_logical(geo.height.into())).into());
+                            props::apply_all(&xwm.atoms, &win, &atoms, replies);
+                            actions.push(Action::MappedOverride(win));
+                            Ok(())
+                        }),
+                    );
                 } else if !win.state().managed && !win.state().input_only {
                     // Shown but not managed: made managed after it was
                     // created and mapped while it was override-redirect, or
@@ -405,13 +556,21 @@ impl Xwm {
             }
             Event::PropertyNotify(e) => {
                 let Some(win) = self.windows.get(&e.window).cloned() else { return Ok(actions) };
-                props::read(&self.conn, &self.atoms, &win, e.atom)?;
-                if e.atom == self.atoms.WM_TRANSIENT_FOR {
-                    self.break_transient_cycle(&win);
-                }
-                if e.atom == self.atoms.WM_HINTS {
-                    actions.push(Action::HintsChanged(win));
-                }
+                let Some(seq) = props::request(&self.conn, &self.atoms, e.window, e.atom)? else { return Ok(actions) };
+                let atom = e.atom;
+                self.after(
+                    vec![seq],
+                    Box::new(move |xwm, replies, actions| {
+                        props::apply_one(&xwm.atoms, &win, atom, replies.into_iter().next().flatten());
+                        if atom == xwm.atoms.WM_TRANSIENT_FOR {
+                            xwm.break_transient_cycle(&win);
+                        }
+                        if atom == xwm.atoms.WM_HINTS {
+                            actions.push(Action::HintsChanged(win));
+                        }
+                        Ok(())
+                    }),
+                );
             }
             Event::ClientMessage(e) => self.client_message(e, &mut actions)?,
             Event::FocusIn(e) => self.focus_in(e)?,
@@ -490,7 +649,25 @@ impl Xwm {
     }
 
     fn map_request(&mut self, id: XId, actions: &mut Vec<Action>) -> Result<(), ReplyOrIdError> {
-        let attrs = self.conn.get_window_attributes(id)?.reply()?;
+        let _ = actions;
+        let attrs = keep(self.conn.get_window_attributes(id)?);
+        let geo = keep(self.conn.get_geometry(id)?);
+        self.after(
+            vec![attrs, geo],
+            Box::new(move |xwm, replies, actions| {
+                let mut replies = replies.into_iter();
+                let attrs = parse::<x11rb::protocol::xproto::GetWindowAttributesReply>(replies.next().flatten());
+                let geo = parse::<x11rb::protocol::xproto::GetGeometryReply>(replies.next().flatten());
+                match (attrs, geo) {
+                    (Some(attrs), Some(geo)) => xwm.map_requested(id, attrs, geo, actions),
+                    _ => Ok(()),
+                }
+            }),
+        );
+        Ok(())
+    }
+
+    fn map_requested(&mut self, id: XId, attrs: x11rb::protocol::xproto::GetWindowAttributesReply, geo: x11rb::protocol::xproto::GetGeometryReply, actions: &mut Vec<Action>) -> Result<(), ReplyOrIdError> {
         // Input-only windows show nothing and are not managed.
         if attrs.class == WindowClass::INPUT_ONLY {
             if let Some(w) = self.windows.get(&id) {
@@ -502,10 +679,7 @@ impl Xwm {
         }
         let win = match self.windows.get(&id) {
             Some(w) => w.clone(),
-            None => {
-                let geo = self.conn.get_geometry(id)?.reply()?;
-                self.add(id, attrs.override_redirect, geo.x.into(), geo.y.into(), geo.width.into(), geo.height.into())
-            }
+            None => self.add(id, attrs.override_redirect, geo.x.into(), geo.y.into(), geo.width.into(), geo.height.into()),
         };
         win.state().override_redirect = attrs.override_redirect;
         if attrs.override_redirect {
@@ -526,11 +700,21 @@ impl Xwm {
     /// (and the states it set before mapping), then the compositor
     /// decides where it goes and maps it ([`XWin::set_mapped`]).
     fn manage(&mut self, win: &XWin, actions: &mut Vec<Action>) -> Result<(), ReplyOrIdError> {
+        let _ = actions;
         self.conn.change_window_attributes(win.window_id(), &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE | EventMask::FOCUS_CHANGE))?;
-        props::read_all(&self.conn, &self.atoms, win)?;
-        self.break_transient_cycle(win);
-        win.state().managed = true;
-        actions.push(Action::MapRequest(win.clone()));
+        let asked = props::request_all(&self.conn, &self.atoms, win.window_id())?;
+        let (atoms, seqs): (Vec<u32>, Vec<SequenceNumber>) = asked.into_iter().unzip();
+        let win = win.clone();
+        self.after(
+            seqs,
+            Box::new(move |xwm, replies, actions| {
+                props::apply_all(&xwm.atoms, &win, &atoms, replies);
+                xwm.break_transient_cycle(&win);
+                win.state().managed = true;
+                actions.push(Action::MapRequest(win));
+                Ok(())
+            }),
+        );
         Ok(())
     }
 
@@ -806,21 +990,13 @@ impl Xwm {
     /// own show: `pixels` as 32-bit ARGB (B, G, R, A in memory,
     /// premultiplied), `size` and `hotspot` in X pixels (#171).
     pub fn set_cursor(&self, pixels: &[u8], size: (u16, u16), hotspot: (u16, u16)) -> Result<(), ReplyOrIdError> {
-        use x11rb::protocol::render::{ConnectionExt as _, CreatePictureAux, PictType};
+        use x11rb::protocol::render::{ConnectionExt as _, CreatePictureAux};
         use x11rb::protocol::xproto::{CreateGCAux, ImageFormat};
         let (w, h) = size;
         if pixels.len() < usize::from(w) * usize::from(h) * 4 || w == 0 || h == 0 {
             return Ok(());
         }
-        let formats = self.conn.render_query_pict_formats()?.reply()?;
-        let Some(format) = formats
-            .formats
-            .iter()
-            .find(|f| f.type_ == PictType::DIRECT && f.depth == 32 && f.direct.alpha_mask == 0xff && f.direct.alpha_shift == 24 && f.direct.red_shift == 16)
-            .map(|f| f.id)
-        else {
-            return Ok(());
-        };
+        let Some(format) = self.argb_format else { return Ok(()) };
         let pixmap = self.conn.generate_id()?;
         self.conn.create_pixmap(32, pixmap, self.root, w, h)?;
         let gc = self.conn.generate_id()?;
@@ -864,6 +1040,7 @@ impl Xwm {
         if let Err(err) = self.selections.set_wayland(selection, types) {
             tracing::warn!(%err, ?selection, "cannot offer the selection to X11");
         }
+        self.absorb();
     }
 
     /// A Wayland app pastes the X11 selection as `mime` into `fd`.
@@ -872,6 +1049,7 @@ impl Xwm {
         if let Err(err) = self.selections.receive(selection, mime, fd, &mut actions) {
             tracing::warn!(%err, ?selection, "cannot paste the X11 selection");
         }
+        self.absorb();
         actions
     }
 
@@ -879,6 +1057,7 @@ impl Xwm {
     pub fn selection_ready(&mut self, id: u64) -> (bool, Vec<Action>) {
         let mut actions = Vec::new();
         let keep = self.selections.ready(id, &mut actions);
+        self.absorb();
         (keep, actions)
     }
 
@@ -915,12 +1094,15 @@ impl Xwm {
         if let Err(err) = self.dnd.cmd(cmd, &mut self.selections) {
             tracing::debug!(%err, "an X11 drag request failed");
         }
+        self.absorb();
         Vec::new()
     }
 
     /// A Wayland drag comes over `win`, at `at` on its surface.
     pub fn drag_enter(&mut self, win: &XWin, source: Arc<dyn smithay::input::dnd::Source>, at: smithay::utils::Point<f64, Logical>) -> Option<XOffer> {
-        self.dnd.enter(win, source, at, &mut self.selections)
+        let offer = self.dnd.enter(win, source, at, &mut self.selections);
+        self.absorb();
+        offer
     }
 
     pub fn drag_motion(&mut self, win: &XWin, at: smithay::utils::Point<f64, Logical>, time: u32) {
@@ -939,6 +1121,7 @@ impl Xwm {
         let mut actions = Vec::new();
         self.selections.expired(&mut actions);
         self.dnd.expired();
+        self.absorb();
         actions
     }
 }

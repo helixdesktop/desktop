@@ -29,7 +29,7 @@ use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
 use super::selection::{DndServe, Selections};
-use super::{Atoms, XWin};
+use super::{parse, Atoms, Later, XWin};
 
 /// The XDND version spoken.
 const VERSION: u32 = 5;
@@ -183,12 +183,17 @@ struct ToX {
     state: Arc<Mutex<ToXState>>,
     action: DndAction,
     dropped: bool,
+    /// Which drag this is (an answer about an earlier one is stale).
+    serial: u64,
+    /// XdndEnter sent: what the window answered about taking drops came.
+    entered: bool,
+    /// The newest motion before that, sent once entered.
+    motion: Option<(XWin, Point<f64, Logical>, u32)>,
 }
 
 pub struct Dnd {
     conn: Arc<RustConnection>,
     atoms: Atoms,
-    root: XId,
     /// The drop window for X11 drags over Wayland windows, and whether it
     /// is shown.
     proxy: XId,
@@ -197,6 +202,9 @@ pub struct Dnd {
     owner: XId,
     from_x: Option<FromX>,
     to_x: Option<ToX>,
+    serial: u64,
+    /// What to do with replies when they come ([`super::Xwm::absorb`]).
+    pub(super) later: Vec<Later>,
 }
 
 impl Dnd {
@@ -216,7 +224,7 @@ impl Dnd {
         conn.xfixes_select_selection_input(owner, atoms.XdndSelection, events)?;
         selections.adopt(proxy);
         selections.adopt(owner);
-        Ok(Self { conn: conn.clone(), atoms, root, proxy, proxy_shown: false, owner, from_x: None, to_x: None })
+        Ok(Self { conn: conn.clone(), atoms, proxy, proxy_shown: false, owner, from_x: None, to_x: None, serial: 0, later: Vec::new() })
     }
 
     /// Whether an X11 app's drag is going on.
@@ -297,8 +305,9 @@ impl Dnd {
         self.proxy_shown = show;
         let result = (|| -> Result<(), ReplyOrIdError> {
             if show {
-                let root = self.conn.get_geometry(self.root)?.reply()?;
-                let aux = ConfigureWindowAux::new().x(0).y(0).width(u32::from(root.width)).height(u32::from(root.height)).stack_mode(StackMode::ABOVE);
+                // As big as X allows: over the whole screen, whatever its
+                // size now, without asking.
+                let aux = ConfigureWindowAux::new().x(0).y(0).width(32767).height(32767).stack_mode(StackMode::ABOVE);
                 self.conn.configure_window(self.proxy, &aux)?;
                 self.conn.map_window(self.proxy)?;
             } else {
@@ -405,7 +414,7 @@ impl Dnd {
     /// the owner window (from an X11 drop target). `true` if it was one.
     pub(super) fn client_message(&mut self, e: &ClientMessageEvent, selections: &mut Selections) -> Result<bool, ReplyOrIdError> {
         if e.window == self.proxy {
-            self.at_proxy(e)?;
+            self.at_proxy(e, selections)?;
             return Ok(true);
         }
         if e.window == self.owner {
@@ -415,7 +424,7 @@ impl Dnd {
         Ok(false)
     }
 
-    fn at_proxy(&mut self, e: &ClientMessageEvent) -> Result<(), ReplyOrIdError> {
+    fn at_proxy(&mut self, e: &ClientMessageEvent, selections: &mut Selections) -> Result<(), ReplyOrIdError> {
         let a = self.atoms;
         let data = e.data.as_data32();
         if self.from_x.is_none() {
@@ -423,19 +432,19 @@ impl Dnd {
         }
         if e.type_ == a.XdndEnter {
             let source = data[0];
-            let atoms: Vec<u32> = if data[1] & 1 == 1 {
+            if data[1] & 1 == 1 {
                 // More than three types: in the source's XdndTypeList.
-                let reply = self.conn.get_property(false, source, a.XdndTypeList, AtomEnum::ATOM, 0, 1024)?.reply()?;
-                reply.value32().map(|v| v.collect()).unwrap_or_default()
+                let seq = super::keep(self.conn.get_property(false, source, a.XdndTypeList, AtomEnum::ATOM, 0, 1024)?);
+                self.later.push((
+                    vec![seq],
+                    Box::new(move |xwm, replies, _| {
+                        let atoms = parse::<x11rb::protocol::xproto::GetPropertyReply>(replies.into_iter().next().flatten()).and_then(|r| r.value32().map(|v| v.collect())).unwrap_or_default();
+                        xwm.selections.with_names(atoms, move |xwm, named, _| xwm.dnd.entered_proxy(source, &named))
+                    }),
+                ));
             } else {
-                data[2..].iter().copied().filter(|t| *t != x11rb::NONE).collect()
-            };
-            let types = self.mimes(&atoms)?;
-            let drag = self.from_x.as_mut().unwrap();
-            drag.source = source;
-            drag.over_proxy = true;
-            if let Ok(mut s) = drag.shared.lock() {
-                s.types = types;
+                let atoms: Vec<u32> = data[2..].iter().copied().filter(|t| *t != x11rb::NONE).collect();
+                selections.with_names(atoms, move |xwm, named, _| xwm.dnd.entered_proxy(source, &named))?;
             }
         } else if e.type_ == a.XdndPosition {
             let offered = self.action_of(data[4]);
@@ -460,25 +469,16 @@ impl Dnd {
         Ok(())
     }
 
-    /// X11 type atoms as Wayland types (text as `text/plain`), with the
-    /// atom each is asked for by.
-    fn mimes(&self, atoms: &[u32]) -> Result<Vec<(String, u32)>, ReplyOrIdError> {
-        let cookies: Vec<_> = atoms.iter().map(|a| self.conn.get_atom_name(*a)).collect::<Result<_, _>>()?;
-        let mut types: Vec<(String, u32)> = Vec::new();
-        for (atom, cookie) in atoms.iter().zip(cookies) {
-            let Ok(reply) = cookie.reply() else { continue };
-            let name = String::from_utf8_lossy(&reply.name).into_owned();
-            let mime = match name.as_str() {
-                "UTF8_STRING" => "text/plain;charset=utf-8".to_owned(),
-                "TEXT" | "STRING" => "text/plain".to_owned(),
-                n if n.contains('/') => name.clone(),
-                _ => continue,
-            };
-            if !types.iter().any(|(m, _)| *m == mime) {
-                types.push((mime, *atom));
-            }
+    /// The X11 app's drag entered the drop window with these types (atoms
+    /// and their names).
+    fn entered_proxy(&mut self, source: XId, named: &[(u32, String)]) {
+        let types = types_of(named);
+        let Some(drag) = self.from_x.as_mut() else { return };
+        drag.source = source;
+        drag.over_proxy = true;
+        if let Ok(mut s) = drag.shared.lock() {
+            s.types = types;
         }
-        Ok(types)
     }
 
     // ----- Wayland drags onto X11 windows ---------------------------------
@@ -495,40 +495,71 @@ impl Dnd {
         }
     }
 
+    /// Its offer comes at once; whether the window takes drops (XdndAware,
+    /// and an XDND proxy that names itself) and the drag's types as atoms
+    /// come back later ([`Dnd::enter_known`]): until then it takes nothing.
     fn try_enter(&mut self, win: &XWin, source: Arc<dyn Source>, at: Point<f64, Logical>, selections: &mut Selections) -> Result<Option<XOffer>, ReplyOrIdError> {
         let a = self.atoms;
         let target = win.window_id();
-        let aware = self.conn.get_property(false, target, a.XdndAware, AtomEnum::ATOM, 0, 1)?.reply()?;
-        let Some(version) = aware.value32().and_then(|mut v| v.next()) else { return Ok(None) };
-        let version = version.min(VERSION);
-        // Its XDND proxy, if that names itself as one (else not followed).
-        let to = match self.conn.get_property(false, target, a.XdndProxy, AtomEnum::WINDOW, 0, 1)?.reply()?.value32().and_then(|mut v| v.next()) {
-            Some(proxy) if proxy != x11rb::NONE => {
-                let named = self.conn.get_property(false, proxy, a.XdndProxy, AtomEnum::WINDOW, 0, 1)?.reply().ok().and_then(|r| r.value32().and_then(|mut v| v.next()));
-                if named == Some(proxy) {
-                    proxy
-                } else {
-                    target
-                }
-            }
-            _ => target,
-        };
         let Some(metadata) = source.metadata() else { return Ok(None) };
-        // The drag's types as X11 targets: text as UTF8_STRING.
+        if metadata.mime_types.is_empty() {
+            return Ok(None);
+        }
+        let aware = super::keep(self.conn.get_property(false, target, a.XdndAware, AtomEnum::ATOM, 0, 1)?);
+        let proxy = super::keep(self.conn.get_property(false, target, a.XdndProxy, AtomEnum::WINDOW, 0, 1)?);
+        // The drag's types as X11 targets (text as UTF8_STRING).
+        let names: Vec<String> = metadata.mime_types.iter().filter(|m| !is_utf8_text(m)).cloned().collect();
+        selections.intern_ahead(&names)?;
+        let action = [DndAction::Copy, DndAction::Move, DndAction::Ask].into_iter().find(|x| metadata.dnd_actions.contains(x)).unwrap_or(DndAction::Copy);
+        let state = Arc::new(Mutex::new(ToXState::default()));
+        self.serial += 1;
+        let serial = self.serial;
+        self.to_x = Some(ToX { source, target, to: target, state: state.clone(), action, dropped: false, serial, entered: false, motion: Some((win.clone(), at, x11rb::CURRENT_TIME)) });
+        self.later.push((
+            vec![aware, proxy],
+            Box::new(move |xwm, replies, _| {
+                let mut replies = replies.into_iter();
+                let version = parse::<x11rb::protocol::xproto::GetPropertyReply>(replies.next().flatten()).and_then(|r| r.value32().and_then(|mut v| v.next()));
+                let proxy = parse::<x11rb::protocol::xproto::GetPropertyReply>(replies.next().flatten()).and_then(|r| r.value32().and_then(|mut v| v.next())).filter(|p| *p != x11rb::NONE);
+                let Some(version) = version else { return Ok(()) };
+                let Some(proxy) = proxy else { return xwm.dnd.enter_known(serial, version, target, &mut xwm.selections) };
+                // Its XDND proxy, if that names itself as one (else not
+                // followed).
+                let named = super::keep(xwm.conn.get_property(false, proxy, xwm.atoms.XdndProxy, AtomEnum::WINDOW, 0, 1)?);
+                xwm.after(
+                    vec![named],
+                    Box::new(move |xwm, replies, _| {
+                        let named = parse::<x11rb::protocol::xproto::GetPropertyReply>(replies.into_iter().next().flatten()).and_then(|r| r.value32().and_then(|mut v| v.next()));
+                        let to = if named == Some(proxy) { proxy } else { target };
+                        xwm.dnd.enter_known(serial, version, to, &mut xwm.selections)
+                    }),
+                );
+                Ok(())
+            }),
+        ));
+        Ok(Some(XOffer(state)))
+    }
+
+    /// The window takes drops (XDND `version`), through `to`: XdndEnter,
+    /// then the newest motion.
+    fn enter_known(&mut self, serial: u64, version: u32, to: XId, selections: &mut Selections) -> Result<(), ReplyOrIdError> {
+        let a = self.atoms;
+        let Some(drag) = self.to_x.as_mut().filter(|d| d.serial == serial && !d.dropped) else { return Ok(()) };
+        let Some(metadata) = drag.source.metadata() else { return Ok(()) };
         let mut atoms: Vec<u32> = Vec::new();
         for mime in &metadata.mime_types {
-            let atom = if matches!(mime.as_str(), "text/plain;charset=utf-8" | "text/plain;charset=UTF-8" | "UTF8_STRING") {
-                a.UTF8_STRING
-            } else {
-                self.conn.intern_atom(false, mime.as_bytes())?.reply()?.atom
-            };
-            if !atoms.contains(&atom) {
+            let atom = if is_utf8_text(mime) { Some(a.UTF8_STRING) } else { selections.atom_of(mime) };
+            if let Some(atom) = atom.filter(|a| !atoms.contains(a)) {
                 atoms.push(atom);
             }
         }
         if atoms.is_empty() {
-            return Ok(None);
+            return Ok(());
         }
+        drag.to = to;
+        drag.entered = true;
+        let (target, source, motion) = (drag.target, drag.source.clone(), drag.motion.take());
+        let version = version.min(VERSION);
         self.conn.set_selection_owner(self.owner, a.XdndSelection, x11rb::CURRENT_TIME)?;
         if atoms.len() > 3 {
             self.conn.change_property32(PropMode::REPLACE, self.owner, a.XdndTypeList, AtomEnum::ATOM, &atoms)?;
@@ -538,24 +569,27 @@ impl Dnd {
             *slot = *atom;
         }
         let more = u32::from(atoms.len() > 3);
-        selections.dnd = Some(DndServe { owner: self.owner, types: metadata.mime_types.clone(), source: source.clone() });
-        let action = [DndAction::Copy, DndAction::Move, DndAction::Ask].into_iter().find(|x| metadata.dnd_actions.contains(x)).unwrap_or(DndAction::Copy);
-        let state = Arc::new(Mutex::new(ToXState::default()));
-        self.to_x = Some(ToX { source, target, to, state: state.clone(), action, dropped: false });
+        selections.dnd = Some(DndServe { owner: self.owner, types: metadata.mime_types.clone(), source });
         self.message(to, target, a.XdndEnter, [self.owner, (version << 24) | more, types[0], types[1], types[2]])?;
-        self.motion(win, at, x11rb::CURRENT_TIME);
-        Ok(Some(XOffer(state)))
+        if let Some((win, at, time)) = motion {
+            self.motion(&win, at, time);
+        }
+        Ok(())
     }
 
     /// The drag moved over `win`, to `at` on its surface (XdndPosition).
     pub fn motion(&mut self, win: &XWin, at: Point<f64, Logical>, time: u32) {
-        let Some(drag) = self.to_x.as_ref().filter(|d| d.target == win.window_id() && !d.dropped) else { return };
+        let Some(drag) = self.to_x.as_mut().filter(|d| d.target == win.window_id() && !d.dropped) else { return };
+        if !drag.entered {
+            drag.motion = Some((win.clone(), at, time));
+            return;
+        }
         let loc = win.last_configure().loc;
         let x = win.logical_to_x((f64::from(loc.x) + at.x).round() as i32);
         let y = win.logical_to_x((f64::from(loc.y) + at.y).round() as i32);
         let at = ((x as u32 & 0xffff) << 16) | (y as u32 & 0xffff);
-        let action = self.action_atom(drag.action);
-        let (to, target) = (drag.to, drag.target);
+        let (to, target, action) = (drag.to, drag.target, drag.action);
+        let action = self.action_atom(action);
         if let Err(err) = self.message(to, target, self.atoms.XdndPosition, [self.owner, 0, at, time, action]) {
             tracing::debug!(%err, "cannot move the drag over an X11 window");
         }
@@ -568,10 +602,12 @@ impl Dnd {
         if drag.dropped {
             return;
         }
-        let (to, target) = (drag.to, drag.target);
+        let (to, target, entered) = (drag.to, drag.target, drag.entered);
         self.to_x = None;
         selections.dnd = None;
-        let _ = self.message(to, target, self.atoms.XdndLeave, [self.owner, 0, 0, 0, 0]);
+        if entered {
+            let _ = self.message(to, target, self.atoms.XdndLeave, [self.owner, 0, 0, 0, 0]);
+        }
     }
 
     /// Dropped on the X11 window: XdndDrop if it takes it, else XdndLeave.
@@ -634,4 +670,26 @@ impl Dnd {
         }
         Ok(())
     }
+}
+
+/// X11 type atoms (with their names) as Wayland types (text as
+/// `text/plain`), with the atom each is asked for by.
+fn types_of(named: &[(u32, String)]) -> Vec<(String, u32)> {
+    let mut types: Vec<(String, u32)> = Vec::new();
+    for (atom, name) in named {
+        let mime = match name.as_str() {
+            "UTF8_STRING" => "text/plain;charset=utf-8".to_owned(),
+            "TEXT" | "STRING" => "text/plain".to_owned(),
+            n if n.contains('/') => name.clone(),
+            _ => continue,
+        };
+        if !types.iter().any(|(m, _)| *m == mime) {
+            types.push((mime, *atom));
+        }
+    }
+    types
+}
+
+fn is_utf8_text(mime: &str) -> bool {
+    matches!(mime, "text/plain;charset=utf-8" | "text/plain;charset=UTF-8" | "UTF8_STRING")
 }
