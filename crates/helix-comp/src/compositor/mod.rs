@@ -202,6 +202,9 @@ pub struct Helix {
     /// Helix's own X11 window manager, when chosen (`HELIX_XWM=helix`, #191).
     pub hxwm: Option<xwm::Xwm>,
     pub hxwm_source: Option<smithay::reexports::calloop::RegistrationToken>,
+    /// The X replies Helix's window manager waits for, from its reply
+    /// thread (#223).
+    pub hxwm_replies: Option<smithay::reexports::calloop::RegistrationToken>,
     /// A timer is set for a resize waiting on an X11 app's redraw (#191).
     pub hxwm_sync_timer: bool,
     /// The clipboard transfers' pipes Helix's window manager has watched,
@@ -399,6 +402,7 @@ impl Helix {
             xwm: None,
             hxwm: None,
             hxwm_source: None,
+            hxwm_replies: None,
             hxwm_sync_timer: false,
             hxwm_watches: std::collections::HashMap::new(),
             hxwm_selection_timer: false,

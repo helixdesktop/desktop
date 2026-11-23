@@ -248,7 +248,22 @@ impl Helix {
     fn start_helix_xwm(&mut self, socket: std::os::unix::net::UnixStream, client: smithay::reexports::wayland_server::Client) -> Result<(), String> {
         use smithay::reexports::calloop::generic::Generic;
         use smithay::reexports::calloop::{Interest, Mode, PostAction};
-        let (xwm, fd) = super::xwm::Xwm::start(socket, client).map_err(|e| e.to_string())?;
+        let (xwm, fd, replies) = super::xwm::Xwm::start(socket, client).map_err(|e| e.to_string())?;
+        // Replies come on their own thread; what waited for them runs here.
+        let replies = self
+            .loop_handle
+            .insert_source(replies, |event, _, state| {
+                if let smithay::reexports::calloop::channel::Event::Msg(reply) = event {
+                    let actions = state.hxwm.as_mut().map(|x| x.resolve(reply)).unwrap_or_default();
+                    for action in actions {
+                        state.helix_xwm_action(action);
+                    }
+                    // Events the reply thread read meanwhile.
+                    state.dispatch_helix_xwm();
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        self.hxwm_replies = Some(replies);
         // What an X11 app's drag source asks of the window manager.
         let (tx, rx) = smithay::reexports::calloop::channel::channel::<super::xwm::DragCmd>();
         self.loop_handle
@@ -320,6 +335,9 @@ impl Helix {
         self.xwm = None;
         self.hxwm = None;
         if let Some(token) = self.hxwm_source.take() {
+            self.loop_handle.remove(token);
+        }
+        if let Some(token) = self.hxwm_replies.take() {
             self.loop_handle.remove(token);
         }
         for (_, token) in self.hxwm_watches.drain() {
@@ -725,16 +743,23 @@ impl Helix {
                     return;
                 }
             };
-            if events.is_empty() {
-                return;
-            }
-            for event in events {
-                let actions = self.hxwm.as_mut().map(|x| x.handle(event)).unwrap_or_default();
+            let more = !events.is_empty();
+            let mut events = events;
+            // Each event's requests answered before the next is handled
+            // (and events waiting behind replies that came go on).
+            loop {
+                let actions = self.hxwm.as_mut().map(|x| x.handle(std::mem::take(&mut events))).unwrap_or_default();
+                if actions.is_empty() {
+                    break;
+                }
                 for action in actions {
                     self.helix_xwm_action(action);
                 }
             }
             self.helix_xwm_selection_timer();
+            if !more {
+                return;
+            }
         }
     }
 
