@@ -118,7 +118,7 @@ Apps are the ones the upstream reports name.
 | X55 | S21, W41 | `WM_CLASS` instance then class; short or unterminated values | | `x11_shell::the_class_names_the_app` |
 | X56 | W8 | Properties set before mapping are there at first show | | `x11_shell::properties_set_before_mapping_show_at_once` |
 | X87 | S23, W42 | `_NET_WM_WINDOW_OPACITY` | xwaylandvideobridge | not applicable: Helix doesn't apply X11 window opacity |
-| X88 | W29 | Struts and `_NET_WORKAREA` | X11 panels | not applicable: Helix doesn't honor X11 struts |
+| X88 | W29 | Struts and `_NET_WORKAREA` | X11 panels; Qt, Java and Wine read the work area | X11 struts: not applicable (Helix doesn't honor them). `_NET_WORKAREA` published from Helix's own panels (#227): `x11_ewmh::the_work_area_follows_the_panels`, `x11_ewmh::the_desktop_is_described_to_apps` |
 | X89 | W46 | Startup notification (`_NET_STARTUP_ID`, `_NET_STARTUP_INFO`) | | not applicable: Helix doesn't read X11 startup notification |
 
 ## `_NET_WM_STATE` and the WM's identity

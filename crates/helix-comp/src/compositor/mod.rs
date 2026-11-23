@@ -60,6 +60,7 @@ mod placement_tests;
 mod xwayland;
 pub mod xwm;
 mod xsettings;
+mod x11_ewmh;
 mod input_capture;
 
 use std::ffi::OsString;

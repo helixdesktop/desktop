@@ -118,6 +118,24 @@ pub enum Action {
     Resize(XWin, u32),
     /// `_NET_CLOSE_WINDOW`.
     Close(XWin),
+    /// `_NET_WM_MOVERESIZE` with the keyboard (EWMH 9, 10): moved or
+    /// resized with the keys, as Move and Resize in the window menu.
+    KeyboardMove(XWin),
+    KeyboardResize(XWin),
+    /// `_NET_WM_MOVERESIZE` cancel (EWMH 11): a move or resize of this
+    /// window going on ends.
+    CancelMoveResize(XWin),
+    /// `_NET_REQUEST_FRAME_EXTENTS`: the window (not shown yet) wants
+    /// `_NET_FRAME_EXTENTS` set as it would be ([`XWin::set_frame_extents`]).
+    RequestFrameExtents(XWin),
+    /// Its `_MOTIF_WM_HINTS` or window type changed after it was shown:
+    /// whether Helix draws its title bar may have changed.
+    DecorationsChanged(XWin),
+    /// `_NET_CURRENT_DESKTOP`: a pager asks for this workspace.
+    SwitchDesktop(u32),
+    /// `_NET_WM_DESKTOP`: the window asks to go to this workspace
+    /// (`u32::MAX`: all of them).
+    MoveToDesktop(XWin, u32),
     /// An X11 app owns the selection now, with these (Wayland) types.
     SelectionOffered(smithay::wayland::selection::SelectionTarget, Vec<String>),
     /// The X11 app owning the selection let it go (or went away).
@@ -169,6 +187,9 @@ pub struct Xwm {
     next_token: u64,
     /// X events handled after the pending replies, in order.
     queued: VecDeque<Event>,
+    /// What the root's work area and desktop properties say now (written
+    /// again only when they change).
+    published: (Vec<u32>, Vec<u32>, [u32; 4]),
 }
 
 impl std::fmt::Debug for Xwm {
@@ -257,11 +278,36 @@ impl Xwm {
             atoms._NET_WM_SYNC_REQUEST,
             atoms._NET_WM_SYNC_REQUEST_COUNTER,
             atoms._NET_WM_STATE_DEMANDS_ATTENTION,
+            atoms._NET_WORKAREA,
+            atoms._NET_DESKTOP_GEOMETRY,
+            atoms._NET_DESKTOP_VIEWPORT,
+            atoms._NET_NUMBER_OF_DESKTOPS,
+            atoms._NET_CURRENT_DESKTOP,
+            atoms._NET_WM_DESKTOP,
+            atoms._NET_REQUEST_FRAME_EXTENTS,
+            atoms._NET_WM_ALLOWED_ACTIONS,
+            atoms._NET_WM_ACTION_MOVE,
+            atoms._NET_WM_ACTION_RESIZE,
+            atoms._NET_WM_ACTION_MINIMIZE,
+            atoms._NET_WM_ACTION_MAXIMIZE_HORZ,
+            atoms._NET_WM_ACTION_MAXIMIZE_VERT,
+            atoms._NET_WM_ACTION_FULLSCREEN,
+            atoms._NET_WM_ACTION_CLOSE,
+            atoms._NET_WM_ACTION_ABOVE,
+            atoms._NET_WM_ACTION_CHANGE_DESKTOP,
         ];
         conn.change_property32(PropMode::REPLACE, root, atoms._NET_SUPPORTED, AtomEnum::ATOM, &supported)?;
         conn.change_property32(PropMode::REPLACE, root, atoms._NET_CLIENT_LIST, AtomEnum::WINDOW, &[])?;
         conn.change_property32(PropMode::REPLACE, root, atoms._NET_CLIENT_LIST_STACKING, AtomEnum::WINDOW, &[])?;
         conn.change_property32(PropMode::REPLACE, root, atoms._NET_ACTIVE_WINDOW, AtomEnum::WINDOW, &[x11rb::NONE])?;
+        // One workspace covering the screen until the compositor says
+        // otherwise ([`Xwm::set_work_area`], [`Xwm::set_desktops`]).
+        let (sw, sh) = (u32::from(screen.width_in_pixels), u32::from(screen.height_in_pixels));
+        conn.change_property32(PropMode::REPLACE, root, atoms._NET_NUMBER_OF_DESKTOPS, AtomEnum::CARDINAL, &[1])?;
+        conn.change_property32(PropMode::REPLACE, root, atoms._NET_CURRENT_DESKTOP, AtomEnum::CARDINAL, &[0])?;
+        conn.change_property32(PropMode::REPLACE, root, atoms._NET_DESKTOP_GEOMETRY, AtomEnum::CARDINAL, &[sw, sh])?;
+        conn.change_property32(PropMode::REPLACE, root, atoms._NET_DESKTOP_VIEWPORT, AtomEnum::CARDINAL, &[0, 0])?;
+        conn.change_property32(PropMode::REPLACE, root, atoms._NET_WORKAREA, AtomEnum::CARDINAL, &[0, 0, sw, sh])?;
 
         let argb_format = {
             use x11rb::protocol::render::{ConnectionExt as _, PictType};
@@ -317,6 +363,7 @@ impl Xwm {
             pending: HashMap::new(),
             next_token: 0,
             queued: VecDeque::new(),
+            published: (Vec::new(), Vec::new(), [0; 4]),
         };
         // Windows made before the window manager started.
         let conn = xwm.conn.clone();
@@ -567,6 +614,8 @@ impl Xwm {
                         }
                         if atom == xwm.atoms.WM_HINTS {
                             actions.push(Action::HintsChanged(win));
+                        } else if (atom == xwm.atoms._MOTIF_WM_HINTS || atom == xwm.atoms._NET_WM_WINDOW_TYPE) && win.state().managed {
+                            actions.push(Action::DecorationsChanged(win));
                         }
                         Ok(())
                     }),
@@ -725,6 +774,19 @@ impl Xwm {
             self.conn.change_property32(PropMode::REPLACE, id, self.atoms.WM_STATE, self.atoms.WM_STATE, &[1, x11rb::NONE])?;
             let states: Vec<u32> = win.state().net_state.iter().copied().collect();
             self.conn.change_property32(PropMode::REPLACE, id, self.atoms._NET_WM_STATE, AtomEnum::ATOM, &states)?;
+            let a = &self.atoms;
+            let allowed = [
+                a._NET_WM_ACTION_MOVE,
+                a._NET_WM_ACTION_RESIZE,
+                a._NET_WM_ACTION_MINIMIZE,
+                a._NET_WM_ACTION_MAXIMIZE_HORZ,
+                a._NET_WM_ACTION_MAXIMIZE_VERT,
+                a._NET_WM_ACTION_FULLSCREEN,
+                a._NET_WM_ACTION_CLOSE,
+                a._NET_WM_ACTION_ABOVE,
+                a._NET_WM_ACTION_CHANGE_DESKTOP,
+            ];
+            self.conn.change_property32(PropMode::REPLACE, id, a._NET_WM_ALLOWED_ACTIONS, AtomEnum::ATOM, &allowed)?;
             self.conn.map_window(id)?;
             if !self.client_list.contains(&id) {
                 self.client_list.push(id);
@@ -748,6 +810,8 @@ impl Xwm {
             // Xwayland makes a new surface (and serial) when it is shown again.
             state.wl_surface = None;
             state.serial = None;
+            // Written again when it is shown again.
+            state.desktop = None;
             was
         };
         if managed {
@@ -851,8 +915,12 @@ impl Xwm {
 
     fn client_message(&mut self, e: x11rb::protocol::xproto::ClientMessageEvent, actions: &mut Vec<Action>) -> Result<(), ReplyOrIdError> {
         let a = self.atoms;
-        let Some(win) = self.windows.get(&e.window).cloned() else { return Ok(()) };
         let data = e.data.as_data32();
+        if e.window == self.root && e.type_ == a._NET_CURRENT_DESKTOP {
+            actions.push(Action::SwitchDesktop(data[0]));
+            return Ok(());
+        }
+        let Some(win) = self.windows.get(&e.window).cloned() else { return Ok(()) };
         if e.type_ == a.WL_SURFACE_SERIAL {
             let serial = u64::from(data[0]) | (u64::from(data[1]) << 32);
             self.window_serial(&win, serial, actions);
@@ -905,16 +973,38 @@ impl Xwm {
                 actions.push(Action::Minimize(win));
             }
         } else if e.type_ == a._NET_WM_MOVERESIZE {
-            // EWMH directions: 0 top-left … 7 left, 8 move; keyboard ones and
-            // cancel (9–11) are not taken.
+            // EWMH directions: 0 top-left … 7 left, 8 move, 9 resize and 10
+            // move with the keyboard, 11 cancel.
             let edges = [5, 1, 9, 8, 10, 2, 6, 4];
             match data[2] {
                 8 => actions.push(Action::Move(win)),
                 d @ 0..=7 => actions.push(Action::Resize(win, edges[d as usize])),
+                9 => actions.push(Action::KeyboardResize(win)),
+                10 => actions.push(Action::KeyboardMove(win)),
+                11 => actions.push(Action::CancelMoveResize(win)),
                 _ => {}
             }
         } else if e.type_ == a._NET_CLOSE_WINDOW {
             actions.push(Action::Close(win));
+        } else if e.type_ == a._NET_REQUEST_FRAME_EXTENTS {
+            if win.state().managed {
+                actions.push(Action::RequestFrameExtents(win));
+            } else {
+                // Not shown yet: what it is (its type, Motif hints) decides
+                // whether Helix will draw its title bar.
+                let asked = props::request_all(&self.conn, &self.atoms, win.window_id())?;
+                let (atoms, seqs): (Vec<u32>, Vec<SequenceNumber>) = asked.into_iter().unzip();
+                self.after(
+                    seqs,
+                    Box::new(move |xwm, replies, actions| {
+                        props::apply_all(&xwm.atoms, &win, &atoms, replies);
+                        actions.push(Action::RequestFrameExtents(win));
+                        Ok(())
+                    }),
+                );
+            }
+        } else if e.type_ == a._NET_WM_DESKTOP && win.state().managed {
+            actions.push(Action::MoveToDesktop(win, data[0]));
         }
         Ok(())
     }
@@ -1033,6 +1123,53 @@ impl Xwm {
 
     pub fn windows(&self) -> impl Iterator<Item = &XWin> {
         self.windows.values()
+    }
+
+    /// Xwayland's scale: X11 pixels per Helix logical pixel.
+    fn scale(&self) -> f64 {
+        window::client_scale(Some(&self.client))
+    }
+
+    fn rect_to_x(&self, r: Rectangle<i32, Logical>) -> [u32; 4] {
+        let s = self.scale();
+        let x = |v: i32| (f64::from(v) * s).round().max(0.0) as u32;
+        [x(r.loc.x), x(r.loc.y), x(r.size.w), x(r.size.h)]
+    }
+
+    /// The area apps may cover (EWMH `_NET_WORKAREA`, for each workspace,
+    /// and GTK's `_GTK_WORKAREAS_D0`, for each monitor): Qt's
+    /// `availableGeometry`, Java's screen insets and Wine's work area are
+    /// read from it. `area` spans the monitors' areas; `areas` are each
+    /// monitor's (logical coordinates).
+    pub fn set_work_area(&mut self, area: Rectangle<i32, Logical>, areas: &[Rectangle<i32, Logical>], desktops: u32) -> Result<(), ConnectionError> {
+        let one = self.rect_to_x(area);
+        let all: Vec<u32> = (0..desktops.max(1)).flat_map(|_| one).collect();
+        let each: Vec<u32> = areas.iter().flat_map(|r| self.rect_to_x(*r)).collect();
+        if self.published.0 == all && self.published.1 == each {
+            return Ok(());
+        }
+        self.conn.change_property32(PropMode::REPLACE, self.root, self.atoms._NET_WORKAREA, AtomEnum::CARDINAL, &all)?;
+        self.conn.change_property32(PropMode::REPLACE, self.root, self.atoms._GTK_WORKAREAS_D0, AtomEnum::CARDINAL, &each)?;
+        self.published.0 = all;
+        self.published.1 = each;
+        self.conn.flush()
+    }
+
+    /// The workspaces (EWMH desktops): how many, and which is shown.
+    pub fn set_desktops(&mut self, count: u32, current: u32, screen: Rectangle<i32, Logical>) -> Result<(), ConnectionError> {
+        let [_, _, w, h] = self.rect_to_x(screen);
+        let count = count.max(1);
+        let current = current.min(count - 1);
+        if self.published.2 == [count, current, w, h] {
+            return Ok(());
+        }
+        self.published.2 = [count, current, w, h];
+        self.conn.change_property32(PropMode::REPLACE, self.root, self.atoms._NET_NUMBER_OF_DESKTOPS, AtomEnum::CARDINAL, &[count])?;
+        self.conn.change_property32(PropMode::REPLACE, self.root, self.atoms._NET_CURRENT_DESKTOP, AtomEnum::CARDINAL, &[current])?;
+        self.conn.change_property32(PropMode::REPLACE, self.root, self.atoms._NET_DESKTOP_GEOMETRY, AtomEnum::CARDINAL, &[w, h])?;
+        let viewports: Vec<u32> = (0..count).flat_map(|_| [0, 0]).collect();
+        self.conn.change_property32(PropMode::REPLACE, self.root, self.atoms._NET_DESKTOP_VIEWPORT, AtomEnum::CARDINAL, &viewports)?;
+        self.conn.flush()
     }
 
     /// A Wayland copy (its types), or none, for `selection`.

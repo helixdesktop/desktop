@@ -116,6 +116,7 @@ impl Helix {
         for window in back {
             self.unpark(&window);
         }
+        self.publish_x11_desktop();
     }
 
     /// New settings.
