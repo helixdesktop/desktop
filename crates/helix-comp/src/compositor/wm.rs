@@ -305,7 +305,8 @@ impl Helix {
             Some(entry) => entry.2 = kind,
             None => {
                 let location = self.space.element_location(window).unwrap_or_default();
-                let size = window.geometry().size;
+                // An X11 window's size as last asked for, not as last drawn.
+                let size = window.x11_surface().map_or_else(|| window.geometry().size, |x11| x11.requested_size());
                 self.restore.push((window.clone(), Rectangle::new(location, size), kind));
             }
         }
