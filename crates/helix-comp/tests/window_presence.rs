@@ -121,3 +121,46 @@ fn unplugging_leaves_the_first_monitor() {
     let (x0, _) = x.position(window);
     assert!(x0 >= 0 && (x0 as u16) < SCREEN.0, "a new window opened off the monitor left: {x0}");
 }
+
+/// An X11 window on another workspace, put there through the shell.
+fn parked_x11_window(title: &str) -> Option<(helix_test_support::headless::HeadlessSession, common::xwm::Shell, X, x11rb::protocol::xproto::Window, u32)> {
+    let (session, mut shell) = session_with_shell(&format!("presence-{title}"))?;
+    let x = X::new(&session);
+    let window = x.mapped_titled(title);
+    let id = shell.window(title).id;
+    shell.move_window(id, 1);
+    shell.until("the window was not moved to the second workspace", |s| s.windows.iter().any(|w| w.title == title));
+    Some((session, shell, x, window, id))
+}
+
+/// An X11 window withdrawn while on another workspace is forgotten (it
+/// used to stay listed, and come back as a ghost on that workspace).
+#[test]
+fn an_x11_window_withdrawn_on_another_workspace_is_forgotten() {
+    let Some((_session, mut shell, x, window, _)) = parked_x11_window("withdrawn") else { return };
+    x.withdraw(window);
+    shell.until("the window withdrawn on another workspace is still listed", |s| !s.windows.iter().any(|w| w.title == "withdrawn"));
+    shell.switch_workspace(1);
+    assert_eq!(shell.listed("withdrawn"), 0, "the withdrawn window came back on its workspace");
+    // Shown again by the app: one window.
+    x.map_managed(window);
+    shell.until("the window shown again is not listed once", |s| s.windows.iter().filter(|w| w.title == "withdrawn").count() == 1);
+}
+
+/// The same when the app destroys it.
+#[test]
+fn an_x11_window_destroyed_on_another_workspace_is_forgotten() {
+    let Some((_session, mut shell, x, window, _)) = parked_x11_window("destroyed") else { return };
+    x.conn.destroy_window(window).unwrap();
+    x.flush();
+    shell.until("the window destroyed on another workspace is still listed", |s| !s.windows.iter().any(|w| w.title == "destroyed"));
+}
+
+/// A pager asking to activate an X11 window on another workspace
+/// (`wmctrl -a`) shows it there (the request used to be dropped).
+#[test]
+fn an_x11_window_on_another_workspace_can_be_activated() {
+    let Some((_session, mut shell, x, window, id)) = parked_x11_window("activated") else { return };
+    x.activate(window, 2, x11rb::NONE);
+    shell.until("the window on another workspace was not activated", |s| s.focused == Some(id));
+}
