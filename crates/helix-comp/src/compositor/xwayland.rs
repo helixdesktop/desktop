@@ -426,13 +426,19 @@ impl Helix {
         // Covering a monitor exactly, undecorated: borderless full screen.
         let legacy = if kind == X11Kind::App && !x11.is_fullscreen() { self.legacy_fullscreen_output(&x11, x11.last_configure()) } else { None };
         let taken_over = kind == X11Kind::App && (x11.is_fullscreen() || x11.is_maximized() || legacy.is_some());
-        if !taken_over && !self.x11_show(&x11) {
-            return;
-        }
+        // Every window is mapped on the X server (and gets `WM_STATE`
+        // Normal) only once it is where Helix puts it: an app that reads
+        // its position when it is shown (Wine, Java) or when `WM_STATE`
+        // says it is managed gets that, not where it was created (#278).
         x11.set_frame_extents(super::frames::frame_top(&window));
         self.publish_x11_desktop();
         if kind != X11Kind::App {
             self.map_unfocused_x11(&window, &x11, kind);
+            if self.x11_show(&x11) {
+                self.sync_x11_stack();
+            } else {
+                self.forget_window(&window);
+            }
             return;
         }
         let size = x11.last_configure().size;
@@ -462,13 +468,15 @@ impl Helix {
         } else if x11.is_maximized() {
             self.maximize(&window);
         }
-        if taken_over && !self.x11_show(&x11) {
-            self.forget_window(&window);
-            return;
-        }
         if !user_placed {
             self.place_new_window(&window);
         }
+        if !self.x11_show(&x11) {
+            self.forget_window(&window);
+            return;
+        }
+        // Mapped on top of the X stack: stacked as Helix shows it.
+        self.sync_x11_stack();
         if x11.is_above() {
             self.set_above(&window, true);
         }

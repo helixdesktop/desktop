@@ -21,7 +21,7 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use common::xdnd::{expect, glide, point_in_not, session, xdnd_source, xdnd_source_with, xdnd_target_app, xdnd_target_with, message, message_as, Source, SourceSaw, Target, TargetSaw, X11, BTN_LEFT, DATA, XDND_VERSION};
+use common::xdnd::{drop_window_up, expect, glide, point_in_not, pointer_at, session, xdnd_source, xdnd_source_with, xdnd_target_app, xdnd_target_with, message, message_as, Source, SourceSaw, Target, TargetSaw, X11, BTN_LEFT, DATA, XDND_VERSION};
 use helix_test_support::headless::HeadlessSession;
 use wayland_client::protocol::wl_data_device_manager::DndAction;
 use x11rb::connection::Connection;
@@ -40,12 +40,10 @@ fn an_x11_app_drags_onto_a_wayland_window() {
     // Over the Wayland window where the X11 one doesn't cover it.
     let over_app = common::point_over(&mut session, &mut app, &surface, (800, 600));
     let start = point_in_not(x_rect, None);
+    pointer_at(&mut session, &x.conn, x.window, start, "the X11 window never had the pointer");
     let saw = xdnd_source(x);
 
-    session.input(&format!("move {} {}", start.0, start.1));
-    std::thread::sleep(Duration::from_millis(200));
-    session.input(&format!("button {BTN_LEFT} 1"));
-    std::thread::sleep(Duration::from_millis(300));
+    press_to_drag(&mut session, start);
     glide(&mut session, start, over_app);
 
     expect(&saw, |s| matches!(s, SourceSaw::Target(_)), "the X11 drag never found a target over the Wayland window");
@@ -90,11 +88,9 @@ fn an_x11_drag_after_a_cancelled_wayland_drag_works() {
     // Over the Wayland window where the X11 one doesn't cover it.
     let over_app = common::point_over(&mut session, &mut app, &surface, (800, 600));
     let from = point_in_not(x_rect, None);
+    pointer_at(&mut session, &x.conn, x.window, from, "the X11 window never had the pointer after a cancelled Wayland drag");
     let saw = xdnd_source(x);
-    session.input(&format!("move {} {}", from.0, from.1));
-    std::thread::sleep(Duration::from_millis(200));
-    session.input(&format!("button {BTN_LEFT} 1"));
-    std::thread::sleep(Duration::from_millis(300));
+    press_to_drag(&mut session, from);
     glide(&mut session, from, over_app);
     expect(&saw, |s| matches!(s, SourceSaw::Target(_)), "the X11 drag after a cancelled Wayland drag never found a target");
     app.until("the Wayland window was never offered the X11 drag", |s| s.dnd.is_some());
@@ -132,8 +128,7 @@ fn a_wayland_app_drags_onto_an_x11_window() {
     glide(&mut session, start, over_x);
 
     expect(&saw, |s| matches!(s, TargetSaw::Entered(..)), "the X11 window never got XdndEnter");
-    session.input(&format!("move {} {}", over_x.0 + 1, over_x.1 + 1));
-    std::thread::sleep(Duration::from_millis(200));
+    until_taken(&mut session, &mut app, over_x, "the X11 window never took the drag");
     session.input(&format!("button {BTN_LEFT} 0"));
     // The Wayland source serves the data while the X11 app fetches it.
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -162,16 +157,13 @@ fn an_x11_app_drags_onto_another_x11_window() {
     let start = point_in_not(source_rect, Some(target_rect));
     let over_target = point_in_not(target_rect, Some(source_rect));
     let target_window = target.window;
-    // The pointer over each first, so Xwayland knows where they are.
-    session.input(&format!("move {} {}", over_target.0, over_target.1));
-    std::thread::sleep(Duration::from_millis(200));
+    // The pointer over each first: each is shown where the test thinks.
+    pointer_at(&mut session, &target.conn, target.window, over_target, "the X11 target never had the pointer");
+    pointer_at(&mut session, &source.conn, source.window, start, "the X11 source never had the pointer");
     let saw = xdnd_source(source);
     let got = xdnd_target_app(target);
 
-    session.input(&format!("move {} {}", start.0, start.1));
-    std::thread::sleep(Duration::from_millis(200));
-    session.input(&format!("button {BTN_LEFT} 1"));
-    std::thread::sleep(Duration::from_millis(300));
+    press_to_drag(&mut session, start);
     glide(&mut session, start, over_target);
 
     // Smithay's drop proxy covers the screen until the drag is over an
@@ -180,7 +172,7 @@ fn an_x11_app_drags_onto_another_x11_window() {
     expect(&saw, |s| *s == SourceSaw::Target(target_window), "the X11 drag never found the X11 window (only Smithay's drop proxy?)");
     expect(&got, |s| matches!(s, TargetSaw::Entered(..)), "the X11 target never got XdndEnter");
     session.input(&format!("move {} {}", over_target.0 + 1, over_target.1 + 1));
-    std::thread::sleep(Duration::from_millis(200));
+    expect(&saw, |s| matches!(s, SourceSaw::Accepted(_)), "the X11 source never heard the X11 target take the drag");
     session.input(&format!("button {BTN_LEFT} 0"));
     assert_eq!(expect(&got, |s| matches!(s, TargetSaw::Dropped(_)), "the X11 target was never dropped on"), TargetSaw::Dropped(DATA.to_vec()));
     expect(&saw, |s| matches!(s, SourceSaw::Finished(..)), "the X11 source never heard the drop finished");
@@ -210,12 +202,10 @@ fn x11_drag_to_wayland(session: &mut HeadlessSession, make: impl FnOnce(&Headles
     let x_rect = x.rect();
     let over_app = common::point_over(session, &mut app, &surface, (800, 600));
     let start = point_in_not(x_rect, None);
+    pointer_at(session, &x.conn, x.window, start, "the X11 window never had the pointer");
     let saw = xdnd_source_with(x, how);
 
-    session.input(&format!("move {} {}", start.0, start.1));
-    std::thread::sleep(Duration::from_millis(200));
-    session.input(&format!("button {BTN_LEFT} 1"));
-    std::thread::sleep(Duration::from_millis(300));
+    press_to_drag(session, start);
     glide(session, start, over_app);
     let SourceSaw::Target(target) = expect(&saw, |s| matches!(s, SourceSaw::Target(_)), "the X11 drag never found a target over the Wayland window") else { unreachable!() };
     app.until("the Wayland window was never offered the drag", |s| s.dnd.is_some());
@@ -269,6 +259,23 @@ fn begin_wayland_drag(session: &mut HeadlessSession, app: &mut common::Client, s
     app.until("the Wayland window never got the press", |s| s.press.is_some());
     let press = app.state.press.unwrap();
     app.drag_types(types, surface, press);
+}
+
+/// Press on an X11 app's window at `at` (where it has the pointer), and
+/// wait until the window manager carries the drag it starts.
+fn press_to_drag(session: &mut HeadlessSession, at: (i32, i32)) {
+    session.input(&format!("button {BTN_LEFT} 1"));
+    drop_window_up(session, at, "the X11 app's drag never started (the window manager's drop window never came up)");
+}
+
+/// One more move over the X11 drop target (at `at`), and wait until it
+/// answers that it takes the Wayland app's drag (XdndStatus: the source
+/// hears the action chosen). A drop now lands there.
+fn until_taken(session: &mut HeadlessSession, app: &mut common::Client, at: (i32, i32), what: &str) {
+    app.roundtrip();
+    app.state.source_action = None;
+    session.input(&format!("move {} {}", at.0 + 1, at.1 + 1));
+    app.until(what, |s| s.source_action == Some(DndAction::Copy));
 }
 
 /// Wait for what an X11 target reports while the Wayland app serves.
@@ -386,8 +393,7 @@ fn xdnd_proxy(proper: bool) {
     let (gets, other, which) = if proper { (&at_proxy, &at_target, "proxy") } else { (&at_target, &at_proxy, "target itself") };
     let entered = served(&mut app, gets, |s| matches!(s, TargetSaw::Entered(..)), &format!("the {which} never got XdndEnter"));
     assert!(matches!(entered, TargetSaw::Entered(w, _) if w == t), "XdndEnter names {entered:?}, not the target {t:#x}");
-    session.input(&format!("move {} {}", over_x.0 + 1, over_x.1 + 1));
-    std::thread::sleep(Duration::from_millis(200));
+    until_taken(&mut session, &mut app, over_x, &format!("the {which} never took the drag"));
     session.input(&format!("button {BTN_LEFT} 0"));
     let got = served(&mut app, gets, |s| matches!(s, TargetSaw::Dropped(_)), &format!("the {which} was never dropped on"));
     assert_eq!(got, TargetSaw::Dropped(DATA.to_vec()));
@@ -442,13 +448,11 @@ fn a_drag_icon_under_the_pointer_is_not_the_target() {
     let menu_app = X11::unmapped(&session, (1, 1), false);
     let menu = menu_app.conn.generate_id().unwrap();
     let (mx, my) = (d.over_app.0 - 30, d.over_app.1 - 30);
-    let aux = CreateWindowAux::new().override_redirect(1).background_pixel(0).event_mask(EventMask::BUTTON_PRESS | EventMask::STRUCTURE_NOTIFY);
+    let aux = CreateWindowAux::new().override_redirect(1).background_pixel(0).event_mask(EventMask::BUTTON_PRESS | EventMask::STRUCTURE_NOTIFY | EventMask::ENTER_WINDOW | EventMask::POINTER_MOTION);
     menu_app.conn.create_window(0, menu, menu_app.root, mx as i16, my as i16, 60, 60, 0, WindowClass::INPUT_OUTPUT, 0, &aux).unwrap();
     menu_app.conn.map_window(menu).unwrap();
     menu_app.conn.flush().unwrap();
-    std::thread::sleep(Duration::from_millis(300));
-    session.input(&format!("move {} {}", mx + 30, my + 30));
-    std::thread::sleep(Duration::from_millis(100));
+    pointer_at(&mut session, &menu_app.conn, menu, (mx + 30, my + 30), "the menu never had the pointer after the drag");
     session.input(&format!("button {BTN_LEFT} 1"));
     session.input(&format!("button {BTN_LEFT} 0"));
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -489,8 +493,7 @@ fn a_wayland_drag_goes_from_one_x11_window_to_another() {
     assert_eq!(app.state.source_ended, None, "the Wayland drag ended when it left the X11 window");
     glide(&mut session, start, over_b);
     served(&mut app, &at_b, |s| matches!(s, TargetSaw::Entered(..)), "the second X11 window never got XdndEnter");
-    session.input(&format!("move {} {}", over_b.0 + 1, over_b.1 + 1));
-    std::thread::sleep(Duration::from_millis(200));
+    until_taken(&mut session, &mut app, over_b, "the second X11 window never took the drag");
     session.input(&format!("button {BTN_LEFT} 0"));
     let got = served(&mut app, &at_b, |s| matches!(s, TargetSaw::Dropped(_)), "the second X11 window was never dropped on");
     assert_eq!(got, TargetSaw::Dropped(DATA.to_vec()));
@@ -513,8 +516,7 @@ fn wayland_drop_on_x11(session: &mut HeadlessSession, how: Target, types: &[(&st
     begin_wayland_drag(session, &mut app, &surface, start, types);
     glide(session, start, over_x);
     served(&mut app, &saw, |s| matches!(s, TargetSaw::Entered(..)), "the X11 window never got XdndEnter");
-    session.input(&format!("move {} {}", over_x.0 + 1, over_x.1 + 1));
-    std::thread::sleep(Duration::from_millis(200));
+    until_taken(session, &mut app, over_x, "the X11 window never took the drag");
     session.input(&format!("button {BTN_LEFT} 0"));
     (saw, conn, window, app)
 }
@@ -602,8 +604,7 @@ fn an_xdnd4_target_finishing_takes_the_drop() {
     begin_wayland_drag(&mut session, &mut app, &surface, start, &[("text/plain;charset=utf-8", DATA)]);
     glide(&mut session, start, over_x);
     served(&mut app, &saw, |s| matches!(s, TargetSaw::Entered(..)), "the X11 window never got XdndEnter");
-    session.input(&format!("move {} {}", over_x.0 + 1, over_x.1 + 1));
-    std::thread::sleep(Duration::from_millis(200));
+    until_taken(&mut session, &mut app, over_x, "the X11 window never took the drag");
     session.input(&format!("button {BTN_LEFT} 0"));
     let TargetSaw::Drop(source, _) = served(&mut app, &saw, |s| matches!(s, TargetSaw::Drop(..)), "the X11 window never got XdndDrop") else { unreachable!() };
     let finished = conn.intern_atom(false, b"XdndFinished").unwrap().reply().unwrap().atom;
