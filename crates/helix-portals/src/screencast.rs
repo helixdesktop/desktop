@@ -230,6 +230,26 @@ pub(crate) async fn end(conn: &Connection, shared: &Shared, path: &OwnedObjectPa
     tracing::info!(%path, app_id = cast.app_id, "screen cast ended");
 }
 
+/// The portal session is still there (the frontend's `Close` removes it,
+/// possibly while `Start` is still asking or starting: #241).
+fn open(shared: &Shared, session: &OwnedObjectPath) -> bool {
+    lock(shared).sessions.contains_key(session)
+}
+
+/// Stop a compositor screen cast session nothing owns any more.
+async fn stop_cast(conn: &Connection, mutter: &OwnedObjectPath) {
+    let _ = conn.call_method(Some(MUTTER), mutter.as_str(), Some("org.gnome.Mutter.ScreenCast.Session"), "Stop", &()).await;
+}
+
+/// Stop a compositor remote desktop session nothing owns any more.
+async fn stop_remote(conn: &Connection, remote: &OwnedObjectPath) {
+    let _ = conn.call_method(Some(REMOTE), remote.as_str(), Some("org.gnome.Mutter.RemoteDesktop.Session"), "Stop", &()).await;
+}
+
+fn closed_meanwhile() -> zbus::Error {
+    zbus::Error::Failure("the portal session was closed while starting".into())
+}
+
 /// Monitors that are on: (identity, display name), from DisplayConfig.
 async fn monitors(conn: &Connection) -> zbus::Result<Vec<(MonitorId, String)>> {
     type Spec = (String, String, String, String);
@@ -366,6 +386,11 @@ pub(crate) async fn start(conn: &Connection, shared: &Shared, session: &OwnedObj
             }
         }
     };
+    // Closed while the user was asked: nothing to start.
+    if !open(shared, session) {
+        tracing::info!(%session, "screen cast session closed before it started");
+        return (response::OTHER, Results::new());
+    }
     // What to remember for next time.
     let remembered = if persist_mode == 0 {
         None
@@ -452,8 +477,17 @@ async fn record(
         .call_method(Some(MUTTER), MUTTER_PATH, Some("org.gnome.Mutter.ScreenCast"), "CreateSession", &(create,))
         .await?;
     let mutter: OwnedObjectPath = reply.body().deserialize()?;
-    if let Some(cast) = lock(shared).sessions.get_mut(session) {
-        cast.mutter = Some(mutter.clone());
+    let ours = match lock(shared).sessions.get_mut(session) {
+        Some(cast) => {
+            cast.mutter = Some(mutter.clone());
+            true
+        }
+        None => false,
+    };
+    // Closed meanwhile: nothing would ever stop this recording.
+    if !ours {
+        stop_cast(conn, &mutter).await;
+        return Err(closed_meanwhile());
     }
     let mutter_cursor = match cursor_mode {
         CURSOR_EMBEDDED => 1u32,
@@ -523,6 +557,12 @@ async fn record(
         nodes.push((node, stream));
         out.push((node, props));
     }
+    // Closed while it started (`end` stops what it knew of, but may have
+    // run before the session was recorded in it).
+    if !open(shared, session) {
+        stop_cast(conn, &mutter).await;
+        return Err(closed_meanwhile());
+    }
     {
         let (conn, shared, session) = (conn.clone(), shared.clone(), session.clone());
         tokio::spawn(async move {
@@ -559,9 +599,17 @@ async fn start_remote(
         .await?
         .get_property("SessionId")
         .await?;
-    if let Some(r) = lock(shared).sessions.get_mut(session).and_then(|c| c.remote.as_mut()) {
-        r.mutter = Some(remote.clone());
-        r.granted = devices;
+    let ours = match lock(shared).sessions.get_mut(session).and_then(|c| c.remote.as_mut()) {
+        Some(r) => {
+            r.mutter = Some(remote.clone());
+            r.granted = devices;
+            true
+        }
+        None => false,
+    };
+    if !ours {
+        stop_remote(conn, &remote).await;
+        return Err(closed_meanwhile());
     }
     // The compositor may end it (its creator gone, a monitor unplugged).
     let closed = zbus::MatchRule::builder()
@@ -584,6 +632,10 @@ async fn start_remote(
     let requested = lock(shared).sessions.get(session).and_then(|c| c.remote.as_ref()).is_some_and(|r| r.clipboard_requested);
     if requested && crate::clipboard::enable(conn, shared, session, &remote).await {
         results.insert("clipboard_enabled".to_owned(), owned(Value::from(true)));
+    }
+    if !open(shared, session) {
+        stop_remote(conn, &remote).await;
+        return Err(closed_meanwhile());
     }
     {
         let (conn, shared, session) = (conn.clone(), shared.clone(), session.clone());
