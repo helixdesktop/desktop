@@ -124,6 +124,12 @@ impl SeatHandler for Helix {
         set_data_device_focus(dh, seat, client.clone());
         smithay::wayland::selection::primary_selection::set_primary_focus(dh, seat, client);
         self.update_shortcut_inhibit(surface);
+        // Helix's window manager: the X focus leaves X11 windows too.
+        if !matches!(focused, Some(super::focus::KeyboardFocusTarget::XHelix(_))) {
+            if let Some(xwm) = self.hxwm.as_ref() {
+                xwm.focus_elsewhere();
+            }
+        }
     }
 
     fn led_state_changed(&mut self, _seat: &Seat<Self>, led_state: smithay::input::keyboard::LedState) {

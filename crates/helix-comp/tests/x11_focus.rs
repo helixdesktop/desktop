@@ -137,9 +137,6 @@ fn focus_on_a_child_keeps_the_window_active() {
 /// window is active (Wine locks the mouse on the active window).
 #[test]
 fn focus_on_nothing_clears_the_active_window() {
-    if common::not_yet("#191 step 3, next part: focus events and input models") {
-        return;
-    }
     let Some(session) = xwm::session() else { return };
     let x = X::new(&session);
     let window = x.mapped();
@@ -159,9 +156,6 @@ fn focus_on_nothing_clears_the_active_window() {
 /// activation (VSCode's keys went to the wrong window).
 #[test]
 fn the_pointers_window_is_not_activated() {
-    if common::not_yet("#191 step 3, next part: focus events and input models") {
-        return;
-    }
     let Some(mut session) = xwm::session() else { return };
     let x = X::new(&session);
     let window = x.mapped();
@@ -258,9 +252,6 @@ fn the_focused_window_destroyed_at_once() {
 /// popups): it stays there.
 #[test]
 fn an_app_focusing_its_own_window_keeps_it() {
-    if common::not_yet("#191 step 3, next part: focus events and input models") {
-        return;
-    }
     let Some(session) = xwm::session() else { return };
     let x = X::new(&session);
     let a = x.mapped();

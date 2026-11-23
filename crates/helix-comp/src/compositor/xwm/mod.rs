@@ -85,6 +85,13 @@ pub struct Xwm {
     check: XId,
     client: Client,
     active: Arc<AtomicU32>,
+    /// See `Shared::given`.
+    given: Arc<AtomicU32>,
+    /// See `Shared::focus_seq`.
+    focus_seq: Arc<AtomicU32>,
+    /// The bits of a resource id that are the client's own: windows of
+    /// one X client share the rest (the server's resource-id base).
+    id_mask: u32,
     /// Every window the X server told us about, by id.
     windows: HashMap<XId, XWin>,
     /// Serials an X11 window was given before its surface committed one,
@@ -182,6 +189,7 @@ impl Xwm {
         conn.change_property32(PropMode::REPLACE, root, atoms._NET_CLIENT_LIST_STACKING, AtomEnum::WINDOW, &[])?;
         conn.change_property32(PropMode::REPLACE, root, atoms._NET_ACTIVE_WINDOW, AtomEnum::WINDOW, &[x11rb::NONE])?;
 
+        let id_mask = conn.setup().resource_id_mask;
         let fd = conn.stream().as_fd().try_clone_to_owned()?;
         let mut xwm = Self {
             conn,
@@ -190,6 +198,9 @@ impl Xwm {
             check,
             client,
             active: Arc::new(AtomicU32::new(x11rb::NONE)),
+            given: Arc::new(AtomicU32::new(x11rb::NONE)),
+            focus_seq: Arc::new(AtomicU32::new(0)),
+            id_mask,
             windows: HashMap::new(),
             window_serials: HashMap::new(),
             surface_serials: HashMap::new(),
@@ -235,7 +246,7 @@ impl Xwm {
     }
 
     fn add(&mut self, id: XId, override_redirect: bool, x: i32, y: i32, w: i32, h: i32) -> XWin {
-        let probe = XWin::new(id, &self.conn, self.atoms, self.root, Some(self.client.clone()), self.active.clone(), override_redirect, Rectangle::default());
+        let probe = XWin::new(id, &self.conn, self.atoms, self.root, Some(self.client.clone()), (self.active.clone(), self.given.clone(), self.focus_seq.clone()), override_redirect, Rectangle::default());
         let geometry = Rectangle::new((probe.x_to_logical(x), probe.x_to_logical(y)).into(), (probe.x_to_logical(w), probe.x_to_logical(h)).into());
         probe.state().last_configure = geometry;
         self.windows.insert(id, probe.clone());
@@ -352,9 +363,74 @@ impl Xwm {
                 }
             }
             Event::ClientMessage(e) => self.client_message(e, &mut actions)?,
+            Event::FocusIn(e) => self.focus_in(e)?,
             _ => {}
         }
         Ok(actions)
+    }
+
+    /// The X focus moved (ICCCM 4.1.7, EWMH `_NET_ACTIVE_WINDOW`). Focus
+    /// events of keyboard grabs (menus) and of the window under the
+    /// pointer while the focus follows it (detail Pointer) are no
+    /// activation. Focus on nothing or on the pointer root: no X11 window
+    /// is active (Wine locks the mouse on the active window). An app
+    /// moving the focus among its own windows (Steam, Zoom) keeps it
+    /// there, and that window is the active one.
+    fn focus_in(&mut self, e: x11rb::protocol::xproto::FocusInEvent) -> Result<(), ReplyOrIdError> {
+        use x11rb::protocol::xproto::{NotifyDetail, NotifyMode};
+        if matches!(e.mode, NotifyMode::GRAB | NotifyMode::UNGRAB) || e.detail == NotifyDetail::POINTER {
+            return Ok(());
+        }
+        // From before the window manager's own last focus change (the
+        // server's revert when the focused window went away, handled
+        // after Helix focused the next one): stale.
+        let ours = self.focus_seq.load(std::sync::atomic::Ordering::Relaxed) as u16;
+        if (ours.wrapping_sub(e.sequence) as i16) > 0 {
+            return Ok(());
+        }
+        if e.event == self.root {
+            if matches!(e.detail, NotifyDetail::NONE | NotifyDetail::POINTER_ROOT) {
+                self.set_active(x11rb::NONE)?;
+            }
+            return Ok(());
+        }
+        let Some(win) = self.windows.get(&e.event) else { return Ok(()) };
+        if win.state().override_redirect || !win.state().managed {
+            return Ok(());
+        }
+        let given = self.given.load(std::sync::atomic::Ordering::Relaxed);
+        if e.event == given {
+            return Ok(());
+        }
+        let mask = !self.id_mask;
+        if given != x11rb::NONE && given & mask == e.event & mask {
+            self.given.store(e.event, std::sync::atomic::Ordering::Relaxed);
+            self.set_active(e.event)?;
+        }
+        Ok(())
+    }
+
+    /// `_NET_ACTIVE_WINDOW`, rewritten only when it changes.
+    fn set_active(&self, id: XId) -> Result<(), ReplyOrIdError> {
+        if self.active.swap(id, std::sync::atomic::Ordering::Relaxed) != id {
+            self.conn.change_property32(PropMode::REPLACE, self.root, self.atoms._NET_ACTIVE_WINDOW, AtomEnum::WINDOW, &[id])?;
+            self.conn.flush()?;
+        }
+        Ok(())
+    }
+
+    /// The keyboard went to something that isn't one of its windows (a
+    /// Wayland window, or nothing): the X focus goes to the pointer root,
+    /// not to None, so X11 apps can still grab the keyboard (dmenu).
+    pub fn focus_elsewhere(&self) {
+        if self.given.swap(x11rb::NONE, std::sync::atomic::Ordering::Relaxed) == x11rb::NONE {
+            return;
+        }
+        let pointer_root = u32::from(x11rb::protocol::xproto::InputFocus::POINTER_ROOT);
+        if let Ok(cookie) = self.conn.set_input_focus(x11rb::protocol::xproto::InputFocus::POINTER_ROOT, pointer_root, x11rb::CURRENT_TIME) {
+            self.focus_seq.store(cookie.sequence_number() as u32, std::sync::atomic::Ordering::Relaxed);
+        }
+        let _ = self.conn.flush();
     }
 
     fn map_request(&mut self, id: XId, actions: &mut Vec<Action>) -> Result<(), ReplyOrIdError> {

@@ -82,6 +82,12 @@ pub(super) struct Shared {
     pub client: Option<Client>,
     /// The window `_NET_ACTIVE_WINDOW` names (shared by all windows).
     pub active: Arc<AtomicU32>,
+    /// The window Helix last gave the X input focus, or the app moved it
+    /// to among its own windows (shared by all windows).
+    pub given: Arc<AtomicU32>,
+    /// The sequence number of the window manager's last SetInputFocus
+    /// (focus events from before it are stale).
+    pub focus_seq: Arc<AtomicU32>,
     pub state: Mutex<State>,
 }
 
@@ -98,9 +104,10 @@ impl PartialEq for XWin {
 
 impl XWin {
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn new(id: XId, conn: &Arc<RustConnection>, atoms: Atoms, root: XId, client: Option<Client>, active: Arc<AtomicU32>, override_redirect: bool, geometry: Rectangle<i32, Logical>) -> Self {
+    pub(super) fn new(id: XId, conn: &Arc<RustConnection>, atoms: Atoms, root: XId, client: Option<Client>, focus: (Arc<AtomicU32>, Arc<AtomicU32>, Arc<AtomicU32>), override_redirect: bool, geometry: Rectangle<i32, Logical>) -> Self {
         let state = State { override_redirect, hints: Hints { input: true, ..Hints::default() }, last_configure: geometry, ..State::default() };
-        Self(Arc::new(Shared { id, conn: Arc::downgrade(conn), atoms, root, client, active, state: Mutex::new(state) }))
+        let (active, given, focus_seq) = focus;
+        Self(Arc::new(Shared { id, conn: Arc::downgrade(conn), atoms, root, client, active, given, focus_seq, state: Mutex::new(state) }))
     }
 
     pub(super) fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -394,8 +401,12 @@ impl XWin {
             (state.hints.input, state.take_focus)
         };
         let Some(conn) = self.conn() else { return Err(ConnectionError::UnknownError) };
+        // Globally active windows (no input flag, WM_TAKE_FOCUS) set the
+        // focus themselves; their FocusIn counts as given too.
+        self.0.given.store(self.0.id, Ordering::Relaxed);
         if input {
-            conn.set_input_focus(InputFocus::POINTER_ROOT, self.0.id, x11rb::CURRENT_TIME)?;
+            let cookie = conn.set_input_focus(InputFocus::POINTER_ROOT, self.0.id, x11rb::CURRENT_TIME)?;
+            self.0.focus_seq.store(cookie.sequence_number() as u32, Ordering::Relaxed);
         }
         if take_focus {
             let event = ClientMessageEvent::new(32, self.0.id, self.0.atoms.WM_PROTOCOLS, [self.0.atoms.WM_TAKE_FOCUS, x11rb::CURRENT_TIME, 0, 0, 0]);
