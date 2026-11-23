@@ -130,7 +130,7 @@ fn apply(a: &Atoms, win: &XWin, atom: u32, reply: Option<&GetPropertyReply>) {
             s.frame_extents = if v.len() >= 4 { [v[0] as i32, v[1] as i32, v[2] as i32, v[3] as i32].map(|e| e.clamp(0, 1000)) } else { [0; 4] };
         }
         x if x == a._NET_WM_STATE => {
-            s.net_state = cardinals(reply).into_iter().filter(|a| *a != x11rb::NONE).collect();
+            s.net_state = cardinals(reply).into_iter().filter(|x| a.client_state(*x)).collect();
         }
         _ => {}
     }

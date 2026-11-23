@@ -422,17 +422,25 @@ impl Selections {
     /// The X11 owner's TARGETS: offer them to Wayland apps, if this answer
     /// is still about the selection.
     fn targets(&mut self, i: usize, e: &SelectionNotifyEvent, actions: &mut Vec<Action>) -> Result<(), ReplyOrIdError> {
-        let _ = actions;
         if e.property == x11rb::NONE {
+            // An owner that doesn't answer TARGETS (old Xt and Motif apps):
+            // offered as text, which every owner can give (#234). Not
+            // leaving the last offer up, which no one serves any more.
+            let sel = &mut self.sels[i];
+            if sel.targets_for.is_some_and(|(owner, _)| owner == sel.owner) {
+                sel.offered = vec![("text/plain;charset=utf-8".to_owned(), self.atoms.UTF8_STRING), ("text/plain".to_owned(), u32::from(AtomEnum::STRING))];
+                actions.push(Action::SelectionOffered(sel.target, sel.offered.iter().map(|(m, _)| m.clone()).collect()));
+            }
             return Ok(());
         }
-        let time = e.time;
         let seq = super::keep(self.conn.get_property(true, self.sels[i].window, e.property, AtomEnum::ANY, 0, 4096)?);
         self.later.push((
             vec![seq],
             Box::new(move |xwm, replies, _| {
                 let s = &mut xwm.selections;
-                let current = s.sels[i].targets_for == Some((s.sels[i].owner, time));
+                // Still the owner asked (whatever time it answered with:
+                // owners don't all echo the request's).
+                let current = s.sels[i].targets_for.is_some_and(|(owner, _)| owner == s.sels[i].owner);
                 if !current {
                     tracing::debug!("ignoring stale X11 selection TARGETS");
                     return Ok(());
@@ -442,7 +450,7 @@ impl Selections {
                 let atoms: Vec<u32> = atoms.collect();
                 s.with_names(atoms, move |xwm, named, actions| {
                     let s = &mut xwm.selections;
-                    if s.sels[i].targets_for != Some((s.sels[i].owner, time)) {
+                    if !s.sels[i].targets_for.is_some_and(|(owner, _)| owner == s.sels[i].owner) {
                         return;
                     }
                     let mut offered: Vec<(String, u32)> = Vec::new();
@@ -702,7 +710,9 @@ impl Selections {
         // reads the newest (fcitx, Slack): the older ones end. Not for a
         // drop, whose types are asked for at once (Chromium).
         if dnd.is_none() {
-            let older: Vec<u64> = self.outgoing.iter().filter(|(_, t)| t.requestor == e.requestor && !t.answered).map(|(id, _)| *id).collect();
+            // The same property: two types asked for at once into
+            // different properties are both answered (#234).
+            let older: Vec<u64> = self.outgoing.iter().filter(|(_, t)| t.requestor == e.requestor && t.property == property && !t.answered).map(|(id, _)| *id).collect();
             for id in older {
                 self.drop_outgoing(id, actions);
             }

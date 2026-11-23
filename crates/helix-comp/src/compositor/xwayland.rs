@@ -816,6 +816,13 @@ impl Helix {
             A::OverrideConfigured(w, rect) => self.x11_override_configured(x(w), rect),
             A::HintsChanged(w) => self.x11_hints_changed(&x(w)),
             A::Associated(w) => self.x11_associated(x(w)),
+            A::AppFocused(w) => {
+                if let Some(window) = self.x11_window(&x(w)) {
+                    if self.space.elements().any(|e| *e == window) {
+                        self.focus_window_with(&window, false);
+                    }
+                }
+            }
             A::Fullscreen(w, on) | A::Maximize(w, on) if self.x11_window(&x(w.clone())).is_none() => {
                 let _ = on;
             }

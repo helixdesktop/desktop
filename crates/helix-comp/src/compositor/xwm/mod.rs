@@ -103,6 +103,9 @@ pub enum Action {
     HintsChanged(XWin),
     /// The window got its Wayland surface.
     Associated(XWin),
+    /// The app moved the X focus to another of its own windows (Steam,
+    /// Zoom): Helix's keyboard focus follows, without raising it (#234).
+    AppFocused(XWin),
     /// `_NET_WM_STATE` requests: (state, on).
     Fullscreen(XWin, bool),
     Maximize(XWin, bool),
@@ -377,7 +380,13 @@ impl Xwm {
                     continue;
                 }
                 let geo = conn.get_geometry(child)?.reply()?;
-                xwm.add(child, attrs.override_redirect, geo.x.into(), geo.y.into(), geo.width.into(), geo.height.into());
+                let win = xwm.add(child, attrs.override_redirect, geo.x.into(), geo.y.into(), geo.width.into(), geo.height.into());
+                // Shown before anyone managed it (#234): managed now, as
+                // if it had asked (its MapRequest went nowhere).
+                if attrs.map_state == x11rb::protocol::xproto::MapState::VIEWABLE && !attrs.override_redirect {
+                    win.state().viewable = true;
+                    xwm.manage(&win, &mut Vec::new())?;
+                }
             }
         }
         xwm.conn.flush()?;
@@ -631,7 +640,7 @@ impl Xwm {
                 );
             }
             Event::ClientMessage(e) => self.client_message(e, &mut actions)?,
-            Event::FocusIn(e) => self.focus_in(e)?,
+            Event::FocusIn(e) => self.focus_in(e, &mut actions)?,
             Event::SyncAlarmNotify(e) => {
                 if let Some(win) = self.windows.values().find(|w| w.state().sync.alarm == e.alarm).cloned() {
                     win.sync_done()?;
@@ -649,7 +658,7 @@ impl Xwm {
     /// is active (Wine locks the mouse on the active window). An app
     /// moving the focus among its own windows (Steam, Zoom) keeps it
     /// there, and that window is the active one.
-    fn focus_in(&mut self, e: x11rb::protocol::xproto::FocusInEvent) -> Result<(), ReplyOrIdError> {
+    fn focus_in(&mut self, e: x11rb::protocol::xproto::FocusInEvent, actions: &mut Vec<Action>) -> Result<(), ReplyOrIdError> {
         use x11rb::protocol::xproto::{NotifyDetail, NotifyMode};
         if matches!(e.mode, NotifyMode::GRAB | NotifyMode::UNGRAB) || e.detail == NotifyDetail::POINTER {
             return Ok(());
@@ -679,6 +688,7 @@ impl Xwm {
         if given != x11rb::NONE && given & mask == e.event & mask {
             self.given.store(e.event, std::sync::atomic::Ordering::Relaxed);
             self.set_active(e.event)?;
+            actions.push(Action::AppFocused(win.clone()));
         }
         Ok(())
     }
@@ -989,7 +999,11 @@ impl Xwm {
                     _ => continue,
                 };
                 if !managed {
-                    // Before it is shown the client's word goes as it is.
+                    // Before it is shown the client's word goes, for the
+                    // states a client may set.
+                    if !a.client_state(atom) {
+                        continue;
+                    }
                     if on {
                         win.state().net_state.insert(atom);
                     } else {
