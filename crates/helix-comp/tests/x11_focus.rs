@@ -348,9 +348,6 @@ fn focus_changes_reach_x11_apps_at_once() {
 /// inside it reaches the X11 window.
 #[test]
 fn the_pointer_outside_an_input_shape_goes_through() {
-    if common::known_failure(&[common::Xwm::Smithay], "X11 input shapes aren't honored; the pointer outside the shape still goes to the X11 window (#191)") {
-        return;
-    }
     // Xwayland passes the input shape on as the surface's input region
     // from 24.1 (Ubuntu 24.04 has 23.2).
     if !xwm::xwayland_at_least(24, 1) {

@@ -87,9 +87,6 @@ fn closing_asks_a_window_that_takes_part() {
 /// rather than leaving it running without its window.
 #[test]
 fn closing_disconnects_an_app_that_does_not_take_part() {
-    if common::known_failure(&[common::Xwm::Smithay], "it destroys the window instead of disconnecting the app, which keeps running without it (#191)") {
-        return;
-    }
     let Some((session, mut shell)) = xwm::session_with_shell("x11-kill") else { return };
     let rude = X::new(&session);
     let window = rude.window();

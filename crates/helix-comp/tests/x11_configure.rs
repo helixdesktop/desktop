@@ -151,9 +151,6 @@ fn a_size_asked_for_before_mapping_is_kept() {
 /// before it shows, so it does not draw at the wrong size first.
 #[test]
 fn maximized_before_mapping_gets_its_size_first() {
-    if common::known_failure(&[common::Xwm::Smithay], "Smithay's window manager maps the window in its frame at MapRequest, before Helix sizes it (#191)") {
-        return;
-    }
     let Some(session) = xwm::session() else { return };
     let x = X::new(&session);
     let window = x.window();
@@ -176,9 +173,6 @@ fn maximized_before_mapping_gets_its_size_first() {
 /// X41: size hints: a base size and no minimum is the minimum (ICCCM).
 #[test]
 fn the_base_size_stands_in_for_a_minimum() {
-    if common::known_failure(&[common::Xwm::Smithay], "a base size without a minimum size is not taken as the minimum (#191)") {
-        return;
-    }
     let Some(session) = xwm::session() else { return };
     let x = X::new(&session);
     let window = x.window();
@@ -232,9 +226,6 @@ fn a_maximized_window_puts_its_shadow_off_screen() {
 /// each resize, so resizes don't show half-drawn frames.
 #[test]
 fn resizes_are_announced_to_apps_that_sync() {
-    if common::known_failure(&[common::Xwm::Smithay], "no _NET_WM_SYNC_REQUEST before a resize (#191)") {
-        return;
-    }
     let Some(session) = xwm::session() else { return };
     let x = X::new(&session);
     x11rb::protocol::sync::ConnectionExt::sync_initialize(&x.conn, 3, 1).unwrap().reply().unwrap();

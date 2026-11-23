@@ -486,10 +486,30 @@ impl X11Window {
         either!(self, x => x.last_configure())
     }
 
+    /// The size it was last asked to have, without its shadow: what it
+    /// will look like once it has drawn. With Smithay's window manager the
+    /// surface (and so `geometry`) keeps the old size until the app draws,
+    /// which can be after the next request when its commits are held for
+    /// a sync request (#212).
+    pub fn requested_size(&self) -> Size<i32, Logical> {
+        let size = match self {
+            Self::Smithay(s) => s.requested_configure().size,
+            Self::Helix(w) => w.last_configure().size,
+        };
+        let [l, r, t, b] = self.shadow();
+        Size::from(((size.w - l - r).max(1), (size.h - t - b).max(1)))
+    }
+
     /// Moves and resizes it.
     pub fn configure(&self, rect: impl Into<Option<Rectangle<i32, Logical>>>) -> Result<(), smithay::xwayland::xwm::X11SurfaceError> {
         match self {
-            Self::Smithay(s) => s.configure(rect),
+            // Resizes go through _NET_WM_SYNC_REQUEST for apps that take
+            // part (Smithay falls back to a plain configure otherwise);
+            // one that doesn't answer in time doesn't hold them up.
+            Self::Smithay(s) => match rect.into() {
+                Some(rect) if !s.is_override_redirect() => s.configure_with_sync(rect, Some(std::time::Duration::from_millis(200))),
+                rect => s.configure(rect),
+            },
             Self::Helix(w) => w.configure(rect.into()).map_err(Into::into),
         }
     }

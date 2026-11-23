@@ -451,9 +451,6 @@ fn unknown_types_are_refused_at_once() {
 /// target (`xclip` asks for STRING).
 #[test]
 fn wayland_text_under_every_x11_text_target() {
-    if common::known_failure(&[common::Xwm::Smithay], "Wayland text is offered as UTF8_STRING only; STRING and TEXT are refused (#191)") {
-        return;
-    }
     let Some(session) = xwm::session() else { return };
     let mut app = wayland_app(&session);
     app.copy("text/plain;charset=utf-8", b"plain text");
