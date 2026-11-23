@@ -108,6 +108,9 @@ pub enum Action {
     AppFocused(XWin),
     /// `_NET_WM_STATE` requests: (state, on).
     Fullscreen(XWin, bool),
+    /// `_NET_WM_FULLSCREEN_MONITORS` changed (or was dropped, naming a
+    /// monitor there isn't): a full-screen window covers them now.
+    FullscreenMonitors(XWin),
     Maximize(XWin, bool),
     Above(XWin, bool),
     Modal(XWin, bool),
@@ -280,6 +283,7 @@ impl Xwm {
             atoms._NET_WM_STATE_SKIP_TASKBAR,
             atoms._NET_WM_STATE_SKIP_PAGER,
             atoms._NET_WM_STATE_FULLSCREEN,
+            atoms._NET_WM_FULLSCREEN_MONITORS,
             atoms._NET_WM_STATE_ABOVE,
             atoms._NET_WM_STATE_FOCUSED,
             atoms._NET_WM_STATE_HIDDEN,
@@ -1086,7 +1090,55 @@ impl Xwm {
             }
         } else if e.type_ == a._NET_WM_DESKTOP && win.state().managed {
             actions.push(Action::MoveToDesktop(win, data[0]));
+        } else if e.type_ == a._NET_WM_FULLSCREEN_MONITORS {
+            self.fullscreen_monitors(win, [data[0], data[1], data[2], data[3]])?;
         }
+        Ok(())
+    }
+
+    /// `_NET_WM_FULLSCREEN_MONITORS` (EWMH): the monitors a window's full
+    /// screen spans, by Xinerama index (top, bottom, left, right), asked
+    /// before it is full screen or while it is. The indices are the X
+    /// server's: Xwayland lists its outputs in the order it was told of
+    /// them (the order Helix advertised its `wl_output`s), whatever their
+    /// places or which is primary, so they are looked up in its Xinerama
+    /// list rather than in Helix's outputs. Kept as the rectangles they
+    /// were then, and published back on the window (EWMH: the window
+    /// manager keeps the property up to date). One naming no monitor
+    /// drops them (as mutter): full screen is on its own monitor again.
+    fn fullscreen_monitors(&mut self, win: XWin, indices: [u32; 4]) -> Result<(), ReplyOrIdError> {
+        use x11rb::protocol::xinerama::{ConnectionExt as _, QueryScreensReply};
+        let seq = keep(self.conn.xinerama_query_screens()?);
+        self.after(
+            vec![seq],
+            Box::new(move |xwm, replies, actions| {
+                if win.state().destroyed {
+                    return Ok(());
+                }
+                let screens = parse::<QueryScreensReply>(replies.into_iter().next().flatten()).map(|r| r.screen_info).unwrap_or_default();
+                let rects: Option<Vec<[i32; 4]>> = indices
+                    .iter()
+                    .map(|i| screens.get(*i as usize).map(|s| [s.x_org.into(), s.y_org.into(), s.width.into(), s.height.into()]))
+                    .collect();
+                let id = win.window_id();
+                let monitors = rects.map(|r| [r[0], r[1], r[2], r[3]]);
+                match monitors {
+                    Some(_) => {
+                        xwm.conn.change_property32(PropMode::REPLACE, id, xwm.atoms._NET_WM_FULLSCREEN_MONITORS, AtomEnum::CARDINAL, &indices)?;
+                    }
+                    None => {
+                        tracing::debug!(window = id, ?indices, monitors = screens.len(), "full-screen monitors that aren't there: dropped");
+                        xwm.conn.delete_property(id, xwm.atoms._NET_WM_FULLSCREEN_MONITORS)?;
+                    }
+                }
+                tracing::debug!(window = id, ?indices, ?monitors, "full-screen monitors");
+                win.state().fullscreen_monitors = monitors;
+                if win.state().managed {
+                    actions.push(Action::FullscreenMonitors(win));
+                }
+                Ok(())
+            }),
+        );
         Ok(())
     }
 

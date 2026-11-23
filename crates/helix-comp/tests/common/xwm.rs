@@ -30,8 +30,14 @@ pub const SCREEN: (u16, u16) = (800, 600);
 
 /// A headless session with Xwayland, or `None` (skipped) without one.
 pub fn session() -> Option<HeadlessSession> {
+    session_env(Vec::new())
+}
+
+/// [`session`] with `env` for the compositor (e.g. two monitors side by
+/// side: `HELIX_HEADLESS_OUTPUTS=2`).
+pub fn session_env(env: Vec<(String, String)>) -> Option<HeadlessSession> {
     let comp = PathBuf::from(env!("CARGO_BIN_EXE_helix-comp"));
-    let session = HeadlessSession::start(Options { comp: &comp, shell: None, size: (u32::from(SCREEN.0), u32::from(SCREEN.1)), settings: "", env: Vec::new() })?;
+    let session = HeadlessSession::start(Options { comp: &comp, shell: None, size: (u32::from(SCREEN.0), u32::from(SCREEN.1)), settings: "", env })?;
     if session.x_display.is_empty() {
         eprintln!("no Xwayland; skipped");
         return None;

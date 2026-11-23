@@ -510,15 +510,38 @@ impl Helix {
         self.usable_area(window).map(|area| below_frame(window, area))
     }
 
-    /// Fullscreen on `on` (the client's choice), else the window's monitor.
+    /// Fullscreen on `on` (the client's choice), else where
+    /// [`Self::fullscreen_area`] says.
     pub fn fullscreen(&mut self, window: &Window, on: Option<Output>) {
         let area = match on {
             Some(output) => self.space.output_geometry(&output),
-            None => self.output_area(window),
+            None => self.fullscreen_area(window),
         };
         if let Some(area) = area {
             self.take_over(window, Takeover::Fullscreen, area);
         }
+    }
+
+    /// What a full-screen `window` covers: the monitors an X11 app named
+    /// (`_NET_WM_FULLSCREEN_MONITORS`, #226, as mutter: from the top
+    /// monitor's top edge to the bottom one's bottom, the left one's left
+    /// edge to the right one's right; one monitor when all four are the
+    /// same), else its own monitor. Named monitors that aren't there now
+    /// (unplugged, moved) count as none named.
+    pub fn fullscreen_area(&self, window: &Window) -> Option<Rectangle<i32, Logical>> {
+        if let Some(named) = window.x11_surface().and_then(|x| x.fullscreen_monitors()) {
+            let outputs: Vec<Rectangle<i32, Logical>> = self.space.outputs().filter_map(|o| self.space.output_geometry(o)).collect();
+            if named.iter().all(|r| outputs.contains(r)) {
+                let [top, bottom, left, right] = named;
+                let (x, y) = (left.loc.x, top.loc.y);
+                let (x2, y2) = (right.loc.x + right.size.w, bottom.loc.y + bottom.size.h);
+                if x2 > x && y2 > y {
+                    return Some(Rectangle::new((x, y).into(), (x2 - x, y2 - y).into()));
+                }
+            }
+            tracing::debug!(?named, "full-screen monitors not all there: on the window's own");
+        }
+        self.output_area(window)
     }
 
     pub fn is_taken_over(&self, window: &Window, kind: Takeover) -> bool {
@@ -531,8 +554,16 @@ impl Helix {
     /// ([`hidden_in_fullscreen`]); the overlay layer stays above.
     pub fn in_fullscreen(&self, output: &Output) -> bool {
         let fullscreen = |w: &Window| self.is_taken_over(w, Takeover::Fullscreen);
+        let geometry = self.space.output_geometry(output);
         for window in self.managed().collect::<Vec<_>>().into_iter().rev() {
-            if self.output_of(window).as_ref() != Some(output) {
+            // A full-screen window spanning several monitors
+            // (`_NET_WM_FULLSCREEN_MONITORS`) is on each of them.
+            let spans = || {
+                window.x11_surface().is_some_and(|x| x.fullscreen_monitors().is_some())
+                    && fullscreen(window)
+                    && geometry.zip(self.space.element_geometry(window)).is_some_and(|(o, w)| o.overlaps(w))
+            };
+            if self.output_of(window).as_ref() != Some(output) && !spans() {
                 continue;
             }
             if fullscreen(window) {
@@ -582,7 +613,9 @@ impl Helix {
                 }
             }
             if self.is_taken_over(&window, Takeover::Fullscreen) {
-                self.take_over(&window, Takeover::Fullscreen, full);
+                // On the monitors it named, if they are all still there.
+                let covers = if self.wm.legacy_fullscreen.contains(&window) { Some(full) } else { self.fullscreen_area(&window) };
+                self.take_over(&window, Takeover::Fullscreen, covers.unwrap_or(full));
                 continue;
             }
             if self.is_taken_over(&window, Takeover::Maximized) {
