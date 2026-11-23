@@ -407,6 +407,7 @@ impl Xwm {
         let probe = XWin::new(id, &self.conn, self.atoms, self.root, Some(self.client.clone()), (self.active.clone(), self.given.clone(), self.focus_seq.clone()), override_redirect, Rectangle::default());
         let geometry = Rectangle::new((probe.x_to_logical(x), probe.x_to_logical(y)).into(), (probe.x_to_logical(w), probe.x_to_logical(h)).into());
         probe.state().last_configure = geometry;
+        probe.state().x_request = [x, y, w, h];
         self.windows.insert(id, probe.clone());
         probe
     }
@@ -919,7 +920,13 @@ impl Xwm {
             return Ok(());
         };
         let (managed, or) = {
-            let s = win.state();
+            let mut s = win.state();
+            // What it asks for, in its own pixels (#233).
+            for (i, flag, v) in [(0, C::X, i32::from(e.x)), (1, C::Y, i32::from(e.y)), (2, C::WIDTH, i32::from(e.width)), (3, C::HEIGHT, i32::from(e.height))] {
+                if e.value_mask.contains(flag) {
+                    s.x_request[i] = v;
+                }
+            }
             (s.managed, s.override_redirect)
         };
         if !managed || or {

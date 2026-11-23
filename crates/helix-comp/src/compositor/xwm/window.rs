@@ -71,6 +71,11 @@ pub(super) struct State {
     pub net_state: HashSet<u32>,
     /// Where Helix last put it, in Helix's logical coordinates.
     pub last_configure: Rectangle<i32, Logical>,
+    /// Where the client last put or asked for it, in X pixels (x, y,
+    /// width, height). At an Xwayland scale an odd X size has no exact
+    /// logical one: when Helix gives the window what it asked for, it
+    /// gets these exact pixels back, not a rounded neighbor (#233).
+    pub x_request: [i32; 4],
     pub outputs: Vec<(WeakOutput, Rectangle<i32, Logical>)>,
     pub sync: SyncState,
     /// What `_NET_FRAME_EXTENTS` and `_NET_WM_DESKTOP` say now (written
@@ -328,7 +333,7 @@ impl XWin {
         if !self.sync_before(&conn, rect)? {
             return Ok(());
         }
-        let (x, y, w, h) = (self.logical_to_x(rect.loc.x), self.logical_to_x(rect.loc.y), self.logical_to_x(rect.size.w).max(1), self.logical_to_x(rect.size.h).max(1));
+        let (x, y, w, h) = self.to_x(rect);
         conn.configure_window(self.0.id, &ConfigureWindowAux::new().x(x).y(y).width(w as u32).height(h as u32).border_width(0))?;
         let event = ConfigureNotifyEvent {
             response_type: CONFIGURE_NOTIFY_EVENT,
@@ -345,6 +350,22 @@ impl XWin {
         };
         conn.send_event(false, self.0.id, EventMask::STRUCTURE_NOTIFY, event)?;
         conn.flush()
+    }
+
+    /// `rect` in X pixels: what the client asked for where that is what
+    /// `rect` gives (so odd sizes survive a scale), else `rect` scaled;
+    /// within what X can carry (positions are 16-bit signed, sizes 1 to
+    /// 32767).
+    fn to_x(&self, rect: Rectangle<i32, Logical>) -> (i32, i32, i32, i32) {
+        let asked = self.state().x_request;
+        let logical = [rect.loc.x, rect.loc.y, rect.size.w, rect.size.h];
+        let mut out = [0; 4];
+        for i in 0..4 {
+            out[i] = if self.x_to_logical(asked[i]) == logical[i] { asked[i] } else { self.logical_to_x(logical[i]) };
+        }
+        let pos = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX));
+        let size = |v: i32| v.clamp(1, i32::from(i16::MAX));
+        (pos(out[0]), pos(out[1]), size(out[2]), size(out[3]))
     }
 
     /// Before giving it `rect`: if it syncs (`_NET_WM_SYNC_REQUEST`) and
