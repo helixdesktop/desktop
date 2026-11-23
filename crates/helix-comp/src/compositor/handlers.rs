@@ -347,6 +347,7 @@ impl XdgShellHandler for Helix {
                 initial_location,
                 follow: false,
                 unmaximize,
+                ended: false,
             },
             serial,
             Focus::Clear,

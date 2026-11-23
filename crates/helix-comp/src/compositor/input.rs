@@ -422,7 +422,7 @@ impl Helix {
                 let sym = handle
                     .raw_latin_sym_or_raw_current_sym()
                     .unwrap_or_else(|| handle.modified_sym());
-                if state.follow.is_some() {
+                if state.follow.is_some() && !state.lock.locked {
                     // Move/Resize from the window menu: keys drive it.
                     if !pressed {
                         return FilterResult::Forward;

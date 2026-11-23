@@ -13,9 +13,10 @@ use std::time::{Duration, Instant};
 
 use helix_protocols::client::window_list::helix_window_list_v1::{self, HelixWindowListV1};
 use helix_test_support::headless::{HeadlessSession, Options};
-use wayland_client::globals::{registry_queue_init, GlobalListContents};
-use wayland_client::protocol::wl_registry;
-use wayland_client::{Connection as WlConnection, Dispatch, EventQueue, QueueHandle};
+use wayland_client::globals::{registry_queue_init, GlobalList, GlobalListContents};
+use wayland_client::protocol::{wl_buffer, wl_compositor, wl_keyboard, wl_output, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface};
+use wayland_client::{Connection as WlConnection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
+use wayland_protocols::ext::session_lock::v1::client::{ext_session_lock_manager_v1, ext_session_lock_surface_v1, ext_session_lock_v1};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
     AtomEnum, ClientMessageEvent, ConnectionExt, CreateWindowAux, EventMask, PropMode, UnmapNotifyEvent, Window, WindowClass, UNMAP_NOTIFY_EVENT,
@@ -364,6 +365,56 @@ pub struct ShellState {
     pub windows: Vec<Listed>,
     pub focused: Option<u32>,
     pub not_responding: Vec<u32>,
+    /// The session lock (`Shell::lock`): whether it is locked, whether a
+    /// lock surface has the keyboard, and the keys pressed on it.
+    pub locked: bool,
+    pub lock_focused: bool,
+    pub lock_keys: Vec<u32>,
+    lock_configures: Vec<(ext_session_lock_surface_v1::ExtSessionLockSurfaceV1, u32, u32, u32)>,
+}
+
+macro_rules! shell_quiet {
+    ($($iface:ty),*) => {$(
+        impl Dispatch<$iface, ()> for ShellState {
+            fn event(_: &mut Self, _: &$iface, _: <$iface as Proxy>::Event, _: &(), _: &WlConnection, _: &QueueHandle<Self>) {}
+        }
+    )*};
+}
+shell_quiet!(wl_compositor::WlCompositor, wl_surface::WlSurface, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_buffer::WlBuffer, wl_seat::WlSeat, wl_output::WlOutput, ext_session_lock_manager_v1::ExtSessionLockManagerV1);
+
+impl Dispatch<ext_session_lock_v1::ExtSessionLockV1, ()> for ShellState {
+    fn event(state: &mut Self, _: &ext_session_lock_v1::ExtSessionLockV1, event: ext_session_lock_v1::Event, _: &(), _: &WlConnection, _: &QueueHandle<Self>) {
+        match event {
+            ext_session_lock_v1::Event::Locked => state.locked = true,
+            ext_session_lock_v1::Event::Finished => state.locked = false,
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ext_session_lock_surface_v1::ExtSessionLockSurfaceV1, ()> for ShellState {
+    fn event(state: &mut Self, surface: &ext_session_lock_surface_v1::ExtSessionLockSurfaceV1, event: ext_session_lock_surface_v1::Event, _: &(), _: &WlConnection, _: &QueueHandle<Self>) {
+        if let ext_session_lock_surface_v1::Event::Configure { serial, width, height } = event {
+            state.lock_configures.push((surface.clone(), serial, width, height));
+        }
+    }
+}
+
+impl Dispatch<wl_keyboard::WlKeyboard, ()> for ShellState {
+    fn event(state: &mut Self, _: &wl_keyboard::WlKeyboard, event: wl_keyboard::Event, _: &(), _: &WlConnection, _: &QueueHandle<Self>) {
+        match event {
+            wl_keyboard::Event::Enter { .. } => state.lock_focused = true,
+            wl_keyboard::Event::Leave { .. } => state.lock_focused = false,
+            wl_keyboard::Event::Key { key, state: WEnum::Value(wl_keyboard::KeyState::Pressed), .. } => state.lock_keys.push(key),
+            _ => {}
+        }
+    }
+}
+
+/// The session lock the test holds as the shell (ext-session-lock-v1).
+pub struct Lock {
+    lock: ext_session_lock_v1::ExtSessionLockV1,
+    surfaces: Vec<(wl_surface::WlSurface, ext_session_lock_surface_v1::ExtSessionLockSurfaceV1)>,
 }
 
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for ShellState {
@@ -412,6 +463,7 @@ pub struct Shell {
     queue: EventQueue<ShellState>,
     pub state: ShellState,
     list: HelixWindowListV1,
+    globals: GlobalList,
     dir: PathBuf,
 }
 
@@ -429,7 +481,7 @@ impl Shell {
         let list: HelixWindowListV1 = globals.bind(&qh, 1..=9, ()).expect("the shell is offered the window list");
         let mut state = ShellState::default();
         queue.roundtrip(&mut state).unwrap();
-        Shell { queue, state, list, dir }
+        Shell { queue, state, list, globals, dir }
     }
 
     pub fn roundtrip(&mut self) {
@@ -458,6 +510,58 @@ impl Shell {
     /// Do window-list `action` (helix_window_list_v1.action) to window `id`.
     pub fn action(&mut self, id: u32, action: u32) {
         self.list.window_action(id, helix_window_list_v1::Action::try_from(action).expect("a window-list action"));
+        self.roundtrip();
+    }
+
+    /// Lock the session as the shell's lock screen does: a lock surface
+    /// on every monitor, drawn, with the keyboard on it.
+    pub fn lock(&mut self) -> Lock {
+        let qh = self.queue.handle();
+        let compositor: wl_compositor::WlCompositor = self.globals.bind(&qh, 4..=6, ()).unwrap();
+        let shm: wl_shm::WlShm = self.globals.bind(&qh, 1..=1, ()).unwrap();
+        let seat: wl_seat::WlSeat = self.globals.bind(&qh, 5..=9, ()).unwrap();
+        seat.get_keyboard(&qh, ());
+        let manager: ext_session_lock_manager_v1::ExtSessionLockManagerV1 = self.globals.bind(&qh, 1..=1, ()).expect("the shell is offered the session lock");
+        let outputs: Vec<wl_output::WlOutput> = self
+            .globals
+            .contents()
+            .clone_list()
+            .into_iter()
+            .filter(|g| g.interface == "wl_output")
+            .map(|g| self.globals.registry().bind(g.name, g.version.min(4), &qh, ()))
+            .collect();
+        let lock = manager.lock(&qh, ());
+        let surfaces: Vec<_> = outputs
+            .iter()
+            .map(|output| {
+                let surface = compositor.create_surface(&qh, ());
+                let lock_surface = lock.get_lock_surface(&surface, output, &qh, ());
+                (surface, lock_surface)
+            })
+            .collect();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !(self.state.locked && self.state.lock_focused) {
+            self.roundtrip();
+            for (lock_surface, serial, w, h) in std::mem::take(&mut self.state.lock_configures) {
+                lock_surface.ack_configure(serial);
+                let surface = &surfaces.iter().find(|(_, l)| *l == lock_surface).unwrap().0;
+                surface.attach(Some(&lock_buffer(&shm, &qh, (w as i32, h as i32))), 0, 0);
+                surface.commit();
+            }
+            assert!(Instant::now() < deadline, "the session never locked with the keyboard on the lock surface (locked {}, focused {})", self.state.locked, self.state.lock_focused);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Lock { lock, surfaces }
+    }
+
+    /// Unlock the session (`lock`).
+    pub fn unlock(&mut self, lock: Lock) {
+        lock.lock.unlock_and_destroy();
+        for (surface, lock_surface) in lock.surfaces {
+            lock_surface.destroy();
+            surface.destroy();
+        }
+        self.state.locked = false;
         self.roundtrip();
     }
 
@@ -515,4 +619,19 @@ fn shell_socket(listener: &UnixListener) -> UnixStream {
         let fd = std::ptr::read_unaligned(libc::CMSG_DATA(cmsg).cast::<i32>());
         UnixStream::from(OwnedFd::from_raw_fd(fd))
     }
+}
+
+/// A plain buffer of `size` for a lock surface.
+fn lock_buffer(shm: &wl_shm::WlShm, qh: &QueueHandle<ShellState>, (w, h): (i32, i32)) -> wl_buffer::WlBuffer {
+    let bytes: Vec<u8> = std::iter::repeat_n(0xFF20_2020u32.to_le_bytes(), (w * h) as usize).flatten().collect();
+    // SAFETY: memfd_create returns a new fd we own (or -1).
+    let raw = unsafe { libc::memfd_create(c"lock-test".as_ptr(), libc::MFD_CLOEXEC) };
+    assert!(raw >= 0);
+    // SAFETY: just created.
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    std::io::Write::write_all(&mut std::fs::File::from(fd.try_clone().unwrap()), &bytes).unwrap();
+    let pool = shm.create_pool(std::os::fd::AsFd::as_fd(&fd), bytes.len() as i32, qh, ());
+    let buffer = pool.create_buffer(0, w, h, w * 4, wl_shm::Format::Argb8888, qh, ());
+    pool.destroy();
+    buffer
 }

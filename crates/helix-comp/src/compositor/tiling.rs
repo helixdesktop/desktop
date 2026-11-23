@@ -41,6 +41,13 @@ impl Helix {
         self.frames.set_preview(target.map(|(_, area)| area), PREVIEW);
     }
 
+    /// A drag ended without its button (the session locked): drop the
+    /// preview without tiling.
+    pub fn cancel_tile_preview(&mut self) {
+        self.tile_target = None;
+        self.frames.set_preview(None, PREVIEW);
+    }
+
     /// The drag of `window` ended: tile or maximize it if a preview was up.
     pub fn finish_tile_preview(&mut self, window: &Window) {
         let target = self.tile_target.take();

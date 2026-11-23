@@ -62,7 +62,6 @@ macro_rules! forward_passthrough {
         fn start_data(&self) -> &GrabStartData<Helix> {
             &self.start_data
         }
-        fn unset(&mut self, _data: &mut Helix) {}
     };
 }
 
@@ -76,6 +75,10 @@ pub struct MoveGrab {
     pub follow: bool,
     /// The window is maximized: restore it once the pointer has moved.
     pub unmaximize: bool,
+    /// Ended by its own button (which applies the tile preview); else,
+    /// ended from outside (the session locked, another grab), the
+    /// preview is dropped.
+    pub ended: bool,
 }
 
 impl PointerGrab<Helix> for MoveGrab {
@@ -113,7 +116,7 @@ impl PointerGrab<Helix> for MoveGrab {
     fn button(&mut self, data: &mut Helix, handle: &mut PointerInnerHandle<'_, Helix>, event: &ButtonEvent) {
         if self.follow {
             if event.state == smithay::backend::input::ButtonState::Pressed {
-                data.follow = None;
+                self.ended = true;
                 handle.unset_grab(self, data, event.serial, event.time, true);
                 data.finish_tile_preview(&self.window);
             }
@@ -128,11 +131,24 @@ impl PointerGrab<Helix> for MoveGrab {
                 end = ?data.space.element_location(&self.window),
                 "move finished"
             );
+            self.ended = true;
             handle.unset_grab(self, data, event.serial, event.time, true);
         }
     }
 
     forward_passthrough!();
+
+    /// However it ends (helixdesktop/desktop#239: the session locking
+    /// during a window-menu Move left the keyboard driving it, so the lock
+    /// screen got no keys).
+    fn unset(&mut self, data: &mut Helix) {
+        if self.follow {
+            data.follow = None;
+        }
+        if !self.ended {
+            data.cancel_tile_preview();
+        }
+    }
 }
 
 /// Which edges are being dragged (xdg_toplevel resize edge bits).
@@ -266,7 +282,6 @@ impl PointerGrab<Helix> for ResizeGrab {
             if event.state != smithay::backend::input::ButtonState::Pressed {
                 return;
             }
-            data.follow = None;
         } else {
             handle.button(data, event);
             if handle.current_pressed().contains(&self.start_data.button) {
@@ -274,19 +289,32 @@ impl PointerGrab<Helix> for ResizeGrab {
             }
         }
         handle.unset_grab(self, data, event.serial, event.time, true);
-        if let Some(toplevel) = self.window.toplevel() {
-            toplevel.with_pending_state(|state| {
-                state.states.unset(xdg_toplevel::State::Resizing);
-                state.size = Some(self.last_size);
-            });
-            toplevel.configure_pending();
-        }
-        if let Some(tracking) = data.resize.as_mut() {
-            tracking.finished = true;
-        }
     }
 
     forward_passthrough!();
+
+    /// However it ends: no longer Resizing, at the last size, and the
+    /// tracking finished, so later commits don't re-anchor the window
+    /// (helixdesktop/desktop#239). Escape (`cancel_follow`) takes `follow`
+    /// first and puts the window back itself.
+    fn unset(&mut self, data: &mut Helix) {
+        let cancelled = self.follow && data.follow.is_none();
+        if self.follow {
+            data.follow = None;
+        }
+        if !cancelled {
+            if let Some(toplevel) = self.window.toplevel() {
+                toplevel.with_pending_state(|state| {
+                    state.states.unset(xdg_toplevel::State::Resizing);
+                    state.size = Some(self.last_size);
+                });
+                toplevel.configure_pending();
+            }
+        }
+        if let Some(tracking) = data.resize.as_mut().filter(|t| t.window == self.window) {
+            tracking.finished = true;
+        }
+    }
 }
 
 #[cfg(test)]

@@ -679,7 +679,7 @@ impl Helix {
         let start_data = GrabStartData { focus: None, button: super::input::BTN_LEFT, location: pos };
         pointer.set_grab(
             self,
-            MoveGrab { start_data, window, initial_location, follow: false, unmaximize },
+            MoveGrab { start_data, window, initial_location, follow: false, unmaximize, ended: false },
             SERIAL_COUNTER.next_serial(),
             Focus::Clear,
         );
