@@ -5,6 +5,7 @@
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use smithay::output::{Output, WeakOutput};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
@@ -71,7 +72,36 @@ pub(super) struct State {
     /// Where Helix last put it, in Helix's logical coordinates.
     pub last_configure: Rectangle<i32, Logical>,
     pub outputs: Vec<(WeakOutput, Rectangle<i32, Logical>)>,
+    pub sync: SyncState,
 }
+
+/// `_NET_WM_SYNC_REQUEST` (EWMH): a client that takes part is told a
+/// number before each resize and sets its counter to it once it has drawn
+/// the new size; the next resize waits for that, so resizes don't show
+/// half-drawn frames. One that doesn't answer in time isn't waited for
+/// again.
+#[derive(Debug, Default)]
+pub(super) struct SyncState {
+    /// It lists `_NET_WM_SYNC_REQUEST` in `WM_PROTOCOLS`.
+    pub request: bool,
+    /// Its `_NET_WM_SYNC_REQUEST_COUNTER`.
+    pub counter: Option<u32>,
+    /// The Sync alarm on the counter (none yet: 0).
+    pub alarm: u32,
+    /// The last number it was told.
+    pub value: i64,
+    /// The size of the last resize it was told about.
+    pub size: Option<Size<i32, Logical>>,
+    /// Until when the last one is waited for.
+    pub wait: Option<Instant>,
+    /// The resize waiting for it.
+    pub queued: Option<Rectangle<i32, Logical>>,
+    /// It didn't answer in time once.
+    pub broken: bool,
+}
+
+/// How long a resize waits for an app to draw the last one.
+pub(super) const SYNC_TIMEOUT: Duration = Duration::from_millis(200);
 
 #[derive(Debug)]
 pub(super) struct Shared {
@@ -233,6 +263,13 @@ impl XWin {
         Rectangle::new((l, t).into(), ((bbox.size.w - l - r).max(0), (bbox.size.h - t - b).max(0)).into())
     }
 
+    /// The shadow GTK draws around it (`_GTK_FRAME_EXTENTS`), in Helix's
+    /// logical coordinates: left, right, top, bottom.
+    pub fn shadow(&self) -> [i32; 4] {
+        let e = self.state().frame_extents;
+        e.map(|v| self.x_to_logical(v))
+    }
+
     /// The window's own rectangle: its surface's size once it has one.
     pub fn bbox(&self) -> Rectangle<i32, Logical> {
         let state = self.state();
@@ -284,6 +321,9 @@ impl XWin {
             state.last_configure = rect;
             rect
         };
+        if !self.sync_before(&conn, rect)? {
+            return Ok(());
+        }
         let (x, y, w, h) = (self.logical_to_x(rect.loc.x), self.logical_to_x(rect.loc.y), self.logical_to_x(rect.size.w).max(1), self.logical_to_x(rect.size.h).max(1));
         conn.configure_window(self.0.id, &ConfigureWindowAux::new().x(x).y(y).width(w as u32).height(h as u32).border_width(0))?;
         let event = ConfigureNotifyEvent {
@@ -301,6 +341,84 @@ impl XWin {
         };
         conn.send_event(false, self.0.id, EventMask::STRUCTURE_NOTIFY, event)?;
         conn.flush()
+    }
+
+    /// Before giving it `rect`: if it syncs (`_NET_WM_SYNC_REQUEST`) and
+    /// this is a resize, tell it the next number and watch its counter
+    /// for it; while it hasn't drawn the last resize, `rect` waits
+    /// (false: not now).
+    fn sync_before(&self, conn: &RustConnection, rect: Rectangle<i32, Logical>) -> Result<bool, ConnectionError> {
+        use x11rb::protocol::sync::{ChangeAlarmAux, ConnectionExt as _, CreateAlarmAux, Int64, TESTTYPE, VALUETYPE};
+        let mut state = self.state();
+        // Not before it is shown and has a surface to draw in.
+        let shown = state.wl_surface.is_some();
+        let sync = &mut state.sync;
+        let Some(counter) = sync.counter.filter(|_| sync.request && !sync.broken && shown) else { return Ok(true) };
+        let resize = sync.size != Some(rect.size);
+        if !resize && sync.queued.is_none() {
+            return Ok(true);
+        }
+        if let Some(until) = sync.wait {
+            if Instant::now() < until {
+                sync.queued = Some(rect);
+                return Ok(false);
+            }
+            // It never drew the last one: no more waiting for it.
+            sync.broken = true;
+            sync.wait = None;
+            sync.queued = None;
+            return Ok(true);
+        }
+        sync.queued = None;
+        if !resize {
+            return Ok(true);
+        }
+        sync.value += 1;
+        let value = Int64 { hi: (sync.value >> 32) as i32, lo: sync.value as u32 };
+        if sync.alarm == 0 {
+            let Ok(alarm) = conn.generate_id() else { return Ok(true) };
+            let aux = CreateAlarmAux::new().counter(counter).value_type(VALUETYPE::ABSOLUTE).value(value).test_type(TESTTYPE::POSITIVE_COMPARISON).delta(Int64 { hi: 0, lo: 0 }).events(1);
+            conn.sync_create_alarm(alarm, &aux)?;
+            sync.alarm = alarm;
+        } else {
+            conn.sync_change_alarm(sync.alarm, &ChangeAlarmAux::new().value(value).events(1))?;
+        }
+        let message = ClientMessageEvent::new(32, self.0.id, self.0.atoms.WM_PROTOCOLS, [self.0.atoms._NET_WM_SYNC_REQUEST, x11rb::CURRENT_TIME, value.lo, value.hi as u32, 0]);
+        conn.send_event(false, self.0.id, EventMask::NO_EVENT, message)?;
+        sync.size = Some(rect.size);
+        sync.wait = Some(Instant::now() + SYNC_TIMEOUT);
+        Ok(true)
+    }
+
+    /// Its sync alarm went off: it drew the last resize; the one waiting
+    /// goes now.
+    pub(super) fn sync_done(&self) -> Result<(), ConnectionError> {
+        let queued = {
+            let mut state = self.state();
+            state.sync.wait = None;
+            state.sync.queued.take()
+        };
+        match queued {
+            Some(rect) => self.configure(Some(rect)),
+            None => Ok(()),
+        }
+    }
+
+    /// When the resize waiting for it goes anyway, if one does.
+    pub(super) fn sync_deadline(&self) -> Option<Instant> {
+        let state = self.state();
+        state.sync.queued.and(state.sync.wait)
+    }
+
+    /// The resize waiting for it goes if it waited long enough (and the
+    /// app isn't waited for again).
+    pub(super) fn sync_expired(&self, now: Instant) -> Result<(), ConnectionError> {
+        if self.sync_deadline().is_some_and(|d| d <= now) {
+            // Past its deadline: configure doesn't wait any more.
+            self.configure(None)
+        } else {
+            Ok(())
+        }
     }
 
     /// Sets or clears EWMH states in `_NET_WM_STATE`.

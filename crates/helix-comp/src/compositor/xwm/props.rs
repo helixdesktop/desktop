@@ -11,7 +11,7 @@ use super::window::XWin;
 
 /// The properties read when a window is managed or shown, and again when
 /// one changes.
-fn watched(a: &Atoms) -> [u32; 11] {
+fn watched(a: &Atoms) -> [u32; 12] {
     [
         a.WM_NAME,
         a._NET_WM_NAME,
@@ -24,6 +24,7 @@ fn watched(a: &Atoms) -> [u32; 11] {
         a._NET_WM_WINDOW_TYPE,
         a._MOTIF_WM_HINTS,
         a._GTK_FRAME_EXTENTS,
+        a._NET_WM_SYNC_REQUEST_COUNTER,
     ]
 }
 
@@ -112,7 +113,9 @@ fn apply(a: &Atoms, win: &XWin, atom: u32, reply: Option<&GetPropertyReply>) {
             let v = cardinals(reply);
             s.delete_window = v.contains(&a.WM_DELETE_WINDOW);
             s.take_focus = v.contains(&a.WM_TAKE_FOCUS);
+            s.sync.request = v.contains(&a._NET_WM_SYNC_REQUEST);
         }
+        x if x == a._NET_WM_SYNC_REQUEST_COUNTER => s.sync.counter = cardinals(reply).first().copied().filter(|c| *c != x11rb::NONE),
         x if x == a._NET_WM_PID => s.pid = cardinals(reply).first().copied().filter(|p| *p > 0),
         x if x == a._NET_WM_WINDOW_TYPE => s.window_type = cardinals(reply),
         x if x == a._MOTIF_WM_HINTS => {

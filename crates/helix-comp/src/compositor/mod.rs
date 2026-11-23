@@ -202,6 +202,8 @@ pub struct Helix {
     /// Helix's own X11 window manager, when chosen (`HELIX_XWM=helix`, #191).
     pub hxwm: Option<xwm::Xwm>,
     pub hxwm_source: Option<smithay::reexports::calloop::RegistrationToken>,
+    /// A timer is set for a resize waiting on an X11 app's redraw (#191).
+    pub hxwm_sync_timer: bool,
     /// The X root cursor's theme, size and scale, as last set.
     pub x11_cursor: Option<(String, u32, i32)>,
     /// The running Xwayland's event source (removing it gives its display
@@ -386,6 +388,7 @@ impl Helix {
             xwm: None,
             hxwm: None,
             hxwm_source: None,
+            hxwm_sync_timer: false,
             xdisplay: None,
             xwayland_client: None,
             xsettings: None,
@@ -612,6 +615,10 @@ impl Helix {
             Some(n) => cmd.env("DISPLAY", format!(":{n}")),
             None => cmd.env_remove("DISPLAY"),
         };
+        // See `announce_socket`: Java and Helix's own window manager.
+        if self.xdisplay.is_some() && xwm::helix_selected() {
+            cmd.env("_JAVA_AWT_WM_NONREPARENTING", "1");
+        }
         match helix_comp::xauth::current().filter(|_| self.xdisplay.is_some()) {
             Some(auth) => cmd.env("XAUTHORITY", auth.path),
             None => cmd.env_remove("XAUTHORITY"),

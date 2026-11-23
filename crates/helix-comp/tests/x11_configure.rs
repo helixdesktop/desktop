@@ -151,7 +151,7 @@ fn a_size_asked_for_before_mapping_is_kept() {
 /// before it shows, so it does not draw at the wrong size first.
 #[test]
 fn maximized_before_mapping_gets_its_size_first() {
-    if common::known_failure(&[common::Xwm::Smithay, common::Xwm::Helix], "a window maximized before mapping is mapped first and resized after (#191)") {
+    if common::known_failure(&[common::Xwm::Smithay], "Smithay's window manager maps the window in its frame at MapRequest, before Helix sizes it (#191)") {
         return;
     }
     let Some(session) = xwm::session() else { return };
@@ -214,9 +214,6 @@ fn the_minimum_size_is_kept() {
 /// maximized: its visible part fills the screen, the shadow beyond it.
 #[test]
 fn a_maximized_window_puts_its_shadow_off_screen() {
-    if common::known_failure(&[common::Xwm::Smithay, common::Xwm::Helix], "a maximized window's shadow (_GTK_FRAME_EXTENTS) is kept on screen (#191)") {
-        return;
-    }
     let Some(session) = xwm::session() else { return };
     let x = X::new(&session);
     let window = x.window();
@@ -235,9 +232,6 @@ fn a_maximized_window_puts_its_shadow_off_screen() {
 /// each resize, so resizes don't show half-drawn frames.
 #[test]
 fn resizes_are_announced_to_apps_that_sync() {
-    if common::not_yet("#191 step 3, next part: _NET_WM_SYNC_REQUEST") {
-        return;
-    }
     if common::known_failure(&[common::Xwm::Smithay], "no _NET_WM_SYNC_REQUEST before a resize (#191)") {
         return;
     }
@@ -264,6 +258,30 @@ fn resizes_are_announced_to_apps_that_sync() {
         _ => None,
     });
     assert!(announced, "no _NET_WM_SYNC_REQUEST before the resize");
+}
+
+/// X43: an app that says it syncs but never sets its counter (hung, or
+/// broken) still gets every resize, the one waiting for it after a short
+/// while.
+#[test]
+fn an_app_that_never_answers_a_sync_request_still_resizes() {
+    let Some(session) = xwm::session() else { return };
+    let x = X::new(&session);
+    x11rb::protocol::sync::ConnectionExt::sync_initialize(&x.conn, 3, 1).unwrap().reply().unwrap();
+    let counter = x.conn.generate_id().unwrap();
+    x11rb::protocol::sync::ConnectionExt::sync_create_counter(&x.conn, counter, x11rb::protocol::sync::Int64 { hi: 0, lo: 0 }).unwrap();
+    let window = x.window();
+    x.set_atoms(window, "WM_PROTOCOLS", &["WM_DELETE_WINDOW", "_NET_WM_SYNC_REQUEST"]);
+    x.set32(window, "_NET_WM_SYNC_REQUEST_COUNTER", AtomEnum::CARDINAL, &[counter]);
+    x.map_managed(window);
+    std::thread::sleep(Duration::from_millis(300));
+    let normal = x.size(window);
+    for round in 0..2 {
+        x.net_wm_state(window, 1, &MAXIMIZED);
+        until(&format!("round {round}: the window was not maximized"), || x.size(window).0 == xwm::SCREEN.0);
+        x.net_wm_state(window, 0, &MAXIMIZED);
+        until(&format!("round {round}: the window was not restored"), || x.size(window) == normal);
+    }
 }
 
 /// X44: `_NET_WM_MOVERESIZE` from an app's own title bar (Steam,

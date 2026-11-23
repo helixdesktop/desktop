@@ -22,6 +22,7 @@ x11rb::atom_manager! {
         _NET_WM_PID,
         _NET_WM_PING,
         _NET_WM_SYNC_REQUEST,
+        _NET_WM_SYNC_REQUEST_COUNTER,
         _NET_CLIENT_LIST,
         _NET_CLIENT_LIST_STACKING,
         _NET_ACTIVE_WINDOW,
