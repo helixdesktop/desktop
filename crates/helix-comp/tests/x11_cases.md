@@ -168,7 +168,7 @@ Apps are the ones the upstream reports name.
 | X105 | S40 | The INCR size hint is not data | GTK on X11 | `x11_clipboard::a_large_x11_image_pastes_whole` |
 | X91 | W74 | X11 apps refused the clipboard while no X11 window has focus | | not applicable: Helix serves every request, as GNOME does (#172) |
 | X96 | W65 | CLIPBOARD and PRIMARY changed at once keep their own types | `x11_selection::clipboard_and_primary_taken_at_once_keep_their_own_types` |
-| X97 | W68 | Ownership flipping fast between an X11 app and the WM: no self-copy loop | Emacs | `x11_selection::clipboard_ownership_flipping_fast_settles` (ignored), `x11_selection::the_clipboard_recovers_after_ownership_flipped_fast` |
+| X97 | W68 | Ownership flipping fast between an X11 app and the WM: no self-copy loop | Emacs | `x11_selection::clipboard_ownership_flipping_fast_settles` (fixed in #197), `x11_selection::the_clipboard_recovers_after_ownership_flipped_fast` |
 
 ## Drag and drop
 
