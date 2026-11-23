@@ -416,14 +416,23 @@ impl Helix {
             self.map_unfocused_x11(&window, &x11, kind);
             return;
         }
-        let (x, y) = self.next_window_position();
-        // Room for the title bar Helix draws above it.
-        let location: smithay::utils::Point<i32, Logical> = (x, y + super::frames::frame_top(&window)).into();
         let size = x11.last_configure().size;
+        // Where the user said it goes (`USPosition`: `-geometry`, a saved
+        // session), as mutter: kept, on a monitor as a move after mapping
+        // is (#226). Dialogs and transients go over their parent, and a
+        // position the program chose (`PPosition`) is Helix's to choose.
+        let user_placed = !taken_over && x11.user_position() && x11.transient_for().is_none() && x11.window_type() != Some(smithay::xwayland::xwm::WmWindowType::Dialog);
+        let location: Point<i32, Logical> = if user_placed {
+            self.constrained_x11_position(&window, x11.last_configure().loc, size)
+        } else {
+            let (x, y) = self.next_window_position();
+            // Room for the title bar Helix draws above it.
+            (x, y + super::frames::frame_top(&window)).into()
+        };
         if !taken_over {
             let _ = x11.configure(Rectangle::new(location, size));
         }
-        tracing::info!(title = x11.title(), class = x11.class(), ?location, ?size, "new X11 window");
+        tracing::info!(title = x11.title(), class = x11.class(), ?location, ?size, user_placed, "new X11 window");
         self.map_new_window(&window, location);
         if let Some(output) = legacy {
             tracing::info!(output = output.name(), "X11 window covers a monitor: full screen");
@@ -438,7 +447,9 @@ impl Helix {
             self.forget_window(&window);
             return;
         }
-        self.place_new_window(&window);
+        if !user_placed {
+            self.place_new_window(&window);
+        }
         if x11.is_above() {
             self.set_above(&window, true);
         }
@@ -550,7 +561,7 @@ impl Helix {
         // A position asked for after it is shown (Wine's SetWindowPos,
         // installers and launchers), as mutter: kept on a monitor, its
         // title bar within the work area (#226). Where a new window first
-        // goes stays Helix's choice.
+        // goes is Helix's choice unless the user's (`USPosition`).
         if x.is_some() || y.is_some() {
             if let Some(window) = self.x11_window(&x11).filter(|w| self.presence(w) == super::wm::Presence::Shown) {
                 geo.loc = self.constrained_x11_position(&window, (x.unwrap_or(geo.loc.x), y.unwrap_or(geo.loc.y)).into(), geo.size);
@@ -917,6 +928,12 @@ impl Helix {
                     self.fullscreen(&window, None);
                 } else {
                     self.restore_window(&window);
+                }
+            }
+            A::FullscreenMonitors(w) => {
+                // Full screen now: over the monitors it named (or its own).
+                if let Some(window) = self.x11_window(&x(w)).filter(|w| self.is_taken_over(w, super::wm::Takeover::Fullscreen)) {
+                    self.fullscreen(&window, None);
                 }
             }
             A::Maximize(w, on) => {

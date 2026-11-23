@@ -51,7 +51,7 @@ use std::time::{Duration, Instant};
 use helix_protocols::gtk_shell_client::{gtk_shell1, gtk_surface1};
 use helix_test_support::headless::HeadlessSession;
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
-use wayland_client::protocol::{wl_buffer, wl_compositor, wl_data_device, wl_data_device_manager, wl_data_offer, wl_data_source, wl_keyboard, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface};
+use wayland_client::protocol::{wl_buffer, wl_compositor, wl_data_device, wl_data_device_manager, wl_data_offer, wl_data_source, wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface};
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
 use wayland_protocols::wp::primary_selection::zv1::client::{zwp_primary_selection_device_manager_v1 as primary_manager, zwp_primary_selection_device_v1 as primary_device, zwp_primary_selection_offer_v1 as primary_offer};
 use wayland_protocols::xdg::activation::v1::client::{xdg_activation_token_v1, xdg_activation_v1};
@@ -123,7 +123,7 @@ macro_rules! quiet {
         }
     )*};
 }
-quiet!(wl_data_device_manager::WlDataDeviceManager, wl_compositor::WlCompositor, wl_surface::WlSurface, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_buffer::WlBuffer, wl_seat::WlSeat, xdg_activation_v1::XdgActivationV1, gtk_shell1::GtkShell1, gtk_surface1::GtkSurface1);
+quiet!(wl_output::WlOutput, wl_data_device_manager::WlDataDeviceManager, wl_compositor::WlCompositor, wl_surface::WlSurface, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_buffer::WlBuffer, wl_seat::WlSeat, xdg_activation_v1::XdgActivationV1, gtk_shell1::GtkShell1, gtk_surface1::GtkSurface1);
 
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
     fn event(_: &mut Self, _: &wl_registry::WlRegistry, _: wl_registry::Event, _: &GlobalListContents, _: &Connection, _: &QueueHandle<Self>) {}
@@ -294,6 +294,8 @@ pub struct Client {
     /// The primary selection device, when the compositor offers one.
     pub primary_device: Option<primary_device::ZwpPrimarySelectionDeviceV1>,
     layer_shell: Option<wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1>,
+    /// The monitors, in the order the compositor advertised them.
+    pub outputs: Vec<wl_output::WlOutput>,
 }
 
 pub struct Toplevel {
@@ -357,10 +359,15 @@ impl Client {
     /// A panel along the top of the screen, `height` tall, that keeps
     /// windows below it (a top-layer surface with an exclusive zone).
     pub fn panel(&mut self, height: i32) -> Panel {
+        self.panel_on(height, None)
+    }
+
+    /// [`Self::panel`] on `output` (`None`: where the compositor puts it).
+    pub fn panel_on(&mut self, height: i32, output: Option<&wl_output::WlOutput>) -> Panel {
         use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1::Anchor};
         let shell = self.layer_shell.clone().expect("helix-comp offers zwlr_layer_shell_v1");
         let surface = self.compositor.create_surface(&self.qh, ());
-        let layer = shell.get_layer_surface(&surface, None, zwlr_layer_shell_v1::Layer::Top, "test-panel".into(), &self.qh, ());
+        let layer = shell.get_layer_surface(&surface, output, zwlr_layer_shell_v1::Layer::Top, "test-panel".into(), &self.qh, ());
         layer.set_size(0, height as u32);
         layer.set_anchor(Anchor::Top | Anchor::Left | Anchor::Right);
         layer.set_exclusive_zone(height);
@@ -500,8 +507,12 @@ pub fn connect(session: &HeadlessSession) -> Client {
     let data_device = manager.get_data_device(&seat, &qh, ());
     let primary_device = globals.bind::<primary_manager::ZwpPrimarySelectionDeviceManagerV1, _, _>(&qh, 1..=1, ()).ok().map(|m| m.get_device(&seat, &qh, ()));
     let layer_shell = globals.bind(&qh, 1..=4, ()).ok();
+    let outputs = globals.contents().with_list(|list| {
+        list.iter().filter(|g| g.interface == "wl_output").map(|g| globals.registry().bind::<wl_output::WlOutput, _, _>(g.name, g.version.min(4), &qh, ())).collect()
+    });
     Client {
         layer_shell,
+        outputs,
         primary_device,
         compositor: globals.bind(&qh, 4..=6, ()).unwrap(),
         shm: globals.bind(&qh, 1..=1, ()).unwrap(),

@@ -423,6 +423,25 @@ impl X11Window {
         either!(self, x => x.max_size())
     }
 
+    /// Whether the user chose where it goes (`WM_NORMAL_HINTS`
+    /// `USPosition`, e.g. `-geometry`): its first position is kept.
+    pub fn user_position(&self) -> bool {
+        match self {
+            Self::Smithay(s) => s.size_hints().is_some_and(|h| matches!(h.position, Some((x11rb::properties::WmSizeHintsSpecification::UserSpecified, _, _)))),
+            Self::Helix(w) => w.user_position(),
+        }
+    }
+
+    /// The monitors its full screen spans (`_NET_WM_FULLSCREEN_MONITORS`:
+    /// top, bottom, left, right), as they were when it named them. Only
+    /// Helix's window manager takes them.
+    pub fn fullscreen_monitors(&self) -> Option<[Rectangle<i32, Logical>; 4]> {
+        match self {
+            Self::Smithay(_) => None,
+            Self::Helix(w) => w.fullscreen_monitors(),
+        }
+    }
+
     /// Whether it decorates itself: `_MOTIF_WM_HINTS` asks for no
     /// decorations, so Helix draws no title bar for it.
     pub fn is_decorated(&self) -> bool {

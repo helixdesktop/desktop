@@ -106,6 +106,9 @@ Apps are the ones the upstream reports name.
 | X94 | W30 | Input shape: clicks outside it go through | shaped windows, OSDs | `x11_focus::the_pointer_outside_an_input_shape_goes_through` (fixed in #208) |
 | X95 | W28 | Windows at negative layout coordinates | | not testable headlessly: the headless session has one monitor at 0,0 |
 | X98 | W43 | `_MOTIF_WM_HINTS` without decorations: no title bar from Helix | Steam, Chromium | `x11_props::motif_hints_without_decorations_get_no_title_bar`; a truncated property: `x11_props` garbage tests |
+| X122 | | Initial position: `USPosition` (the user's, e.g. `-geometry`) is kept at first map, on a monitor; `PPosition` (the program's) is not, Helix places the window (as mutter; transients and dialogs go over their parent either way) (#226) | xterm, saved sessions | `x11_self_placing::a_user_position_is_kept_at_map`, `x11_self_placing::a_user_position_off_screen_stays_on_it`, `x11_self_placing::a_program_position_is_not_kept` |
+| X123 | | Borderless full screen (an undecorated window covering a monitor exactly) and moves after mapping, kept on a monitor (#226) | SDL, Unity and Wine games; installers | `x11_self_placing` |
+| X124 | | `_NET_WM_FULLSCREEN_MONITORS`: full screen over the Xinerama monitors named (one, or several spanned, the shell's panels there covered), named before or after going full screen or before mapping; the property kept on the window; an index past the last or a monitor unplugged falls back to the window's own monitor. Indices are Xwayland's Xinerama order: the order the compositor advertised its `wl_output`s, not position or primary (#226) | games picking a monitor, flight and racing sims | `x11_fullscreen_monitors` (Helix's window manager only; Smithay's doesn't advertise it) |
 
 ## Properties
 

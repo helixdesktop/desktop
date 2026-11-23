@@ -66,6 +66,7 @@ x11rb::atom_manager! {
         _NET_NUMBER_OF_DESKTOPS,
         _NET_CURRENT_DESKTOP,
         _NET_WM_DESKTOP,
+        _NET_WM_FULLSCREEN_MONITORS,
         _NET_REQUEST_FRAME_EXTENTS,
         _NET_WM_ALLOWED_ACTIONS,
         _NET_WM_ACTION_MOVE,

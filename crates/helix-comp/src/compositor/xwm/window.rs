@@ -37,6 +37,10 @@ pub struct Hints {
     pub iconic: bool,
     pub min: Option<(i32, i32)>,
     pub max: Option<(i32, i32)>,
+    /// `WM_NORMAL_HINTS` says the user chose where the window goes
+    /// (`USPosition`, e.g. `-geometry`); a position the program chose
+    /// (`PPosition`) isn't kept apart: Helix places those itself.
+    pub user_position: bool,
 }
 
 #[derive(Debug, Default)]
@@ -82,6 +86,10 @@ pub(super) struct State {
     /// again only when they change).
     pub frame_top: Option<u32>,
     pub desktop: Option<u32>,
+    /// `_NET_WM_FULLSCREEN_MONITORS`: the Xinerama monitors (top, bottom,
+    /// left, right) its full screen spans, as the X server had them when
+    /// the client named them: x, y, width, height in X pixels.
+    pub fullscreen_monitors: Option<[[i32; 4]; 4]>,
 }
 
 /// `_NET_WM_SYNC_REQUEST` (EWMH): a client that takes part is told a
@@ -236,6 +244,18 @@ impl XWin {
 
     pub fn max_size(&self) -> Option<Size<i32, Logical>> {
         self.state().hints.max.map(|(w, h)| self.size_from_x(w, h))
+    }
+
+    /// Whether the user chose where it goes (`USPosition`).
+    pub fn user_position(&self) -> bool {
+        self.state().hints.user_position
+    }
+
+    /// The monitors its full screen spans (`_NET_WM_FULLSCREEN_MONITORS`:
+    /// top, bottom, left, right), in Helix's logical coordinates.
+    pub fn fullscreen_monitors(&self) -> Option<[Rectangle<i32, Logical>; 4]> {
+        let monitors = self.state().fullscreen_monitors?;
+        Some(monitors.map(|[x, y, w, h]| Rectangle::new((self.x_to_logical(x), self.x_to_logical(y)).into(), self.size_from_x(w, h))))
     }
 
     fn has(&self, atom: u32) -> bool {

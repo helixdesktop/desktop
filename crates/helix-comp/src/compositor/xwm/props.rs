@@ -107,6 +107,7 @@ fn apply(a: &Atoms, win: &XWin, atom: u32, reply: Option<&GetPropertyReply>) {
             s.hints.min = s.hints.min.filter(|(w, h)| *w > 0 || *h > 0);
             s.hints.max = if flags & 32 != 0 { pair(7) } else { None };
             s.hints.max = s.hints.max.filter(|(w, h)| *w > 0 || *h > 0);
+            s.hints.user_position = flags & 1 != 0;
         }
         x if x == a.WM_TRANSIENT_FOR => {
             s.transient_for = cardinals(reply).first().copied().filter(|w| *w != x11rb::NONE && *w != win.window_id());

@@ -2,7 +2,9 @@
 //! window covering a monitor exactly is full screen there (how SDL, Unity
 //! and Wine titles do borderless full screen), and a window moving itself
 //! after it is shown (Wine's SetWindowPos, installers, launchers) goes
-//! there, kept on a monitor. Under either window manager (`HELIX_XWM`).
+//! there, kept on a monitor. At first map a position the user asked for
+//! (`USPosition`) is kept, one the program chose (`PPosition`) is not.
+//! Under either window manager (`HELIX_XWM`).
 
 mod common;
 
@@ -84,4 +86,57 @@ fn a_window_moving_itself_off_screen_stays_on_it() {
     let (px, py) = x.position(window);
     let (w, _) = x.size(window);
     assert!(i32::from(px) + i32::from(w) > 0 && py > 0, "the window went off the screen: {:?}", (px, py));
+}
+
+/// `WM_NORMAL_HINTS` with a position (`USPosition` 1 or `PPosition` 4)
+/// for a 200×100 window.
+fn position_hint(x: &X, window: u32, flags: u32, (px, py): (i16, i16)) {
+    let mut hints = [0u32; 18];
+    hints[0] = flags;
+    hints[1] = px as u32;
+    hints[2] = py as u32;
+    hints[3] = 200;
+    hints[4] = 100;
+    x.set32(window, "WM_NORMAL_HINTS", x11rb::protocol::xproto::AtomEnum::WM_SIZE_HINTS, &hints);
+}
+
+/// A position the user asked for (`USPosition`: `xterm -geometry +X+Y`, a
+/// saved session) is where the window first shows, as mutter.
+#[test]
+fn a_user_position_is_kept_at_map() {
+    let Some(session) = session() else { return };
+    let x = X::new(&session);
+    let window = x.create((420, 330), (200, 100));
+    position_hint(&x, window, 1, (420, 330));
+    x.map_managed(window);
+    // Where Helix would place it otherwise comes right after it is mapped.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(x.position(window), (420, 330), "the window did not show where the user asked");
+}
+
+/// A user position off the screen is kept on it, its title bar reachable,
+/// as a move after mapping is.
+#[test]
+fn a_user_position_off_screen_stays_on_it() {
+    let Some(session) = session() else { return };
+    let x = X::new(&session);
+    let window = x.create((-3000, -3000), (200, 100));
+    position_hint(&x, window, 1, (-3000, -3000));
+    x.map_managed(window);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let (px, py) = x.position(window);
+    assert!(px + 200 > 0 && py > 0, "the window showed off the screen: {:?}", (px, py));
+}
+
+/// A position the program chose (`PPosition`) is not: Helix places the
+/// window, as mutter.
+#[test]
+fn a_program_position_is_not_kept() {
+    let Some(session) = session() else { return };
+    let x = X::new(&session);
+    let window = x.create((420, 330), (200, 100));
+    position_hint(&x, window, 4, (420, 330));
+    x.map_managed(window);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_ne!(x.position(window), (420, 330), "the program's own position was kept");
 }
