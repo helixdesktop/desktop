@@ -493,6 +493,13 @@ impl X11Window {
         either!(self, x => x.set_modal(modal))
     }
 
+    /// Tells it it is minimized or shown again: `WM_STATE` Iconic or
+    /// Normal, and `_NET_WM_STATE_HIDDEN` (ICCCM 4.1.4, EWMH). Wine and
+    /// Proton games wait for it to draw again after a restore (#194).
+    pub fn set_hidden(&self, hidden: bool) -> Result<(), ConnectionError> {
+        either!(self, x => x.set_hidden(hidden))
+    }
+
     /// Asks it to close (`WM_DELETE_WINDOW`, or destroys it).
     pub fn close(&self) -> Result<(), ConnectionError> {
         either!(self, x => x.close())

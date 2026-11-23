@@ -131,9 +131,6 @@ fn a_window_asking_to_start_iconic_starts_minimized() {
 /// minimize (Dishonored 2 restores this way).
 #[test]
 fn minimize_and_restore() {
-    if common::known_failure(&[common::Xwm::Smithay, common::Xwm::Helix], "Helix minimizes X11 windows without telling them (no WM_STATE Iconic, no _NET_WM_STATE_HIDDEN) (#191)") {
-        return;
-    }
     let Some(session) = xwm::session() else { return };
     let x = X::new(&session);
     let window = x.mapped();

@@ -220,6 +220,9 @@ impl Helix {
         if let Some(pos) = self.minimized.iter().position(|w| w == window) {
             let window = self.minimized.remove(pos);
             let location = self.minimized_at.remove(pos);
+            if let Some(x11) = window.x11_surface() {
+                let _ = x11.set_hidden(false);
+            }
             self.animations.window_opened(self.wm_settings.motion, &window);
             self.space.map_element(window, location, false);
         }
@@ -544,6 +547,9 @@ impl Helix {
         });
         self.window_leaves(window, helix_comp::animation::Kind::Minimize, target, 0);
         self.space.unmap_elem(window);
+        if let Some(x11) = window.x11_surface() {
+            let _ = x11.set_hidden(true);
+        }
         self.minimized.push(window.clone());
         self.minimized_at.push(location);
         match self.top_window() {
