@@ -357,9 +357,12 @@ fn the_display_is_released_at_exit() {
     let Some(session) = session() else { return };
     let number = session.x_display.trim_start_matches(':').to_owned();
     let lock = std::path::PathBuf::from(format!("/tmp/.X{number}-lock"));
-    assert!(lock.exists(), "no {}", lock.display());
+    let ours = std::fs::read_to_string(&lock).unwrap_or_else(|_| panic!("no {}", lock.display()));
     drop(session);
-    assert!(!lock.exists(), "{} is left behind", lock.display());
+    // Gone, or another server's by now: tests running alongside start
+    // sessions too, and one may take the display the moment it's free.
+    let now = std::fs::read_to_string(&lock).ok();
+    assert!(now.as_deref() != Some(ours.as_str()), "{} is left behind ({})", lock.display(), ours.trim());
 }
 
 #[test]
