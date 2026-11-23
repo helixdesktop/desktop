@@ -367,7 +367,7 @@ fn framed_x11_title_bar_drag_keeps_the_pointer_on_the_title_bar() {
         session.input("move 5 5");
         let window = conn.generate_id().unwrap();
         let (w, h) = (RESTORED.0 as u16, RESTORED.1 as u16);
-        let aux = CreateWindowAux::new().background_pixel(0x80_8080).event_mask(EventMask::STRUCTURE_NOTIFY);
+        let aux = CreateWindowAux::new().background_pixel(0x80_8080).event_mask(EventMask::STRUCTURE_NOTIFY | EventMask::POINTER_MOTION | EventMask::ENTER_WINDOW);
         conn.create_window(x11rb::COPY_DEPTH_FROM_PARENT, window, root, 0, 0, w, h, 0, WindowClass::INPUT_OUTPUT, 0, &aux).unwrap();
         conn.change_property8(PropMode::REPLACE, window, AtomEnum::WM_NAME, AtomEnum::STRING, b"framed").unwrap();
         conn.map_window(window).unwrap();
@@ -380,8 +380,28 @@ fn framed_x11_title_bar_drag_keeps_the_pointer_on_the_title_bar() {
         let maximized = (0, TITLE_H, SIZE.0, SIZE.1 - TITLE_H);
         wait(&|| format!("window {i} is not maximized: {:?}", rect(window)), &|| rect(window) == Some(maximized));
 
-        // Grab Helix's title bar (above the window), drag to the other monitor.
+        // Helix draws the title bar as wide as the window's surface, which
+        // gets the maximized size when Xwayland next draws it (after the X
+        // geometry): wait until the pointer reaches the window below
+        // where the title bar is grabbed.
         let grab = (900.0, 12.0);
+        let end = Instant::now() + Duration::from_secs(10);
+        'drawn: loop {
+            assert!(Instant::now() < end, "window {i}: the maximized window never got the pointer at x {}", grab.0);
+            for y in [TITLE_H + 6, TITLE_H + 10] {
+                session.input(&format!("move {} {y}", grab.0));
+            }
+            let settle = Instant::now() + Duration::from_millis(100);
+            while Instant::now() < settle {
+                match conn.poll_for_event().unwrap() {
+                    Some(x11rb::protocol::Event::MotionNotify(m)) if m.event == window => break 'drawn,
+                    Some(x11rb::protocol::Event::EnterNotify(m)) if m.event == window => break 'drawn,
+                    Some(_) => {}
+                    None => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+        }
+        // Grab Helix's title bar (above the window), drag to the other monitor.
         let to = (f64::from(SIZE.0) + 500.0, 200.0 + 10.0 * f64::from(i));
         session.input(&format!("move {} {}", grab.0, grab.1));
         session.input("button 272 1");
