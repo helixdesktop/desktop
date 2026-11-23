@@ -134,6 +134,7 @@ Apps are the ones the upstream reports name.
 | X51 | S26, W59 | Two states in one message, either order; toggle; wrong format ignored | | `x11_props::state_messages_with_two_states` |
 | X52 | S24 | After mapping, writing `_NET_WM_STATE` directly changes nothing | | `x11_props::writing_the_state_directly_after_mapping_changes_nothing` |
 | X102 | S24, W15 | States set before mapping are honored | games | `x11_windows::fullscreen_asked_for_before_mapping`, `x11_windows::modal_dialogs_take_their_parents_focus` |
+| X125 | | `_NET_WM_STATE` messages sent before mapping (instead of, or as well as, setting the property): merged with the property read when the window is managed, as mutter, in order (a message removing a state the property sets removes it); also across a `_NET_REQUEST_FRAME_EXTENTS` before mapping (#276) | SDL, Wine | `x11_premap_state` (Helix's window manager; Smithay's forwards them as requests on a window that isn't there yet, which Helix drops) |
 | X103 | W60 | Fullscreen granted shows in `_NET_WM_STATE` and the size | evince | `x11_windows::a_fullscreen_or_maximized_window_keeps_its_size` |
 | X92 | W22 | Window types are hints; Chromium's combobox popups are typed NOTIFICATION | Chromium, Firefox | `x11_windows::splash_screens_notifications_and_docks`; NOTIFICATION windows get no focus by Helix's choice (#168) |
 

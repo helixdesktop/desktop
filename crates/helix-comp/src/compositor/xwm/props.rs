@@ -132,6 +132,18 @@ fn apply(a: &Atoms, win: &XWin, atom: u32, reply: Option<&GetPropertyReply>) {
         }
         x if x == a._NET_WM_STATE => {
             s.net_state = cardinals(reply).into_iter().filter(|x| a.client_state(*x)).collect();
+            // What messages asked for before the window was managed counts
+            // on top of what the client set itself (#276).
+            let premap = std::mem::take(&mut s.premap_state);
+            for &(atom, action) in &premap {
+                let on = action == 1 || (action == 2 && !s.net_state.contains(&atom));
+                if on {
+                    s.net_state.insert(atom);
+                } else {
+                    s.net_state.remove(&atom);
+                }
+            }
+            s.premap_state = premap;
         }
         _ => {}
     }
