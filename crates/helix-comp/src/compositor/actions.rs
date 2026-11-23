@@ -352,7 +352,10 @@ impl Helix {
     /// Minimize the workspace's windows, or bring them back.
     fn toggle_show_desktop(&mut self) {
         if let Some(hidden) = self.shown_desktop.take() {
-            if hidden.iter().all(|w| self.minimized.contains(w)) {
+            // Windows closed since don't count (#240): the rest come back
+            // if none was brought back by hand meanwhile.
+            let hidden: Vec<Window> = hidden.into_iter().filter(|w| self.presence(w) != super::wm::Presence::Gone).collect();
+            if !hidden.is_empty() && hidden.iter().all(|w| matches!(self.presence(w), super::wm::Presence::Minimized(_))) {
                 for window in hidden.iter() {
                     self.focus_window(window);
                 }

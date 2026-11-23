@@ -138,14 +138,14 @@ impl Helix {
             KeyboardFocusTarget::X11(x11) => self
                 .space
                 .elements()
-                .chain(self.minimized.iter())
+                .chain(self.minimized_windows())
                 .chain(self.workspaces.parked())
                 .find(|w| w.x11_surface().is_some_and(|x| x.smithay() == Some(x11)))
                 .cloned(),
             KeyboardFocusTarget::XHelix(x11) => self
                 .space
                 .elements()
-                .chain(self.minimized.iter())
+                .chain(self.minimized_windows())
                 .chain(self.workspaces.parked())
                 .find(|w| w.x11_surface().is_some_and(|x| x.helix() == Some(x11)))
                 .cloned(),

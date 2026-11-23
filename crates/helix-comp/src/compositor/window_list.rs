@@ -83,8 +83,8 @@ impl Helix {
             (at, false)
         } else if let Some(at) = self.workspaces.parked_at(window) {
             (at, false)
-        } else if let Some(i) = self.minimized.iter().position(|w| w == window) {
-            (self.minimized_at.get(i).copied().unwrap_or_default(), true)
+        } else if let Some(at) = self.minimized_at(window) {
+            (at, true)
         } else {
             Default::default()
         };
@@ -97,7 +97,7 @@ impl Helix {
             .space
             .elements()
             .rev()
-            .chain(self.minimized.iter())
+            .chain(self.minimized_windows())
             .chain(self.workspaces.parked())
             .filter(|w| !is_override_redirect(w))
             // X11 helper windows that ask to stay out of taskbars

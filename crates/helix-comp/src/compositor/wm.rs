@@ -129,11 +129,70 @@ pub fn anchored(before: Rectangle<i32, Logical>, size: smithay::utils::Size<i32,
     (x.round() as i32, y.round() as i32).into()
 }
 
+/// Where a window is: shown, or hidden (minimized, or on a workspace that
+/// isn't active) with where it goes back, or not known (#240). A window is
+/// in exactly one of these; everything that shows or hides one goes
+/// through [`Helix::presence`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Presence {
+    Shown,
+    Minimized(Point<i32, Logical>),
+    Parked(Point<i32, Logical>),
+    Gone,
+}
+
 impl Helix {
+    /// Where `window` is (see [`Presence`]).
+    pub fn presence(&self, window: &Window) -> Presence {
+        if self.space.elements().any(|w| w == window) {
+            Presence::Shown
+        } else if let Some(at) = self.minimized_at(window) {
+            Presence::Minimized(at)
+        } else if let Some(at) = self.workspaces.parked_at(window) {
+            Presence::Parked(at)
+        } else {
+            Presence::Gone
+        }
+    }
+
+    /// Minimized windows.
+    pub fn minimized_windows(&self) -> impl Iterator<Item = &Window> {
+        self.minimized.iter().map(|(w, _)| w)
+    }
+
+    /// Where a minimized `window` goes back.
+    pub fn minimized_at(&self, window: &Window) -> Option<Point<i32, Logical>> {
+        self.minimized.iter().find(|(w, _)| w == window).map(|(_, at)| *at)
+    }
+
+    /// Where `window` is or goes back, shown or hidden.
+    fn location_of(&self, window: &Window) -> Option<Point<i32, Logical>> {
+        match self.presence(window) {
+            Presence::Shown => self.space.element_location(window),
+            Presence::Minimized(at) | Presence::Parked(at) => Some(at),
+            Presence::Gone => None,
+        }
+    }
+
+    /// Put `window` at `location`: moved if shown, or where it goes back
+    /// if hidden (a hidden window asking to be maximized or restored
+    /// stays hidden). Mapped if not known yet (a new window).
+    fn place(&mut self, window: &Window, location: Point<i32, Logical>, activate: bool) {
+        match self.presence(window) {
+            Presence::Shown | Presence::Gone => self.space.map_element(window.clone(), location, activate),
+            Presence::Minimized(_) => {
+                if let Some(entry) = self.minimized.iter_mut().find(|(w, _)| w == window) {
+                    entry.1 = location;
+                }
+            }
+            Presence::Parked(_) => self.workspaces.set_parked_at(window, location),
+        }
+    }
+
     pub fn window_for_surface(&self, surface: &WlSurface) -> Option<Window> {
         self.space
             .elements()
-            .chain(self.minimized.iter())
+            .chain(self.minimized_windows())
             .chain(self.workspaces.parked())
             .find(|w| surface_of(w).as_ref() == Some(surface))
             .cloned()
@@ -148,7 +207,7 @@ impl Helix {
     fn all_managed(&self) -> Vec<Window> {
         self.space
             .elements()
-            .chain(self.minimized.iter())
+            .chain(self.minimized_windows())
             .chain(self.workspaces.parked())
             .filter(|w| !is_override_redirect(w))
             .cloned()
@@ -225,9 +284,8 @@ impl Helix {
     /// was minimized.
     fn show_for_focus(&mut self, window: &Window) {
         self.workspace_focus(window);
-        if let Some(pos) = self.minimized.iter().position(|w| w == window) {
-            let window = self.minimized.remove(pos);
-            let location = self.minimized_at.remove(pos);
+        if let Some(pos) = self.minimized.iter().position(|(w, _)| w == window) {
+            let (window, location) = self.minimized.remove(pos);
             if let Some(x11) = window.x11_surface() {
                 let _ = x11.set_hidden(false);
             }
@@ -304,7 +362,7 @@ impl Helix {
         match self.restore.iter_mut().find(|(w, _, _)| w == window) {
             Some(entry) => entry.2 = kind,
             None => {
-                let location = self.space.element_location(window).unwrap_or_default();
+                let location = self.location_of(window).unwrap_or_default();
                 // An X11 window's size as last asked for, not as last drawn.
                 let size = window.x11_surface().map_or_else(|| window.geometry().size, |x11| x11.requested_size());
                 self.restore.push((window.clone(), Rectangle::new(location, size), kind));
@@ -334,7 +392,7 @@ impl Helix {
             configure_visible(x11, area);
         }
         self.animate_resize(window, area);
-        self.space.map_element(window.clone(), area.loc, true);
+        self.place(window, area.loc, true);
         self.restack_above();
     }
 
@@ -384,7 +442,7 @@ impl Helix {
             configure_visible(x11, geometry);
         }
         self.animate_resize(window, geometry);
-        self.space.map_element(window.clone(), geometry.loc, true);
+        self.place(window, geometry.loc, true);
         self.restack_above();
     }
 
@@ -532,6 +590,27 @@ impl Helix {
                 let _ = x11.configure(Rectangle::new(location, x11.last_configure().size));
             }
         }
+        // Hidden windows (minimized, on another workspace) would come back
+        // there too: where they go back moves as well (#240).
+        let hidden: Vec<(Window, Point<i32, Logical>)> = self
+            .minimized
+            .iter()
+            .cloned()
+            .chain(self.workspaces.parked().filter_map(|w| Some((w.clone(), self.workspaces.parked_at(w)?))))
+            .filter(|(w, at)| !is_override_redirect(w) && is_lost(Rectangle::new(*at, w.geometry().size), &outputs))
+            .collect();
+        for (i, (window, _)) in hidden.into_iter().enumerate() {
+            let offset = 32 * (i as i32 % 10);
+            let location = (area.loc.x + offset, area.loc.y + offset + super::frames::frame_top(&window)).into();
+            tracing::info!(location = ?location, "moving a hidden window off a monitor that went away");
+            if let Some(pos) = self.restore.iter().position(|(w, _, _)| *w == window) {
+                self.restore[pos].1.loc = location;
+            }
+            self.place(&window, location, false);
+            if let Some(x11) = window.x11_surface() {
+                let _ = x11.configure(Rectangle::new(location, x11.last_configure().size));
+            }
+        }
         // Takeovers follow their (new) monitor; work areas are rechecked.
         self.work_areas.clear();
         self.constrain_to_work_area();
@@ -548,9 +627,22 @@ impl Helix {
         }
     }
 
-    /// Hide a window until it is cycled back to.
+    /// Hide a window until it is cycled back to. Minimizing a minimized
+    /// window does nothing; a window on another workspace becomes
+    /// minimized there (#240).
     pub fn minimize(&mut self, window: &Window) {
-        let location = self.space.element_location(window).unwrap_or_default();
+        let location = match self.presence(window) {
+            Presence::Shown => self.space.element_location(window).unwrap_or_default(),
+            Presence::Minimized(_) | Presence::Gone => return,
+            Presence::Parked(at) => {
+                self.workspaces.unpark_hidden(window);
+                if let Some(x11) = window.x11_surface() {
+                    let _ = x11.set_hidden(true);
+                }
+                self.minimized.push((window.clone(), at));
+                return;
+            }
+        };
         // Towards the dock: the bottom middle of the window's monitor.
         let target = self.output_of(window).and_then(|o| self.space.output_geometry(&o)).map_or(Point::default(), |g| {
             Point::from((f64::from(g.loc.x) + f64::from(g.size.w) / 2.0, f64::from(g.loc.y + g.size.h)))
@@ -560,8 +652,7 @@ impl Helix {
         if let Some(x11) = window.x11_surface() {
             let _ = x11.set_hidden(true);
         }
-        self.minimized.push(window.clone());
-        self.minimized_at.push(location);
+        self.minimized.push((window.clone(), location));
         match self.top_window() {
             Some(top) => self.focus_window(&top),
             None => self.unfocus_all(),
@@ -582,9 +673,9 @@ impl Helix {
     pub fn forget_window(&mut self, window: &Window) {
         self.frames.forget(window);
         self.above.retain(|w| w != window);
-        if let Some(pos) = self.minimized.iter().position(|w| w == window) {
-            self.minimized.remove(pos);
-            self.minimized_at.remove(pos);
+        self.minimized.retain(|(w, _)| w != window);
+        if let Some(hidden) = self.shown_desktop.as_mut() {
+            hidden.retain(|w| w != window);
         }
         self.restore.retain(|(w, _, _)| w != window);
         if self.resize.as_ref().is_some_and(|r| &r.window == window) {

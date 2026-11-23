@@ -78,8 +78,7 @@ impl Helix {
     /// workspace), so they are not stuck.
     pub fn release_hidden_barriers(&mut self) {
         let roots: Vec<WlSurface> = self
-            .minimized
-            .iter()
+            .minimized_windows()
             .chain(self.workspaces.parked())
             .filter_map(super::wm::surface_of)
             .collect();

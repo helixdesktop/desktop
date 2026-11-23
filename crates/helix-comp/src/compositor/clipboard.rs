@@ -94,7 +94,7 @@ impl Helix {
             w.x11_surface().is_none() && smithay::wayland::seat::WaylandFocus::wl_surface(w).and_then(|s| s.client()).is_some_and(|c| c == *client)
         };
         let focused = self.focused_window().filter(|w| of_client(w));
-        let window = focused.or_else(|| self.space.elements().chain(self.minimized.iter()).chain(self.workspaces.parked()).find(|w| of_client(w)).cloned());
+        let window = focused.or_else(|| self.space.elements().chain(self.minimized_windows()).chain(self.workspaces.parked()).find(|w| of_client(w)).cloned());
         let app_id = window.map(|w| super::window_list::describe(&w).0).unwrap_or_default();
         Source { kind: Kind::App, app_id, pid }
     }

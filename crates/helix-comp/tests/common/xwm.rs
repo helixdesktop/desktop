@@ -42,12 +42,18 @@ pub fn session() -> Option<HeadlessSession> {
 /// A session whose shell is the test: it sees the window list and acts on
 /// windows through it.
 pub fn session_with_shell(name: &str) -> Option<(HeadlessSession, Shell)> {
+    session_with_shell_env(name, Vec::new())
+}
+
+/// [`session_with_shell`] with `env` for the compositor (e.g. two monitors:
+/// `HELIX_HEADLESS_OUTPUTS=2`).
+pub fn session_with_shell_env(name: &str, env: Vec<(String, String)>) -> Option<(HeadlessSession, Shell)> {
     let comp = PathBuf::from(env!("CARGO_BIN_EXE_helix-comp"));
     let dir = std::env::temp_dir().join(format!("helix-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let (program, listener) = stand_in_shell(&dir);
-    let session = HeadlessSession::start(Options { comp: &comp, shell: Some(&program), size: (u32::from(SCREEN.0), u32::from(SCREEN.1)), settings: "", env: Vec::new() })?;
+    let session = HeadlessSession::start(Options { comp: &comp, shell: Some(&program), size: (u32::from(SCREEN.0), u32::from(SCREEN.1)), settings: "", env })?;
     if session.x_display.is_empty() {
         eprintln!("no Xwayland; skipped");
         return None;
@@ -570,6 +576,24 @@ impl Shell {
         self.list.activate(id);
         self.roundtrip();
     }
+
+    /// Put window `id` on workspace `workspace` (0-based).
+    pub fn move_window(&mut self, id: u32, workspace: u32) {
+        self.list.move_window(id, workspace);
+        self.roundtrip();
+    }
+
+    /// Make workspace `workspace` (0-based) the active one.
+    pub fn switch_workspace(&mut self, workspace: u32) {
+        self.list.switch_workspace(workspace);
+        self.roundtrip();
+    }
+
+    /// How many times window `title` is listed.
+    pub fn listed(&mut self, title: &str) -> usize {
+        self.roundtrip();
+        self.state.windows.iter().filter(|w| w.title == title).count()
+    }
 }
 
 /// Window-list actions used here.
@@ -581,6 +605,7 @@ pub mod action {
     pub const TOGGLE_FULLSCREEN: u32 = 7;
     pub const RAISE: u32 = 25;
     pub const LOWER: u32 = 26;
+    pub const SHOW_DESKTOP: u32 = 28;
 }
 
 /// A stand-in shell program (`--shell`): it hands its Wayland socket to
