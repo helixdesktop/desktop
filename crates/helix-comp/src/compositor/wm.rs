@@ -249,20 +249,13 @@ impl Helix {
         self.show_for_focus(window);
         if raise {
             self.space.raise_element(window, true);
-            self.restack_above();
-            match window.x11_surface() {
-                Some(super::window::X11Window::Smithay(s)) => {
-                    if let Some(xwm) = self.xwm.as_mut() {
-                        let _ = xwm.raise_window(s);
-                    }
-                }
-                Some(super::window::X11Window::Helix(w)) => {
-                    if let Some(xwm) = self.hxwm.as_mut() {
-                        let _ = xwm.raise(w);
-                    }
-                }
-                None => {}
+            self.raise_on_x(window);
+            // Its dialogs (and theirs) stay above it, as in mutter (#225).
+            for transient in self.transients_of(window) {
+                self.space.raise_element(&transient, false);
+                self.raise_on_x(&transient);
             }
+            self.restack_above();
         }
         let keyboard = self.seat.get_keyboard().unwrap();
         keyboard.set_focus(self, super::focus::focus_target(window), SERIAL_COUNTER.next_serial());
@@ -294,6 +287,50 @@ impl Helix {
             self.space.map_element(window, location, false);
             self.sync_x11_stack();
         }
+    }
+
+    /// Raise `window` on the X server too, if it is an X11 window.
+    fn raise_on_x(&mut self, window: &Window) {
+        match window.x11_surface() {
+            Some(super::window::X11Window::Smithay(s)) => {
+                if let Some(xwm) = self.xwm.as_mut() {
+                    let _ = xwm.raise_window(s);
+                }
+            }
+            Some(super::window::X11Window::Helix(w)) => {
+                if let Some(xwm) = self.hxwm.as_mut() {
+                    let _ = xwm.raise(w);
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// The shown windows that are dialogs of `window` (xdg parent, X11
+    /// `WM_TRANSIENT_FOR`), and their dialogs, bottom to top: raised in
+    /// this order they keep theirs, above `window`.
+    pub(super) fn transients_of(&self, window: &Window) -> Vec<Window> {
+        let mut parents = vec![window.clone()];
+        let mut found: Vec<Window> = Vec::new();
+        // A bound, in case parents loop.
+        for _ in 0..8 {
+            let more: Vec<Window> = self
+                .space
+                .elements()
+                .filter(|w| !parents.contains(w) && !is_override_redirect(w))
+                .filter(|w| self.parent_of(w).is_some_and(|p| parents.contains(&p)))
+                .cloned()
+                .collect();
+            if more.is_empty() {
+                break;
+            }
+            parents.extend(more.iter().cloned());
+            found.extend(more);
+        }
+        // Bottom to top, as they are stacked now.
+        let order: Vec<Window> = self.space.elements().cloned().collect();
+        found.sort_by_key(|w| order.iter().position(|o| o == w));
+        found
     }
 
     /// Clear keyboard focus and deactivate every window.
