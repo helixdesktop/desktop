@@ -89,7 +89,7 @@ fn globally_active_windows_get_take_focus_and_keep_their_own_focus() {
     assert!(got_protocol(&x, window, "WM_TAKE_FOCUS", Duration::from_secs(2)), "no WM_TAKE_FOCUS");
     x.conn.set_input_focus(InputFocus::PARENT, window, x11rb::CURRENT_TIME).unwrap();
     x.flush();
-    std::thread::sleep(Duration::from_millis(500));
+    x.sync();
     assert_eq!(x.input_focus(), window, "the window manager took the focus back");
 }
 

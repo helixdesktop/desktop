@@ -8,8 +8,6 @@
 
 mod common;
 
-use std::time::Duration;
-
 use common::xwm::{self, action, until, X};
 use x11rb::protocol::xproto::Window;
 
@@ -72,11 +70,11 @@ fn raised_windows_stay_under_menus() {
     let b = x.mapped();
     let (ax, ay) = x.position(a);
     let menu = x.popup((ax + 20, ay + 20), (100, 100));
-    std::thread::sleep(Duration::from_millis(300));
+    x.sync();
     x.focus(a);
     x.focus(b);
     x.focus(a);
-    std::thread::sleep(Duration::from_millis(300));
+    x.sync();
     let order = x.stacking_order(&[a, b, menu]);
     assert_eq!(order.last(), Some(&menu), "a raised window went over the menu: {order:?}");
 }

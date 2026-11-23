@@ -56,7 +56,7 @@ fn malformed_properties_do_no_harm() {
     for property in ["WM_HINTS", "WM_NORMAL_HINTS", "WM_CLASS", "WM_NAME", "_NET_WM_NAME", "WM_TRANSIENT_FOR", "WM_PROTOCOLS", "_NET_WM_ICON", "_MOTIF_WM_HINTS"] {
         x.delete(window, property);
     }
-    std::thread::sleep(Duration::from_millis(300));
+    x.sync();
     xwm::wm_still_works(&session);
 }
 
@@ -89,7 +89,7 @@ fn a_window_type_change_leaves_the_state_alone() {
     x.net_wm_state(window, 1, &["_NET_WM_STATE_ABOVE"]);
     until("Always on Top was not set", || x.has_state(window, "_NET_WM_STATE_ABOVE"));
     x.set_atoms(window, "_NET_WM_WINDOW_TYPE", &["_NET_WM_WINDOW_TYPE_DIALOG"]);
-    std::thread::sleep(Duration::from_millis(300));
+    x.sync();
     assert!(x.has_state(window, "_NET_WM_STATE_ABOVE"), "the type change dropped Always on Top");
 }
 
@@ -105,6 +105,9 @@ fn the_window_manager_identifies_itself() {
     let (kind, name) = x.get8(check, "_NET_WM_NAME").expect("the check window has no _NET_WM_NAME");
     assert_eq!(kind, x.atom("UTF8_STRING"));
     assert!(!name.is_empty() && std::str::from_utf8(&name).is_ok(), "the window manager's name: {name:?}");
+    if common::xwm_running() == common::Xwm::Helix {
+        assert_eq!(name, b"Helix", "Helix's window manager doesn't say it is Helix (Java looks at this name)");
+    }
 }
 
 /// X49: the window manager and compositing manager selections are owned
@@ -157,7 +160,7 @@ fn state_messages_with_two_states() {
     let Some(session) = xwm::session() else { return };
     let x = X::new(&session);
     let window = x.mapped();
-    std::thread::sleep(Duration::from_millis(300));
+    x.sync();
     let restored = x.size(window);
     x.net_wm_state(window, 2, &[MAXIMIZED[1], MAXIMIZED[0]]);
     until("toggling both maximized states did not maximize", || x.size(window).0 == xwm::SCREEN.0);
@@ -167,7 +170,7 @@ fn state_messages_with_two_states() {
     let bad = ClientMessageEvent::new(8, window, x.atom("_NET_WM_STATE"), [1u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     x.conn.send_event(false, x.root, EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY, bad).unwrap();
     x.flush();
-    std::thread::sleep(Duration::from_millis(300));
+    x.sync();
     assert_eq!(x.size(window), restored, "a format-8 message changed the window");
     xwm::wm_still_works(&session);
 }
@@ -179,10 +182,10 @@ fn writing_the_state_directly_after_mapping_changes_nothing() {
     let Some(session) = xwm::session() else { return };
     let x = X::new(&session);
     let window = x.mapped();
-    std::thread::sleep(Duration::from_millis(300));
+    x.sync();
     let size = x.size(window);
     x.set_atoms(window, "_NET_WM_STATE", &["_NET_WM_STATE_FULLSCREEN"]);
-    std::thread::sleep(Duration::from_millis(500));
+    x.sync();
     assert_eq!(x.size(window), size, "writing _NET_WM_STATE made the window fullscreen");
 }
 
