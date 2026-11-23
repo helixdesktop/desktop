@@ -559,9 +559,6 @@ fn clipboard_ownership_flipping_fast_settles() {
     if common::not_yet("#191 step 4: selections") {
         return;
     }
-    if common::known_failure(&[common::Xwm::Smithay], "an X11 copy right before a Wayland one leaves the clipboard empty on both sides (the window manager ends up serving the Wayland side from itself) (#191)") {
-        return;
-    }
     let Some(session) = xwm::session() else { return };
     let mut app = wayland_app(&session);
     let mut owners = Vec::new();
