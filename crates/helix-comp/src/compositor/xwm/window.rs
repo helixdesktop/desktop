@@ -352,6 +352,19 @@ impl XWin {
         self.set_state(self.0.atoms._NET_WM_STATE_MODAL, on)
     }
 
+    /// Minimized or shown again: `WM_STATE` Iconic or Normal (ICCCM
+    /// 4.1.4) and `_NET_WM_STATE_HIDDEN` (EWMH).
+    pub fn set_hidden(&self, on: bool) -> Result<(), ConnectionError> {
+        if self.is_override_redirect() {
+            return Ok(());
+        }
+        self.set_state(self.0.atoms._NET_WM_STATE_HIDDEN, on)?;
+        let Some(conn) = self.conn() else { return Err(ConnectionError::UnknownError) };
+        let state = if on { 3 } else { 1 };
+        conn.change_property32(PropMode::REPLACE, self.0.id, self.0.atoms.WM_STATE, self.0.atoms.WM_STATE, &[state, x11rb::NONE])?;
+        conn.flush()
+    }
+
     /// Marks it active or not (`_NET_WM_STATE_FOCUSED`, and the root's
     /// `_NET_ACTIVE_WINDOW`).
     pub fn set_activated(&self, on: bool) -> Result<(), ConnectionError> {

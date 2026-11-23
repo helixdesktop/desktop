@@ -29,8 +29,8 @@ Apps are the ones the upstream reports name.
 | X3 | S3, S37 | MapWindow sent several times without unmapping: listed once | GTK 4 | `x11_map::a_window_mapped_three_times_is_listed_once` (ignored) |
 | X4 | S4, W12 | `WM_STATE` Normal on map, Withdrawn on unmap, as a `WM_STATE`-typed pair; `_NET_WM_STATE` removed when withdrawn | Wine | `x11_map::wm_state_follows_the_window`, `x11_windows::a_hidden_window_is_withdrawn`, `x11_map::net_wm_state_is_removed_when_withdrawn` (ignored) |
 | X5 | S5 | `WM_HINTS` initial state Iconic: starts minimized, `WM_STATE` Iconic, `_NET_WM_STATE_HIDDEN` | XCOM 2 | `x11_map::a_window_asking_to_start_iconic_starts_minimized` |
-| X6 | S6, W61 | Minimized: Iconic and HIDDEN; restored: Normal; focus and fullscreen never rewrite `WM_STATE` | Dishonored 2, Steam | `x11_map::minimize_and_restore` (ignored), `x11_map::focus_and_fullscreen_leave_wm_state_alone` |
-| X7 | S7 | `WM_CHANGE_STATE` honors its state: Normal doesn't minimize | | `x11_map::minimize_and_restore` (ignored) |
+| X6 | S6, W61 | Minimized: Iconic and HIDDEN; restored: Normal; focus and fullscreen never rewrite `WM_STATE` | Dishonored 2, Steam | `x11_map::minimize_and_restore` (fixed in #194), `x11_map::focus_and_fullscreen_leave_wm_state_alone` |
+| X7 | S7 | `WM_CHANGE_STATE` honors its state: Normal doesn't minimize | | `x11_map::minimize_and_restore` (fixed in #194) |
 
 ## Override-redirect
 
