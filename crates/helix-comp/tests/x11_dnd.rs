@@ -67,6 +67,40 @@ fn an_x11_app_drags_onto_a_wayland_window() {
     expect(&saw, |s| matches!(s, SourceSaw::Finished(..)), "the X11 source never heard the drop finished");
 }
 
+/// #245: a Wayland drag that ends without a drop (no one took it) leaves
+/// no drag behind: an X11 app's drag right after it is carried as usual.
+#[test]
+fn an_x11_drag_after_a_cancelled_wayland_drag_works() {
+    let Some(mut session) = session() else { return };
+    let mut app = common::connect(&session);
+    let (window, ()) = app.toplevel((300, 200), |_, _| {});
+    let surface = window.surface.clone();
+    let start = common::point_over(&mut session, &mut app, &surface, (800, 600));
+    begin_wayland_drag(&mut session, &mut app, &surface, start, &[("text/plain;charset=utf-8", DATA)]);
+    session.input(&format!("move {} {}", start.0 + 2, start.1 + 2));
+    app.until("the Wayland app's own window was never offered its drag", |s| s.dnd.is_some());
+    // Not accepted: let go, and the drag is cancelled.
+    session.input(&format!("button {BTN_LEFT} 0"));
+    app.until("the refused Wayland drag never ended", |s| s.source_ended.is_some());
+    assert_eq!(app.state.source_ended, Some("cancelled"));
+    app.state.dnd = None;
+
+    let x = X11::new(&session, (200, 150), false);
+    let x_rect = x.rect();
+    // Over the Wayland window where the X11 one doesn't cover it.
+    let over_app = common::point_over(&mut session, &mut app, &surface, (800, 600));
+    let from = point_in_not(x_rect, None);
+    let saw = xdnd_source(x);
+    session.input(&format!("move {} {}", from.0, from.1));
+    std::thread::sleep(Duration::from_millis(200));
+    session.input(&format!("button {BTN_LEFT} 1"));
+    std::thread::sleep(Duration::from_millis(300));
+    glide(&mut session, from, over_app);
+    expect(&saw, |s| matches!(s, SourceSaw::Target(_)), "the X11 drag after a cancelled Wayland drag never found a target");
+    app.until("the Wayland window was never offered the X11 drag", |s| s.dnd.is_some());
+    session.input(&format!("button {BTN_LEFT} 0"));
+}
+
 #[test]
 fn a_wayland_app_drags_onto_an_x11_window() {
     let Some(mut session) = session() else { return };
