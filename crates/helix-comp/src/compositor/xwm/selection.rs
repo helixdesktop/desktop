@@ -10,6 +10,8 @@
 //! Wayland to X11: for a Wayland copy the window manager owns the
 //! selection; each X11 request is answered from the Wayland app through a
 //! pipe, in one property or incrementally once it is larger than a chunk.
+//! A MULTIPLE request (ICCCM 2.6.2) is a group of such conversions, one
+//! per target and property pair, answered once all of them are (#283).
 //!
 //! Any X11 client may read, whatever has focus, as in GNOME (#172).
 //! Transfers never block the compositor: the pipes are watched in its
@@ -44,6 +46,9 @@ const STALL: Duration = Duration::from_secs(5);
 /// How much of a transfer is held at most before the side that gives it
 /// is made to wait for the side that takes it (#228).
 const BUFFERED: usize = 4 * 1024 * 1024;
+
+/// The most target and property pairs one MULTIPLE request may name.
+const MAX_PAIRS: u32 = 256;
 
 /// The text types a Wayland copy may have, best first.
 const TEXT_MIMES: [&str; 5] = ["text/plain;charset=utf-8", "text/plain;charset=UTF-8", "UTF8_STRING", "text/plain", "STRING"];
@@ -111,6 +116,26 @@ struct Outgoing {
     /// Reading the Wayland source paused: enough is buffered for now.
     paused: bool,
     deadline: Instant,
+    /// The MULTIPLE request it is a pair of, if any.
+    pair: Option<Pair>,
+}
+
+/// A pair of a MULTIPLE request: the request's id in
+/// [`Selections::multiples`], and the pair's index.
+type Pair = (u64, usize);
+
+/// What a request may be answered from: a Wayland drag's types and
+/// source, when it asks for XdndSelection.
+type DndData = Option<(Vec<String>, Arc<dyn smithay::input::dnd::Source>)>;
+
+/// A MULTIPLE request (ICCCM 2.6.2) being converted, pair by pair.
+struct Multiple {
+    request: SelectionRequestEvent,
+    /// The requestor's ATOM_PAIR list (target, property, ...), each
+    /// failed pair's property replaced with None.
+    pairs: Vec<u32>,
+    /// Pairs not answered yet.
+    left: usize,
 }
 
 /// A Wayland drag's data, offered as XdndSelection by the window manager's
@@ -128,6 +153,7 @@ pub struct Selections {
     sels: [Sel; 2],
     incoming: HashMap<u64, Incoming>,
     outgoing: HashMap<u64, Outgoing>,
+    multiples: HashMap<u64, Multiple>,
     next: u64,
     /// Windows the window manager made for selections, until X says they
     /// are gone (never managed).
@@ -157,7 +183,7 @@ impl Selections {
             Ok(Sel { target, atom, window, owner: x11rb::NONE, wayland: None, timestamp: x11rb::CURRENT_TIME, targets_for: None, offered: Vec::new() })
         };
         let sels = [make(SelectionTarget::Clipboard, atoms.CLIPBOARD)?, make(SelectionTarget::Primary, atoms.PRIMARY)?];
-        Ok(Self { conn: conn.clone(), atoms, root, sels, incoming: HashMap::new(), outgoing: HashMap::new(), next: 0, own, atom_cache: HashMap::new(), in_ready: None, dnd: None, names: HashMap::new(), later: Vec::new() })
+        Ok(Self { conn: conn.clone(), atoms, root, sels, incoming: HashMap::new(), outgoing: HashMap::new(), multiples: HashMap::new(), next: 0, own, atom_cache: HashMap::new(), in_ready: None, dnd: None, names: HashMap::new(), later: Vec::new() })
     }
 
     /// Whether the window manager made this window for selections.
@@ -386,6 +412,9 @@ impl Selections {
             }
             Event::CreateNotify(e) => Ok(self.own.contains(&e.window)),
             Event::DestroyNotify(e) => {
+                // Its MULTIPLE requests are answered to nobody: their
+                // pairs end without writing back.
+                self.multiples.retain(|_, m| m.request.requestor != e.window);
                 let gone: Vec<u64> = self.outgoing.iter().filter(|(_, t)| t.requestor == e.window).map(|(id, _)| *id).collect();
                 for id in gone {
                     tracing::debug!(id, "the X11 app asking for the selection went away");
@@ -650,7 +679,6 @@ impl Selections {
 
     /// An X11 app asks for the selection Helix owns for a Wayland copy.
     fn request(&mut self, e: SelectionRequestEvent, actions: &mut Vec<Action>) -> Result<(), ReplyOrIdError> {
-        let _ = actions;
         let dnd = self.dnd.as_ref().filter(|d| d.owner == e.owner && e.selection == self.atoms.XdndSelection).map(|d| (d.types.clone(), d.source.clone()));
         let i = self.sels.iter().position(|s| s.window == e.owner && s.atom == e.selection);
         let (types, timestamp) = match (&dnd, i) {
@@ -661,12 +689,73 @@ impl Selections {
             },
             (None, None) => return self.answer(&e, false),
         };
+        if e.target == self.atoms.MULTIPLE {
+            return self.multiple(e, types, timestamp, dnd, i);
+        }
         // Obsolete clients give no property: the target is the property.
         let property = if e.property == x11rb::NONE { e.target } else { e.property };
         let e = SelectionRequestEvent { property, ..e };
+        self.convert_target(e, None, types, timestamp, dnd, i, actions)
+    }
+
+    /// A MULTIPLE request (ICCCM 2.6.2): the requestor's property lists
+    /// target and property pairs (type ATOM_PAIR). Each pair is converted
+    /// as a request of its own would be, incrementally too; a pair that
+    /// fails gets None for its property in the list, written back once
+    /// all are answered, and then the request is answered. No property, or
+    /// no list of pairs in it, is refused.
+    fn multiple(&mut self, e: SelectionRequestEvent, types: Vec<String>, timestamp: u32, dnd: DndData, i: Option<usize>) -> Result<(), ReplyOrIdError> {
+        if e.property == x11rb::NONE {
+            tracing::debug!("an X11 app asked for MULTIPLE without a property");
+            return self.answer(&e, false);
+        }
+        let seq = super::keep(self.conn.get_property(false, e.requestor, e.property, AtomEnum::ANY, 0, MAX_PAIRS * 2)?);
+        self.later.push((
+            vec![seq],
+            Box::new(move |xwm, replies, actions| {
+                let s = &mut xwm.selections;
+                let reply = parse::<x11rb::protocol::xproto::GetPropertyReply>(replies.into_iter().next().flatten());
+                let atom_pair = s.atoms.ATOM_PAIR;
+                let pairs = reply
+                    .filter(|r| r.format == 32 && r.bytes_after == 0 && (r.type_ == atom_pair || r.type_ == u32::from(AtomEnum::ATOM)))
+                    .and_then(|r| r.value32().map(Iterator::collect::<Vec<u32>>))
+                    .filter(|p| !p.is_empty() && p.len() % 2 == 0);
+                let Some(pairs) = pairs else {
+                    tracing::debug!("an X11 app's MULTIPLE request has no list of pairs");
+                    return s.answer(&e, false);
+                };
+                let id = s.id();
+                let n = pairs.len() / 2;
+                tracing::debug!(id, pairs = n, "an X11 app asked for MULTIPLE");
+                s.multiples.insert(id, Multiple { request: e, pairs: pairs.clone(), left: n });
+                for (index, &[target, property]) in pairs.as_chunks::<2>().0.iter().enumerate() {
+                    if !s.multiples.contains_key(&id) {
+                        break;
+                    }
+                    // MULTIPLE in MULTIPLE is not allowed (ICCCM 2.6.2),
+                    // nor is a pair without a property.
+                    if target == s.atoms.MULTIPLE || property == x11rb::NONE {
+                        s.pair_done((id, index), false)?;
+                        continue;
+                    }
+                    let one = SelectionRequestEvent { target, property, ..e };
+                    s.convert_target(one, Some((id, index)), types.clone(), timestamp, dnd.clone(), i, actions)?;
+                }
+                Ok(())
+            }),
+        ));
+        Ok(())
+    }
+
+    /// Converts the selection to one target: a request's, or one pair's of
+    /// a MULTIPLE request.
+    #[allow(clippy::too_many_arguments)]
+    fn convert_target(&mut self, e: SelectionRequestEvent, pair: Option<Pair>, types: Vec<String>, timestamp: u32, dnd: DndData, i: Option<usize>, actions: &mut Vec<Action>) -> Result<(), ReplyOrIdError> {
+        let _ = actions;
+        let property = e.property;
         let a = self.atoms;
         if e.target == a.TARGETS {
-            let mut list = vec![a.TARGETS, a.TIMESTAMP];
+            let mut list = vec![a.TARGETS, a.TIMESTAMP, a.MULTIPLE];
             let text = types.iter().any(|t| TEXT_MIMES.contains(&t.as_str()));
             for t in &types {
                 let Some(atom) = self.atom_of(t) else { continue };
@@ -682,34 +771,73 @@ impl Selections {
                 }
             }
             self.conn.change_property32(PropMode::REPLACE, e.requestor, property, AtomEnum::ATOM, &list)?;
-            return self.answer(&e, true);
+            return self.finish(&e, pair, true);
         }
         if e.target == a.TIMESTAMP {
             self.conn.change_property32(PropMode::REPLACE, e.requestor, property, AtomEnum::INTEGER, &[timestamp])?;
-            return self.answer(&e, true);
+            return self.finish(&e, pair, true);
         }
         if e.target == a.DELETE {
-            return self.answer(&e, true);
+            return self.finish(&e, pair, true);
+        }
+        if e.target == a.MULTIPLE {
+            return self.finish(&e, pair, false);
         }
         // The rest once the target's name is known.
         self.with_names(vec![e.target], move |xwm, named, actions| {
             let s = &mut xwm.selections;
+            // The MULTIPLE request it is a pair of ended meanwhile (its
+            // requestor went away).
+            if pair.is_some_and(|(id, _)| !s.multiples.contains_key(&id)) {
+                return;
+            }
             let result = match named.into_iter().next() {
-                Some((_, name)) => s.request_named(e, name, types, dnd, i, actions),
-                None => s.answer(&e, false),
+                Some((_, name)) => s.request_named(e, pair, name, types, dnd, i, actions),
+                None => s.finish(&e, pair, false),
             };
             if let Err(err) = result.and_then(|()| Ok(s.conn.flush()?)) {
                 tracing::debug!(%err, "cannot answer an X11 selection request");
+                if let Some(pair) = pair {
+                    let _ = s.pair_done(pair, false);
+                }
             }
         })
     }
 
-    fn request_named(&mut self, e: SelectionRequestEvent, name: String, types: Vec<String>, dnd: Option<(Vec<String>, Arc<dyn smithay::input::dnd::Source>)>, i: Option<usize>, actions: &mut Vec<Action>) -> Result<(), ReplyOrIdError> {
+    /// A request answered (`ok`) or refused; a pair of a MULTIPLE request
+    /// is counted towards answering the whole.
+    fn finish(&mut self, e: &SelectionRequestEvent, pair: Option<Pair>, ok: bool) -> Result<(), ReplyOrIdError> {
+        match pair {
+            None => self.answer(e, ok),
+            Some(pair) => self.pair_done(pair, ok),
+        }
+    }
+
+    /// A pair of a MULTIPLE request answered: once all are, the list goes
+    /// back (with None for each failed pair's property), and the request
+    /// is answered.
+    fn pair_done(&mut self, (id, index): Pair, ok: bool) -> Result<(), ReplyOrIdError> {
+        let Some(m) = self.multiples.get_mut(&id) else { return Ok(()) };
+        if !ok {
+            m.pairs[index * 2 + 1] = x11rb::NONE;
+        }
+        m.left -= 1;
+        if m.left > 0 {
+            return Ok(());
+        }
+        let m = self.multiples.remove(&id).unwrap();
+        tracing::debug!(id, failed = m.pairs.as_chunks::<2>().0.iter().filter(|[_, p]| *p == x11rb::NONE).count(), "MULTIPLE request answered");
+        self.conn.change_property32(PropMode::REPLACE, m.request.requestor, m.request.property, self.atoms.ATOM_PAIR, &m.pairs)?;
+        self.answer(&m.request, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn request_named(&mut self, e: SelectionRequestEvent, pair: Option<Pair>, name: String, types: Vec<String>, dnd: DndData, i: Option<usize>, actions: &mut Vec<Action>) -> Result<(), ReplyOrIdError> {
         let a = self.atoms;
         let property = e.property;
         let Some(mime) = mime_for(&name, &types) else {
             tracing::debug!(target = name, "an X11 app asked for a type the Wayland copy does not have");
-            return self.answer(&e, false);
+            return self.finish(&e, pair, false);
         };
         // An app that asks again before reading its last answer only
         // reads the newest (fcitx, Slack): the older ones end. Not for a
@@ -728,7 +856,7 @@ impl Selections {
         let id = self.id();
         let watch = read.try_clone().map_err(|e| ReplyOrIdError::ConnectionError(e.into()))?;
         tracing::debug!(id, mime, "the Wayland selection asked for by an X11 app");
-        self.outgoing.insert(id, Outgoing { requestor: e.requestor, property, kind, request: e, fd: std::fs::File::from(read), buf: Vec::new(), eof: false, answered: false, incr: false, waiting: false, paused: false, deadline: Instant::now() + STALL });
+        self.outgoing.insert(id, Outgoing { requestor: e.requestor, property, kind, request: e, fd: std::fs::File::from(read), buf: Vec::new(), eof: false, answered: false, incr: false, waiting: false, paused: false, deadline: Instant::now() + STALL, pair });
         match (dnd, i) {
             // The drag's source writes it.
             (Some((_, source)), _) => source.send(&mime, write),
@@ -809,19 +937,23 @@ impl Selections {
                 if t.requestor != self.root {
                     self.conn.change_window_attributes(t.requestor, &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE | EventMask::FOCUS_CHANGE))?;
                 }
+                // A pair of a MULTIPLE request too: its property is the
+                // one deleted (ICCCM 2.7.2), once the whole is answered.
                 let hint = u32::try_from(t.buf.len()).unwrap_or(u32::MAX);
                 self.conn.change_property32(PropMode::REPLACE, t.requestor, t.property, a.INCR, &[hint])?;
                 t.incr = true;
                 t.waiting = true;
                 t.answered = true;
-                answer(&self.conn, &t.request, true)?;
+                let (request, pair) = (t.request, t.pair);
+                self.finish(&request, pair, true)?;
             } else if t.eof {
                 self.conn.change_property8(PropMode::REPLACE, t.requestor, t.property, t.kind, &t.buf)?;
-                answer(&self.conn, &t.request, true)?;
+                let (request, pair) = (t.request, t.pair);
                 self.outgoing.remove(&id);
                 if self.in_ready != Some(id) {
                     actions.push(Action::Unwatch(id));
                 }
+                self.finish(&request, pair, true)?;
             }
             return Ok(());
         }
@@ -865,7 +997,7 @@ impl Selections {
     fn drop_outgoing(&mut self, id: u64, actions: &mut Vec<Action>) {
         let Some(t) = self.outgoing.remove(&id) else { return };
         if !t.answered {
-            let _ = self.answer(&t.request, false);
+            let _ = self.finish(&t.request, t.pair, false);
         }
         if !t.eof && self.in_ready != Some(id) {
             actions.push(Action::Unwatch(id));

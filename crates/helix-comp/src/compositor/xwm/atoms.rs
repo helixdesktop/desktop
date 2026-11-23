@@ -41,6 +41,8 @@ x11rb::atom_manager! {
         TARGETS,
         TIMESTAMP,
         INCR,
+        MULTIPLE,
+        ATOM_PAIR,
         TEXT,
         DELETE,
         _HELIX_SELECTION,

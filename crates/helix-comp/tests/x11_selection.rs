@@ -181,26 +181,70 @@ impl Reader {
         if notify.property == x11rb::NONE {
             return None;
         }
-        let reply = self.conn.get_property(true, self.window, notify.property, AtomEnum::ANY, 0, u32::MAX / 4).unwrap().reply().unwrap();
+        Some(self.take(notify.property, deadline))
+    }
+
+    /// What the owner wrote in `property` (deleting it), incrementally
+    /// or not, with how many chunks it came in, as [`Reader::answer`].
+    fn take(&self, property: u32, deadline: Instant) -> (Vec<u8>, usize) {
+        let reply = self.conn.get_property(true, self.window, property, AtomEnum::ANY, 0, u32::MAX / 4).unwrap().reply().unwrap();
         self.conn.flush().unwrap();
         if reply.type_ != self.incr {
-            return Some((reply.value, 1));
+            return (reply.value, 1);
         }
         // INCR: each new value is a chunk; an empty one ends it.
         let (mut data, mut chunks) = (Vec::new(), 0);
         loop {
             let Event::PropertyNotify(n) = self.next_event(deadline, "an incremental transfer never ended") else { continue };
-            if n.window != self.window || n.atom != notify.property || n.state != Property::NEW_VALUE {
+            if n.window != self.window || n.atom != property || n.state != Property::NEW_VALUE {
                 continue;
             }
-            let reply = self.conn.get_property(true, self.window, notify.property, AtomEnum::ANY, 0, u32::MAX / 4).unwrap().reply().unwrap();
+            let reply = self.conn.get_property(true, self.window, property, AtomEnum::ANY, 0, u32::MAX / 4).unwrap().reply().unwrap();
             self.conn.flush().unwrap();
             chunks += 1;
             if reply.value.is_empty() {
-                return Some((data, chunks));
+                return (data, chunks);
             }
             data.extend_from_slice(&reply.value);
         }
+    }
+
+    /// Asks for MULTIPLE with `list` (the ATOM_PAIR property's value, as
+    /// it is written: type, format and atoms), into HELIX_MULTIPLE. The
+    /// list as the owner wrote it back, or `None` when refused.
+    fn ask_multiple_raw(&self, type_: u32, format: u8, list: &[u32], deadline: Instant) -> Option<Vec<u32>> {
+        let multiple = atom(&self.conn, "HELIX_MULTIPLE");
+        match format {
+            32 => self.conn.change_property32(PropMode::REPLACE, self.window, multiple, type_, list).unwrap(),
+            _ => self.conn.change_property8(PropMode::REPLACE, self.window, multiple, type_, &list.iter().flat_map(|a| a.to_ne_bytes()).collect::<Vec<u8>>()).unwrap(),
+        };
+        self.ask("MULTIPLE", "HELIX_MULTIPLE");
+        let notify = loop {
+            if let Event::SelectionNotify(n) = self.next_event(deadline, "a MULTIPLE request was never answered") {
+                break n;
+            }
+        };
+        if notify.property == x11rb::NONE {
+            return None;
+        }
+        assert_eq!(notify.property, multiple, "a MULTIPLE request answered in another property");
+        let reply = self.conn.get_property(true, self.window, multiple, AtomEnum::ANY, 0, 1024).unwrap().reply().unwrap();
+        assert_eq!(reply.type_, atom(&self.conn, "ATOM_PAIR"), "the pairs came back as another type");
+        Some(reply.value32().expect("the pairs came back in another format").collect())
+    }
+
+    /// Asks for MULTIPLE with `pairs` (target, property names). The
+    /// properties as the owner wrote them back (`None` for a pair that
+    /// failed), or `None` when the request was refused.
+    fn ask_multiple(&self, pairs: &[(&str, &str)], deadline: Instant) -> Option<Vec<Option<u32>>> {
+        let list: Vec<u32> = pairs.iter().flat_map(|(t, p)| [atom(&self.conn, t), atom(&self.conn, p)]).collect();
+        let back = self.ask_multiple_raw(atom(&self.conn, "ATOM_PAIR"), 32, &list, deadline)?;
+        assert_eq!(back.len(), list.len(), "the pairs came back with another length");
+        for (sent, got) in list.chunks(2).zip(back.chunks(2)) {
+            assert_eq!(sent[0], got[0], "a pair's target changed");
+            assert!(got[1] == sent[1] || got[1] == x11rb::NONE, "a pair's property changed to another");
+        }
+        Some(back.chunks(2).map(|p| (p[1] != x11rb::NONE).then_some(p[1])).collect())
     }
 
     fn read(&self, target: &str) -> Option<Vec<u8>> {
@@ -702,36 +746,205 @@ fn two_types_asked_for_at_once_by_one_window() {
     assert_eq!(got, vec![Some(b"twice".to_vec()), Some(b"twice".to_vec())], "one of the two requests was refused");
 }
 
-/// MULTIPLE (ICCCM 2.6.2: several targets in one request, as target and
-/// property pairs in an ATOM_PAIR property): answered at once, refused
-/// or converted, and the clipboard goes on working.
+const MULTIPLE_WHY: &str = "Smithay's window manager refuses MULTIPLE requests (#283)";
+
+/// X133: MULTIPLE (ICCCM 2.6.2: several targets in one request, as
+/// target and property pairs in an ATOM_PAIR property): each pair is
+/// converted as a request of its own (text, an image, TARGETS listing
+/// MULTIPLE, TIMESTAMP), a pair asking for a type the copy doesn't have
+/// or for MULTIPLE again gets None for its property, one answer comes
+/// for the whole, and the clipboard goes on working.
 #[test]
 fn a_multiple_request_is_answered_at_once() {
     let Some(session) = xwm::session() else { return };
-    let mut app = wayland_app(&session);
-    app.copy("text/plain;charset=utf-8", b"several");
-    let (answer, after) = while_serving(&mut app, || {
-        let reader = Reader::new(&session);
-        let pairs = [atom(&reader.conn, "UTF8_STRING"), atom(&reader.conn, "HELIX_A"), atom(&reader.conn, "STRING"), atom(&reader.conn, "HELIX_B")];
-        let (pair, multiple) = (atom(&reader.conn, "ATOM_PAIR"), atom(&reader.conn, "HELIX_MULTIPLE"));
-        reader.conn.change_property32(PropMode::REPLACE, reader.window, multiple, pair, &pairs).unwrap();
-        reader.ask("MULTIPLE", "HELIX_MULTIPLE");
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let notify = loop {
-            if let Event::SelectionNotify(n) = reader.next_event(deadline, "a MULTIPLE request was never answered") {
-                break n;
-            }
-        };
-        let answer = (notify.property != x11rb::NONE).then(|| {
-            let value = |name: &str| reader.conn.get_property(false, reader.window, atom(&reader.conn, name), AtomEnum::ANY, 0, 1024).unwrap().reply().unwrap().value;
-            (value("HELIX_A"), value("HELIX_B"))
-        });
-        (answer, reader.read("UTF8_STRING"))
-    });
-    if let Some((a, b)) = answer {
-        assert_eq!((a.as_slice(), b.as_slice()), (&b"several"[..], &b"several"[..]), "a MULTIPLE request was answered without the data");
+    if common::known_failure(&[common::Xwm::Smithay], MULTIPLE_WHY) {
+        return;
     }
+    let mut app = wayland_app(&session);
+    let picture = data(5000, 3);
+    app.copy_types(&[("text/plain;charset=utf-8", b"several"), ("image/png", &picture)]);
+    let (pairs, values, targets, stray, after) = while_serving(&mut app, || {
+        let reader = Reader::new(&session);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let asked = [("UTF8_STRING", "HELIX_A"), ("image/png", "HELIX_B"), ("HELIX_BOGUS", "HELIX_C"), ("MULTIPLE", "HELIX_D"), ("TIMESTAMP", "HELIX_E"), ("TARGETS", "HELIX_F")];
+        let pairs = reader.ask_multiple(&asked, deadline).expect("a MULTIPLE request was refused");
+        let value = |name: &str| reader.conn.get_property(true, reader.window, atom(&reader.conn, name), AtomEnum::ANY, 0, u32::MAX / 4).unwrap().reply().unwrap();
+        let values: Vec<(Vec<u8>, u32)> = ["HELIX_A", "HELIX_B", "HELIX_C", "HELIX_D", "HELIX_E"].iter().map(|n| { let r = value(n); (r.value, r.format.into()) }).collect();
+        let targets: Vec<u32> = value("HELIX_F").value32().map(Iterator::collect).unwrap_or_default();
+        let names: Vec<String> = targets.iter().map(|a| String::from_utf8_lossy(&reader.conn.get_atom_name(*a).unwrap().reply().unwrap().name).into_owned()).collect();
+        // One answer for the whole.
+        let end = Instant::now() + Duration::from_millis(500);
+        let mut stray = 0;
+        while Instant::now() < end {
+            match reader.conn.poll_for_event().unwrap() {
+                Some(Event::SelectionNotify(_)) => stray += 1,
+                Some(_) => {}
+                None => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        (pairs, values, names, stray, reader.read("UTF8_STRING"))
+    });
+    let ok: Vec<bool> = pairs.iter().map(Option::is_some).collect();
+    assert_eq!(ok, [true, true, false, false, true, true], "which pairs were converted");
+    assert_eq!(values[0].0, b"several", "the text pair");
+    assert!(values[1].0 == picture, "the image pair: {} of {} bytes", values[1].0.len(), picture.len());
+    assert!(values[2].0.is_empty() && values[3].0.is_empty(), "a failed pair's property was written");
+    assert_eq!((values[4].0.len(), values[4].1), (4, 32), "the TIMESTAMP pair");
+    for name in ["TARGETS", "TIMESTAMP", "MULTIPLE", "UTF8_STRING", "image/png"] {
+        assert!(targets.iter().any(|t| t == name), "TARGETS in a MULTIPLE request lacks {name}: {targets:?}");
+    }
+    assert_eq!(stray, 0, "more than one answer to a MULTIPLE request");
     assert_eq!(after.as_deref(), Some(&b"several"[..]), "the clipboard stopped working after a MULTIPLE request");
+}
+
+/// A Wayland copy's TARGETS list MULTIPLE (ICCCM 2.6.2: owners support it).
+#[test]
+fn targets_list_multiple() {
+    let Some(session) = xwm::session() else { return };
+    if common::known_failure(&[common::Xwm::Smithay], MULTIPLE_WHY) {
+        return;
+    }
+    let mut app = wayland_app(&session);
+    app.copy("text/plain;charset=utf-8", b"listed");
+    let names = while_serving(&mut app, || {
+        let reader = Reader::new(&session);
+        let list = reader.read("TARGETS").expect("TARGETS refused");
+        list.as_chunks::<4>().0.iter().map(|a| u32::from_ne_bytes(*a)).map(|a| String::from_utf8_lossy(&reader.conn.get_atom_name(a).unwrap().reply().unwrap().name).into_owned()).collect::<Vec<_>>()
+    });
+    assert!(names.iter().any(|n| n == "MULTIPLE"), "TARGETS lacks MULTIPLE: {names:?}");
+}
+
+/// A pair of a MULTIPLE request too large for one property goes
+/// incrementally (ICCCM 2.7.2, per pair) once the whole is answered,
+/// beside a small one.
+#[test]
+fn a_large_pair_of_a_multiple_request_goes_incrementally() {
+    let Some(session) = xwm::session() else { return };
+    if common::known_failure(&[common::Xwm::Smithay], MULTIPLE_WHY) {
+        return;
+    }
+    let mut app = wayland_app(&session);
+    let picture = data(1024 * 1024 + 77, 5);
+    app.copy_types(&[("text/plain;charset=utf-8", b"small"), ("image/png", &picture)]);
+    let (pairs, image, text) = while_serving(&mut app, || {
+        let reader = Reader::new(&session);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let pairs = reader.ask_multiple(&[("image/png", "HELIX_A"), ("UTF8_STRING", "HELIX_B")], deadline).expect("a MULTIPLE request was refused");
+        let image = reader.take(atom(&reader.conn, "HELIX_A"), deadline);
+        let text = reader.take(atom(&reader.conn, "HELIX_B"), deadline);
+        (pairs, image, text)
+    });
+    assert!(pairs.iter().all(Option::is_some), "a pair failed: {pairs:?}");
+    assert!(image.0 == picture, "{} of {} bytes, not the same", image.0.len(), picture.len());
+    assert!(image.1 > 1, "a 1 MiB pair did not go incrementally");
+    assert_eq!(text, (b"small".to_vec(), 1));
+}
+
+/// A MULTIPLE request without a list of pairs is refused: none in the
+/// property, a list of another format or type, an odd one, an empty one,
+/// or no property at all; a good one after them is converted.
+#[test]
+fn a_malformed_multiple_request_is_refused() {
+    let Some(session) = xwm::session() else { return };
+    if common::known_failure(&[common::Xwm::Smithay], MULTIPLE_WHY) {
+        return;
+    }
+    let mut app = wayland_app(&session);
+    app.copy("text/plain;charset=utf-8", b"well formed");
+    let (refused, good) = while_serving(&mut app, || {
+        let reader = Reader::new(&session);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let (utf8, prop, pair) = (atom(&reader.conn, "UTF8_STRING"), atom(&reader.conn, "HELIX_A"), atom(&reader.conn, "ATOM_PAIR"));
+        let mut refused = vec![
+            ("8-bit", reader.ask_multiple_raw(pair, 8, &[utf8, prop], deadline).is_none()),
+            ("STRING", reader.ask_multiple_raw(AtomEnum::STRING.into(), 32, &[utf8, prop], deadline).is_none()),
+            ("odd", reader.ask_multiple_raw(pair, 32, &[utf8, prop, utf8], deadline).is_none()),
+            ("empty", reader.ask_multiple_raw(pair, 32, &[], deadline).is_none()),
+        ];
+        // No property on the window.
+        let none = atom(&reader.conn, "HELIX_NOTHING");
+        reader.conn.delete_property(reader.window, none).unwrap();
+        reader.conn.convert_selection(reader.window, reader.clipboard, atom(&reader.conn, "MULTIPLE"), none, x11rb::CURRENT_TIME).unwrap();
+        reader.conn.flush().unwrap();
+        refused.push(("missing", reader.answer(deadline).is_none()));
+        // No property asked for (ICCCM: MULTIPLE needs one).
+        reader.conn.convert_selection(reader.window, reader.clipboard, atom(&reader.conn, "MULTIPLE"), x11rb::NONE, x11rb::CURRENT_TIME).unwrap();
+        reader.conn.flush().unwrap();
+        refused.push(("no property", reader.answer(deadline).is_none()));
+        let good = reader.ask_multiple(&[("UTF8_STRING", "HELIX_A")], deadline).map(|_| reader.take(prop, deadline).0);
+        (refused, good)
+    });
+    for (what, was) in refused {
+        assert!(was, "a MULTIPLE request ({what}) was not refused");
+    }
+    assert_eq!(good.as_deref(), Some(&b"well formed"[..]), "a good MULTIPLE request after malformed ones");
+}
+
+/// The requestor of a MULTIPLE request going away halfway through an
+/// incremental pair: the transfer ends, and others are answered.
+#[test]
+fn a_multiple_requestor_gone_halfway_does_not_hold_up_others() {
+    let Some(session) = xwm::session() else { return };
+    if common::known_failure(&[common::Xwm::Smithay], MULTIPLE_WHY) {
+        return;
+    }
+    let mut app = wayland_app(&session);
+    let picture = data(2 * 1024 * 1024, 9);
+    app.copy_types(&[("text/plain;charset=utf-8", b"still here"), ("image/png", &picture)]);
+    let (pairs, after) = while_serving(&mut app, || {
+        let pairs = {
+            let reader = Reader::new(&session);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let pairs = reader.ask_multiple(&[("image/png", "HELIX_A"), ("UTF8_STRING", "HELIX_B")], deadline);
+            // Start the incremental pair, take one chunk, and go.
+            reader.conn.delete_property(reader.window, atom(&reader.conn, "HELIX_A")).unwrap();
+            reader.conn.flush().unwrap();
+            loop {
+                if let Event::PropertyNotify(n) = reader.next_event(deadline, "no chunk came") {
+                    if n.state == Property::NEW_VALUE && n.atom == atom(&reader.conn, "HELIX_A") {
+                        break;
+                    }
+                }
+            }
+            pairs
+        };
+        let reader = Reader::new(&session);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let after = reader.ask_multiple(&[("UTF8_STRING", "HELIX_B")], deadline).map(|_| reader.take(atom(&reader.conn, "HELIX_B"), deadline).0);
+        (pairs, after)
+    });
+    assert!(pairs.as_ref().is_some_and(|p| p.iter().all(Option::is_some)), "a MULTIPLE request was not converted: {pairs:?}");
+    assert_eq!(after.as_deref(), Some(&b"still here"[..]), "a MULTIPLE request after its requestor went away halfway");
+}
+
+/// Xwayland going away (a crash) while a pair of a MULTIPLE request is
+/// under way: it ends with Xwayland, and MULTIPLE works once it is back.
+#[test]
+fn xwayland_going_away_mid_multiple_request() {
+    let Some(session) = xwm::session() else { return };
+    if common::known_failure(&[common::Xwm::Smithay], MULTIPLE_WHY) {
+        return;
+    }
+    let mut app = wayland_app(&session);
+    let picture = data(2 * 1024 * 1024, 11);
+    app.copy_types(&[("text/plain;charset=utf-8", b"after the restart"), ("image/png", &picture)]);
+    let pairs = while_serving(&mut app, || {
+        let reader = Reader::new(&session);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let pairs = reader.ask_multiple(&[("image/png", "HELIX_A")], deadline);
+        // Kept open (not going away itself) until Xwayland does.
+        std::mem::forget(reader);
+        pairs
+    });
+    assert!(pairs.is_some_and(|p| p[0].is_some()), "a MULTIPLE request was not converted");
+    let killed = xwm::kill_xwayland(&session);
+    drop(xwm::restarted_xwayland(&session, killed));
+    let after = while_serving(&mut app, || {
+        let reader = Reader::new(&session);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        reader.ask_multiple(&[("UTF8_STRING", "HELIX_B")], deadline).map(|_| reader.take(atom(&reader.conn, "HELIX_B"), deadline).0)
+    });
+    assert_eq!(after.as_deref(), Some(&b"after the restart"[..]), "a MULTIPLE request after Xwayland came back");
 }
 
 /// An X11 app owning the clipboard that answers TARGETS (`text`) and then
