@@ -149,8 +149,16 @@ impl XWin {
         Self(Arc::new(Shared { id, conn: Arc::downgrade(conn), atoms, root, client, active, given, focus_seq, state: Mutex::new(state) }))
     }
 
+    /// Its state. Only the compositor's thread uses it, so the lock is
+    /// never held by another thread: one already held is this thread
+    /// asking again while it holds it, which would hang the whole
+    /// desktop silently; it fails loudly instead (#238).
     pub(super) fn state(&self) -> std::sync::MutexGuard<'_, State> {
-        self.0.state.lock().unwrap_or_else(|e| e.into_inner())
+        match self.0.state.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => panic!("an X11 window's state was locked again while held (window {:#x})", self.0.id),
+        }
     }
 
     pub fn window_id(&self) -> XId {

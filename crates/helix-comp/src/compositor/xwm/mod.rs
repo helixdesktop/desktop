@@ -169,7 +169,11 @@ pub struct Xwm {
     /// See `Shared::focus_seq`.
     focus_seq: Arc<AtomicU32>,
     /// The bits of a resource id that are the client's own: windows of
-    /// one X client share the rest (the server's resource-id base).
+    /// one X client share the rest (the server's resource-id base). The
+    /// X protocol has no "which client owns this window"; comparing the
+    /// ids without these bits tells windows of one client apart from
+    /// others' (`focus_in`: an app moving the focus among its own
+    /// windows), as mutter and wlroots do.
     id_mask: u32,
     /// Every window the X server told us about, by id.
     windows: HashMap<XId, XWin>,
@@ -177,7 +181,11 @@ pub struct Xwm {
     /// and surfaces whose serial came before the window's.
     window_serials: HashMap<u64, XId>,
     surface_serials: HashMap<u64, WlSurface>,
-    /// Managed windows, in the order they were mapped, and bottom to top.
+    /// Managed windows, in the order they were mapped, and bottom to top:
+    /// what `_NET_CLIENT_LIST` and `_NET_CLIENT_LIST_STACKING` publish.
+    /// Only the X stacking of managed windows is tracked here; Helix's
+    /// own stacking (the space) decides what is shown, and `raise` keeps
+    /// the X stack in the same order for apps and drags that read it.
     client_list: Vec<XId>,
     stacking: Vec<XId>,
     selections: selection::Selections,
@@ -444,7 +452,7 @@ impl Xwm {
         let mut actions = Vec::new();
         if let Some(cont) = self.pending.remove(&reply.token) {
             if let Err(err) = cont(self, reply.replies, &mut actions) {
-                tracing::debug!(%err, "X11 request failed");
+                self.log_failure(&err, "after a reply");
             }
             self.absorb();
         }
@@ -467,9 +475,10 @@ impl Xwm {
                     continue;
                 }
             }
+            let what = event_name(&event);
             match self.handle_inner(event) {
                 Ok(mut more) => actions.append(&mut more),
-                Err(err) => tracing::debug!(%err, "X11 request failed"),
+                Err(err) => self.log_failure(&err, what),
             }
             self.absorb();
             if !actions.is_empty() {
@@ -547,13 +556,11 @@ impl Xwm {
                 let Some(win) = self.windows.get(&e.window).cloned() else { return Ok(actions) };
                 // The flag counts as it is when the window is shown: clients
                 // change it after creating the window, both ways.
-                let was_override = {
+                {
                     let mut state = win.state();
                     state.viewable = true;
-                    let was = state.override_redirect;
                     state.override_redirect = e.override_redirect;
-                    was
-                };
+                }
                 tracing::debug!(window = e.window, override_redirect = e.override_redirect, "X11 window shown");
                 if e.override_redirect {
                     // Where it is and what it is, then shown.
@@ -577,7 +584,6 @@ impl Xwm {
                     // shown and withdrawn faster than the window manager
                     // caught up (the withdrawal handled after the last map,
                     // Zoom's toolbar). It is shown, so it is managed.
-                    let _ = was_override;
                     self.manage(&win, &mut actions)?;
                 }
             }
@@ -646,6 +652,7 @@ impl Xwm {
                     win.sync_done()?;
                 }
             }
+            Event::Error(e) => self.log_x_error(&e),
             _ => {}
         }
         Ok(actions)
@@ -779,7 +786,9 @@ impl Xwm {
                 props::apply_all(&xwm.atoms, &win, &atoms, replies);
                 xwm.break_transient_cycle(&win);
                 win.state().managed = true;
+                tracing::debug!(window = win.window_id(), class = %win.class(), title = %win.title(), kind = ?win.window_type(), "managing an X11 window");
                 actions.push(Action::MapRequest(win));
+                xwm.log_table("managed");
                 Ok(())
             }),
         );
@@ -840,7 +849,9 @@ impl Xwm {
             self.conn.delete_property(id, self.atoms._NET_WM_STATE)?;
             win.state().net_state.clear();
             self.unlist(id)?;
+            tracing::debug!(window = id, class = %win.class(), "X11 window withdrawn");
             actions.push(Action::Unmapped(win.clone()));
+            self.log_table("withdrawn");
         } else if or {
             actions.push(Action::Unmapped(win.clone()));
         }
@@ -861,6 +872,7 @@ impl Xwm {
         self.unlist(id)?;
         self.window_serials.retain(|_, w| *w != id);
         actions.push(Action::Destroyed(win));
+        self.log_table("gone");
         Ok(())
     }
 
@@ -1319,11 +1331,83 @@ impl Xwm {
         self.dnd.drop(&mut self.selections);
     }
 
+    /// One window, for logs and bug reports.
+    fn describe_window(&self, id: XId) -> String {
+        match self.windows.get(&id) {
+            Some(w) => {
+                let s = w.state();
+                format!("{id:#x} class={:?} title={:?} managed={} override_redirect={} viewable={} surface={}", s.class, s.net_name.as_deref().unwrap_or(&s.wm_name), s.managed, s.override_redirect, s.viewable, s.wl_surface.is_some())
+            }
+            None => format!("{id:#x} (not a window Helix knows)"),
+        }
+    }
+
+    /// The window table, one window a line (`RUST_LOG=helix_comp::compositor::xwm=debug`
+    /// logs it whenever a window is managed, withdrawn or gone), for bug
+    /// reports about X11 apps.
+    pub fn describe(&self) -> String {
+        let mut ids: Vec<XId> = self.windows.keys().copied().collect();
+        ids.sort_unstable();
+        ids.into_iter().map(|id| self.describe_window(id)).collect::<Vec<_>>().join("\n")
+    }
+
+    fn log_table(&self, why: &str) {
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            tracing::debug!(why, active = %self.describe_window(self.active.load(std::sync::atomic::Ordering::Relaxed)), "X11 windows:\n{}", self.describe());
+        }
+    }
+
+    /// An X error the server sent: expected for a window that went away
+    /// meanwhile (BadWindow, BadDrawable, BadMatch: trace), worth a
+    /// warning otherwise, with the window if it is one.
+    fn log_x_error(&self, e: &x11rb::x11_utils::X11Error) {
+        use x11rb::protocol::ErrorKind as K;
+        let vanished = matches!(e.error_kind, K::Window | K::Drawable | K::Match) && !self.windows.contains_key(&e.bad_value);
+        if vanished || matches!(e.error_kind, K::Window) {
+            tracing::trace!(kind = ?e.error_kind, request = ?e.request_name, bad_value = e.bad_value, "X11 error about a window that went away");
+        } else {
+            tracing::warn!(kind = ?e.error_kind, request = ?e.request_name, major = e.major_opcode, minor = e.minor_opcode, window = %self.describe_window(e.bad_value), "X11 error");
+        }
+    }
+
+    /// A request that failed while handling `what`: a window that went
+    /// away meanwhile is expected, anything else a warning.
+    fn log_failure(&self, err: &ReplyOrIdError, what: &str) {
+        match err {
+            ReplyOrIdError::X11Error(e) => {
+                tracing::debug!(what, "an X11 request failed");
+                self.log_x_error(e);
+            }
+            err => tracing::warn!(%err, what, "the X11 window manager's request failed"),
+        }
+    }
+
     pub fn selection_expired(&mut self) -> Vec<Action> {
         let mut actions = Vec::new();
         self.selections.expired(&mut actions);
         self.dnd.expired();
         self.absorb();
         actions
+    }
+}
+
+/// An X event's kind, for logs.
+fn event_name(event: &Event) -> &'static str {
+    match event {
+        Event::CreateNotify(_) => "CreateNotify",
+        Event::DestroyNotify(_) => "DestroyNotify",
+        Event::MapRequest(_) => "MapRequest",
+        Event::MapNotify(_) => "MapNotify",
+        Event::UnmapNotify(_) => "UnmapNotify",
+        Event::ConfigureRequest(_) => "ConfigureRequest",
+        Event::ConfigureNotify(_) => "ConfigureNotify",
+        Event::PropertyNotify(_) => "PropertyNotify",
+        Event::ClientMessage(_) => "ClientMessage",
+        Event::FocusIn(_) => "FocusIn",
+        Event::SelectionRequest(_) => "SelectionRequest",
+        Event::SelectionNotify(_) => "SelectionNotify",
+        Event::XfixesSelectionNotify(_) => "XfixesSelectionNotify",
+        Event::SyncAlarmNotify(_) => "SyncAlarmNotify",
+        _ => "another X event",
     }
 }
