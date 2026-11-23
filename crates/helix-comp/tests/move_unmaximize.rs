@@ -383,19 +383,22 @@ fn framed_x11_title_bar_drag_keeps_the_pointer_on_the_title_bar() {
         // Helix draws the title bar as wide as the window's surface, which
         // gets the maximized size when Xwayland next draws it (after the X
         // geometry): wait until the pointer reaches the window below
-        // where the title bar is grabbed.
+        // where the title bar is grabbed. Only motion where the pointer
+        // went counts: X sends EnterNotify at once to a window shown
+        // under its last pointer position, before the compositor has it.
         let grab = (900.0, 12.0);
+        while conn.poll_for_event().unwrap().is_some() {}
         let end = Instant::now() + Duration::from_secs(10);
         'drawn: loop {
             assert!(Instant::now() < end, "window {i}: the maximized window never got the pointer at x {}", grab.0);
-            for y in [TITLE_H + 6, TITLE_H + 10] {
+            let ys = [TITLE_H + 6, TITLE_H + 10];
+            for y in ys {
                 session.input(&format!("move {} {y}", grab.0));
             }
             let settle = Instant::now() + Duration::from_millis(100);
             while Instant::now() < settle {
                 match conn.poll_for_event().unwrap() {
-                    Some(x11rb::protocol::Event::MotionNotify(m)) if m.event == window => break 'drawn,
-                    Some(x11rb::protocol::Event::EnterNotify(m)) if m.event == window => break 'drawn,
+                    Some(x11rb::protocol::Event::MotionNotify(m)) if m.event == window && f64::from(m.root_x) == grab.0 && ys.contains(&i32::from(m.root_y)) => break 'drawn,
                     Some(_) => {}
                     None => std::thread::sleep(Duration::from_millis(5)),
                 }
