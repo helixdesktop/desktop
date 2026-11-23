@@ -845,6 +845,26 @@ impl Xwm {
         Ok(())
     }
 
+    /// Stacks the managed windows in `order` (top to bottom) each right
+    /// below the one before it, leaving the first where it is (so
+    /// override-redirect menus above it stay there). Windows not in
+    /// `order` keep their place relative to each other, below. Nothing is
+    /// sent when the order is already right.
+    pub fn restack(&mut self, order: &[XId]) -> Result<(), ConnectionError> {
+        let order: Vec<XId> = order.iter().copied().filter(|id| self.stacking.contains(id)).collect();
+        let mut wanted: Vec<XId> = self.stacking.iter().copied().filter(|id| !order.contains(id)).collect();
+        wanted.extend(order.iter().rev());
+        if wanted == self.stacking {
+            return Ok(());
+        }
+        for pair in order.windows(2) {
+            self.conn.configure_window(pair[1], &ConfigureWindowAux::new().sibling(pair[0]).stack_mode(StackMode::BELOW))?;
+        }
+        self.stacking = wanted;
+        self.publish_lists()?;
+        self.conn.flush()
+    }
+
     /// Puts a managed window on top of the other managed ones: right
     /// above the topmost, so override-redirect menus stay above it.
     pub fn raise(&mut self, win: &XWin) -> Result<(), ConnectionError> {
