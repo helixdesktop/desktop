@@ -117,13 +117,12 @@ jobs:
       # bindgen (PipeWire's bindings) doesn't find GCC 15's headers by
       # itself on 26.04.
       BINDGEN_EXTRA_CLANG_ARGS: -I/usr/lib/gcc/x86_64-linux-gnu/15/include
-      # A container has no login session: Xwayland's authority file goes in
-      # XDG_RUNTIME_DIR, so without one no X server starts.
-      XDG_RUNTIME_DIR: /tmp/xdg-runtime
     steps:
       - name: Install system packages
         run: |
-          mkdir -m 700 -p "$XDG_RUNTIME_DIR"
+          # A bare container has no X socket directory, so Xwayland can't
+          # make its socket; a normal system has one (systemd's tmpfiles).
+          mkdir -m 1777 -p /tmp/.X11-unix
           apt-get update
           apt-get install -y --no-install-recommends \
             ca-certificates curl git build-essential \
