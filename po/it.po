@@ -5183,3 +5183,8 @@ msgstr "Sessione desktop Helix"
 #: crates/helix-shell/src/ui.rs:2685
 msgid "Checking the password is taking too long. Try again."
 msgstr "La verifica della password sta richiedendo troppo tempo. Riprova."
+
+#. Translators: a dock item whose app was launched and is not up yet.
+#: crates/helix-shell/src/dock.rs:528
+msgid "starting"
+msgstr "in avvio"

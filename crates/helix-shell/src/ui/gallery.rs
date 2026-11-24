@@ -949,6 +949,8 @@ pub(super) fn sample_dock(icons: &mut crate::icon_cache::IconCache, (w, h): (i32
         focused_item: Some(0),
         looks,
         ghosts: Vec::new(),
+        starting: vec![None; n],
+        breathing: false,
         drag: None,
         tooltip: Some((1, vec!["Calculator".into(), "Calculator — 12 × 7".into()])),
         keyboard: Some(4),
@@ -1008,6 +1010,47 @@ fn dock_and_grid() {
     helix_draw::accent::set(Accent::Blue);
 }
 
+/// Apps starting (#298, `dock-starting-…`): Calendar (a favorite) and Text
+/// Editor (not pinned: an item of its own while it starts), still and
+/// dimmed (`still`, no animations or reduced motion) and at three moments
+/// of the breathing (`pulse-…`), next to running and idle items.
+#[test]
+#[ignore]
+fn dock_starting() {
+    let Some(dir) = dir() else { return };
+    let text = Text::load();
+    let mut icons = crate::icon_cache::IconCache::default();
+    let (w, h) = (760, 200);
+    let frames = [("still", None), ("pulse-bright", Some(0)), ("pulse-mid", Some(400)), ("pulse-dim", Some(800))];
+    for (name, at) in frames {
+        render(&dir, &format!("dock-starting-{name}"), DARK, (w, h, 1.0), |canvas| {
+            let mut m = sample_dock(&mut icons, (w as i32, h as i32), 1.0);
+            let editor = crate::dock::Item::App { id: "org.gnome.TextEditor".into(), favorite: false };
+            let px = m.icon as u32;
+            let n = m.items.len() - 2;
+            m.items.insert(n, editor);
+            m.icons.insert(n, icons.get(format!("app:org.gnome.TextEditor@{px}"), move || crate::icons::app_icon("org.gnome.TextEditor", px)));
+            m.counts.insert(n, (0, 0));
+            m.progress.insert(n, None);
+            m.urgent.insert(n, false);
+            m.wiggles.insert(n, 0);
+            m.numbers.insert(n, None);
+            m.looks.insert(n, crate::item_feedback::Look { highlight: 0.0, pressed: false, scale: 1.0 });
+            m.starting.insert(n, None);
+            // No hover, tooltip or keyboard: only the starting marks.
+            m.looks = vec![crate::item_feedback::Look { highlight: 0.0, pressed: false, scale: 1.0 }; m.items.len()];
+            m.tooltip = None;
+            m.keyboard = None;
+            m.urgent = vec![false; m.items.len()];
+            m.counts[2] = (0, 0);
+            let alpha = crate::starting::icon_alpha(std::time::Duration::from_millis(at.unwrap_or(0)), at.is_some());
+            m.starting[2] = Some(alpha);
+            m.starting[n] = Some(alpha);
+            dock::paint_dock(canvas, text.as_ref(), &m);
+        });
+    }
+}
+
 /// The whole app grid at 1920×1080, 2560×1440 and 1280×720
 /// (`grid-page-…`): cells and icons grown into the room, two-line names,
 /// the hovered app's whole name.
@@ -1055,14 +1098,17 @@ fn dash_feedback() {
         windows,
         running_only,
         titles: titles.iter().map(|t| (*t).to_owned()).collect(),
+        starting: false,
     };
-    let entries = vec![
+    let mut entries = vec![
         entry("org.gnome.Nautilus", vec![1, 2], &["Home", "Downloads"], false),
         entry("org.gnome.Calculator", vec![3], &["Calculator"], false),
         entry("org.gnome.Calendar", vec![], &[], false),
         entry("org.gnome.Terminal", vec![4], &["~/projects"], false),
         entry("org.gnome.TextEditor", vec![], &[], true),
     ];
+    // Text Editor is starting (#298): dimmed.
+    entries[4].starting = true;
     let rest = Look { highlight: 0.0, pressed: false, scale: 1.0 };
     let looks = vec![rest, Look { highlight: 1.0, pressed: false, scale: HOVER_SCALE }, Look { highlight: 1.0, pressed: true, scale: PRESS_SCALE }, Look { highlight: 1.0, pressed: false, scale: HOVER_SCALE }, rest];
     for (name, accent, hc, factor) in [("blue", Accent::Blue, false, 1.0), ("hc", Accent::Blue, true, 1.0), ("text1.5", Accent::Blue, false, 1.5)] {

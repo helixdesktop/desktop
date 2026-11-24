@@ -60,7 +60,7 @@ impl GlobalDispatch<gtk_shell1::GtkShell1, ()> for Helix {
 }
 
 impl Dispatch<gtk_shell1::GtkShell1, ()> for Helix {
-    fn request(state: &mut Self, _: &Client, _: &gtk_shell1::GtkShell1, request: gtk_shell1::Request, _: &(), _: &DisplayHandle, init: &mut DataInit<'_, Self>) {
+    fn request(state: &mut Self, client: &Client, _: &gtk_shell1::GtkShell1, request: gtk_shell1::Request, _: &(), _: &DisplayHandle, init: &mut DataInit<'_, Self>) {
         match request {
             gtk_shell1::Request::GetGtkSurface { gtk_surface, surface } => {
                 init.init(gtk_surface, GtkSurfaceData { surface: surface.downgrade(), modal: AtomicBool::new(false) });
@@ -71,14 +71,15 @@ impl Dispatch<gtk_shell1::GtkShell1, ()> for Helix {
             }
             // A launch with this startup id (an activation token, from
             // the shell) started: the busy pointer shows until it ends
-            // (`launches.rs`). As in mutter, any client may say so.
+            // (`launches.rs`). As in mutter, any client may say so; the
+            // client is told when it ends (its window list, if it has one).
             gtk_shell1::Request::NotifyLaunch { startup_id } => {
                 let app = state.activation_state.data_for_token(&XdgActivationToken::from(startup_id.clone())).and_then(|d| d.app_id.clone());
-                state.launch_started(&startup_id, app.as_deref());
+                state.launch_started(&startup_id, app.as_deref(), Some(client.id()));
             }
             // The app's window is up for this launch (mutter completes the
             // launch). Focus comes with xdg_activation_v1 tokens.
-            gtk_shell1::Request::SetStartupId { startup_id: Some(id) } => state.launch_ended(&id, "the app set its startup id"),
+            gtk_shell1::Request::SetStartupId { startup_id: Some(id) } => state.launch_ended(&id, super::launches::LaunchEnd::Used),
             _ => {}
         }
     }

@@ -8,6 +8,10 @@
 //! "new:" starts one too. Under either window manager (`HELIX_XWM`); the
 //! shell is the test, the pointer image is the test input socket's
 //! `cursor` answer.
+//!
+//! The shell hears when each launch it announced ends
+//! (`helix_window_list_v1.launch_ended`, with why: #298), and of no other
+//! launches.
 
 mod common;
 
@@ -48,6 +52,32 @@ fn cursor_stays(session: &mut HeadlessSession, cursor: &str, what: &str) {
         assert_eq!(shown, cursor, "{what}");
         std::thread::sleep(Duration::from_millis(30));
     }
+}
+
+/// `helix_window_list_v1.launch_end` values.
+const USED: u32 = 0;
+const WINDOW: u32 = 1;
+const REMOVED: u32 = 2;
+const TIMED_OUT: u32 = 3;
+
+/// Wait until the shell has been told of exactly the launch ends `ended`
+/// (startup id, reason), in order; then that no more come for a while.
+fn shell_told(shell: &mut Shell, ended: &[(&str, u32)], what: &str) {
+    let want: Vec<(String, u32)> = ended.iter().map(|(id, r)| ((*id).to_owned(), *r)).collect();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        shell.roundtrip();
+        if shell.state.launches_ended.len() >= want.len() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{what}: the shell was told {:?}, not {want:?}", shell.state.launches_ended);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    for _ in 0..5 {
+        std::thread::sleep(Duration::from_millis(30));
+        shell.roundtrip();
+    }
+    assert_eq!(shell.state.launches_ended, want, "{what}");
 }
 
 /// Send startup notification `message` as libstartup-notification does:
@@ -93,8 +123,10 @@ fn a_launch_is_busy_until_its_token_is_used() {
 
     // The launched app activates its window with the token (as a
     // single-instance app handing the launch to its running copy does).
-    app.activate_token(token, &window.surface);
+    shell_told(&mut shell, &[], "nothing ended yet");
+    app.activate_token(token.clone(), &window.surface);
     cursor_becomes(&mut session, "default", "the token was used");
+    shell_told(&mut shell, &[(&token, USED)], "the token was used");
 }
 
 /// Launches overlap: busy until both ended. One ends when a window of its
@@ -103,18 +135,21 @@ fn a_launch_is_busy_until_its_token_is_used() {
 fn overlapping_launches_and_windows_of_the_app() {
     let Some((mut session, mut shell)) = session("launch-overlap", None) else { return };
     let first = shell.launch_token(Some("org.example.First.desktop"));
-    let _second = shell.launch_token(Some("org.example.Second.desktop"));
+    let second_token = shell.launch_token(Some("org.example.Second.desktop"));
     cursor_becomes(&mut session, "progress", "two apps launched");
 
     let mut app = common::connect(&session);
-    let (window, ()) = app.toplevel((200, 120), |_, t| t.toplevel.set_app_id("org.example.First".into()));
-    app.activate_token(first, &window.surface);
+    // (Its window's app id is another's, so only the token ends it.)
+    let (window, ()) = app.toplevel((200, 120), |_, t| t.toplevel.set_app_id("org.example.FirstHelper".into()));
+    app.activate_token(first.clone(), &window.surface);
     cursor_stays(&mut session, "progress", "one launch of two ended");
+    shell_told(&mut shell, &[(&first, USED)], "the first launch's token was used");
 
     // The second app never uses its token; its window maps.
     let mut second = common::connect(&session);
     let _window = second.toplevel((200, 120), |_, t| t.toplevel.set_app_id("org.example.Second".into()));
     cursor_becomes(&mut session, "default", "the second app's window mapped");
+    shell_told(&mut shell, &[(&first, USED), (&second_token, WINDOW)], "the second app's window mapped");
 }
 
 /// An X11 app launched with the token as `DESKTOP_STARTUP_ID` ends the
@@ -133,6 +168,7 @@ fn an_x11_remove_message_ends_the_launch() {
     send_startup_info(&x, &format!("remove: ID=\"{token}\""));
     cursor_becomes(&mut session, "default", "the app removed its launch");
     assert!(sent.elapsed() < Duration::from_secs(10), "ended by the timeout, not the message");
+    shell_told(&mut shell, &[(&token, REMOVED)], "the app removed its launch");
 }
 
 /// An X11 window mapped with the token as its `_NET_STARTUP_ID` ends the
@@ -149,6 +185,7 @@ fn an_x11_window_with_the_token_ends_the_launch() {
     x.map_managed(window);
     shell.window("launched");
     cursor_becomes(&mut session, "default", "the window with the launch's startup id mapped");
+    shell_told(&mut shell, &[(&token, WINDOW)], "the window with the launch's startup id mapped");
 }
 
 /// An X11 launcher's "new:" starts a launch (as in mutter); a window whose
@@ -173,6 +210,8 @@ fn an_x11_launchers_launch_ends_with_a_window_of_its_class() {
     cursor_becomes(&mut session, "default", "removed");
     x.conn.destroy_window(window).unwrap();
     x.flush();
+    // Not the shell's launches: it hears of neither.
+    shell_told(&mut shell, &[], "X11 launchers' launches");
 }
 
 /// A launch nothing ends times out.
@@ -180,8 +219,26 @@ fn an_x11_launchers_launch_ends_with_a_window_of_its_class() {
 fn a_launch_times_out() {
     let Some((mut session, mut shell)) = session("launch-timeout", Some(1500)) else { return };
     let started = Instant::now();
-    let _token = shell.launch_token(Some("org.example.Never.desktop"));
+    let token = shell.launch_token(Some("org.example.Never.desktop"));
     cursor_becomes(&mut session, "progress", "an app launched");
     cursor_becomes(&mut session, "default", "the launch timed out");
     assert!(started.elapsed() >= Duration::from_millis(1400), "it ended before the timeout");
+    shell_told(&mut shell, &[(&token, TIMED_OUT)], "the launch timed out");
+}
+
+/// A launch another client announced (any client may) is not the shell's:
+/// when it ends, only the shell's own launch is reported to the shell.
+#[test]
+fn the_shell_hears_only_of_its_own_launches() {
+    let Some((mut session, mut shell)) = session("launch-others", Some(1500)) else { return };
+    let mut other = common::connect(&session);
+    let theirs = other.token(None, None);
+    other.gtk_shell.notify_launch(theirs.clone());
+    other.roundtrip();
+    cursor_becomes(&mut session, "progress", "another client's launch");
+    let mine = shell.launch_token(Some("org.example.Mine.desktop"));
+    // Both time out; the shell is told of its own only.
+    cursor_becomes(&mut session, "default", "both launches timed out");
+    shell_told(&mut shell, &[(&mine, TIMED_OUT)], "both launches timed out");
+    assert!(theirs != mine);
 }

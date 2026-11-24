@@ -117,6 +117,9 @@ impl Builder {
         if node.modal {
             out.set_modal();
         }
+        if node.busy {
+            out.set_busy();
+        }
         if node.focusable {
             out.add_action(Action::Focus);
         }
@@ -280,6 +283,14 @@ mod tests {
 
     fn window(children: Vec<Node>) -> Window {
         Window { title: "Test".into(), bounds: Rect::new(0, 0, 800, 600), active: true, children }
+    }
+
+    #[test]
+    fn busy_items() {
+        let w = window(vec![Node::button("Calculator", Rect::new(0, 0, 48, 48)).busy(true), Node::button("Files", Rect::new(60, 0, 48, 48)).busy(false)]);
+        let built = build(&w);
+        assert!(by_label(&built, "Calculator").1.is_busy(), "a starting app's item is busy");
+        assert!(!by_label(&built, "Files").1.is_busy());
     }
 
     #[test]

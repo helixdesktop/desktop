@@ -4196,7 +4196,7 @@ pub fn run(
     let primary_selections = smithay_client_toolkit::primary_selection::PrimarySelectionManagerState::bind(&globals, &qh).ok();
     // Only advertised to the shell the compositor launched itself.
     let keybindings = globals.bind::<HelixKeybindingsManagerV1, _, _>(&qh, 1..=2, ()).ok();
-    let window_list = globals.bind::<HelixWindowListV1, _, _>(&qh, 1..=13, ()).ok();
+    let window_list = globals.bind::<HelixWindowListV1, _, _>(&qh, 1..=14, ()).ok();
     let screenshots = globals.bind::<HelixScreenshotManagerV1, _, _>(&qh, 1..=8, ()).ok();
     let im_manager = globals
         .bind::<wayland_protocols_misc::zwp_input_method_v2::client::zwp_input_method_manager_v2::ZwpInputMethodManagerV2, _, _>(&qh, 1..=1, ())
@@ -4416,6 +4416,16 @@ pub fn run(
             queue.dispatch_pending(ui)
         })
         .map_err(|e| format!("cannot watch the Wayland connection: {e}"))?;
+    // Launches start on any thread (`starting.rs`): the dock shows them.
+    let (ping, pinged) = smithay_client_toolkit::reexports::calloop::ping::make_ping().map_err(|e| format!("cannot make the launch ping: {e}"))?;
+    handle
+        .insert_source(pinged, |_, _, ui| {
+            let _busy = crate::watchdog::scope("app starting");
+            ui.starting_changed();
+        })
+        .map_err(|e| format!("cannot watch launches: {e}"))?;
+    let ping = std::sync::Mutex::new(ping);
+    crate::starting::on_start(move || ping.lock().unwrap_or_else(|e| e.into_inner()).ping());
     handle
         .insert_source(events, |event, _, ui| {
             if let channel::Event::Msg(event) = event {
@@ -5785,6 +5795,20 @@ impl Dispatch<HelixWindowListV1, ()> for Ui {
             }
             helix_window_list_v1::Event::Client { id, pid, a11y_name, a11y_path } => {
                 ui.window_client.insert(id, (pid, a11y_name, a11y_path));
+            }
+            helix_window_list_v1::Event::LaunchEnded { startup_id, reason } => {
+                use helix_window_list_v1::LaunchEnd;
+                let reason = match reason {
+                    WEnum::Value(LaunchEnd::Used) => "its token was used",
+                    WEnum::Value(LaunchEnd::Window) => "its app mapped a window",
+                    WEnum::Value(LaunchEnd::Removed) => "the app removed it",
+                    WEnum::Value(LaunchEnd::TimedOut) => "helix-comp's timeout",
+                    WEnum::Value(LaunchEnd::Dropped) => "too many launches",
+                    _ => "unknown",
+                };
+                if crate::starting::ended(&startup_id, reason).is_some() {
+                    ui.starting_changed();
+                }
             }
             helix_window_list_v1::Event::Primary { x, y, width, height } => {
                 ui.primary_area = (x, y, width, height);

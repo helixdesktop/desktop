@@ -53,6 +53,7 @@ pub mod icon_cache;
 pub mod watchdog;
 pub mod workers;
 pub mod item_feedback;
+pub mod starting;
 pub mod markup;
 pub mod network_agent;
 pub mod vpn_secrets;

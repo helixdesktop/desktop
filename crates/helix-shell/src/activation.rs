@@ -16,8 +16,9 @@
 //!
 //! A launch's token is also announced as one (`gtk_shell1.notify_launch`,
 //! as GTK does without `xdg_activation_v1`), so helix-comp shows the busy
-//! pointer until the app is up (helixdesktop/spec "Launch feedback");
-//! tokens for anything else are not.
+//! pointer until the app is up (helixdesktop/spec "Launch feedback"), and
+//! the dock shows the app starting until helix-comp says the launch ended
+//! (`starting.rs`); tokens for anything else are not.
 
 use std::sync::{Mutex, OnceLock};
 
@@ -106,6 +107,11 @@ pub fn launch_token(app_id: Option<&str>) -> Option<String> {
             gtk_shell.notify_launch(token.clone());
             // Before the app (another client) can use the token.
             let _ = source.queue.roundtrip(&mut Minted::default());
+            // The dock shows the app starting until helix-comp says the
+            // launch ended (`starting.rs`).
+            if let Some(id) = app_id {
+                crate::starting::started(&token, id);
+            }
         }
     }
     Some(token)

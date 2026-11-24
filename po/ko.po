@@ -5084,3 +5084,8 @@ msgstr "Helix 데스크톱 세션"
 #: crates/helix-shell/src/ui.rs:2685
 msgid "Checking the password is taking too long. Try again."
 msgstr "암호 확인이 너무 오래 걸립니다. 다시 시도하세요."
+
+#. Translators: a dock item whose app was launched and is not up yet.
+#: crates/helix-shell/src/dock.rs:528
+msgid "starting"
+msgstr "시작하는 중"

@@ -482,6 +482,9 @@ pub struct ShellState {
     pub focus_log: Vec<Option<u32>>,
     pub workspace_log: Vec<(u32, u32)>,
     pub minimized_log: Vec<(u32, bool)>,
+    /// Launches the shell announced that ended
+    /// (`helix_window_list_v1.launch_ended`): startup id and reason.
+    pub launches_ended: Vec<(String, u32)>,
     /// The last activation token made (`Shell::token`).
     token: Option<String>,
     lock_configures: Vec<(ext_session_lock_surface_v1::ExtSessionLockSurfaceV1, u32, u32, u32)>,
@@ -591,6 +594,13 @@ impl Dispatch<HelixWindowListV1, ()> for ShellState {
                     state.not_responding.push(id);
                 }
             }
+            E::LaunchEnded { startup_id, reason } => {
+                let reason = match reason {
+                    WEnum::Value(r) => r as u32,
+                    WEnum::Unknown(r) => r,
+                };
+                state.launches_ended.push((startup_id, reason));
+            }
             _ => {}
         }
     }
@@ -616,7 +626,7 @@ impl Shell {
         let conn = WlConnection::from_socket(stream).unwrap();
         let (globals, mut queue) = registry_queue_init::<ShellState>(&conn).unwrap();
         let qh = queue.handle();
-        let list: HelixWindowListV1 = globals.bind(&qh, 1..=9, ()).expect("the shell is offered the window list");
+        let list: HelixWindowListV1 = globals.bind(&qh, 1..=14, ()).expect("the shell is offered the window list");
         let mut state = ShellState::default();
         queue.roundtrip(&mut state).unwrap();
         Shell { queue, state, list, globals, dir }
