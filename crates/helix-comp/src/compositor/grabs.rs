@@ -1,6 +1,7 @@
 //! Interactive move and resize grabs, of the pointer (started by
 //! xdg_toplevel move/resize requests, the window menu and X11 apps) and of
-//! a touch (X11 apps' `_NET_WM_MOVERESIZE` from a touch). Modeled on
+//! a touch (xdg_toplevel move/resize requests and X11 apps'
+//! `_NET_WM_MOVERESIZE` from a touch). Modeled on
 //! Smithay's `smallvil` and `anvil` examples (MIT).
 
 use super::window::Window;
@@ -279,6 +280,55 @@ fn resize_x11(
     size
 }
 
+/// `window`'s `edges` dragged by `delta` from `initial`, by the pointer
+/// or a finger. An X11 window gets its new geometry at once; an xdg one is
+/// asked for its new size (Resizing), and [`Helix::track_resize_commit`]
+/// keeps its opposite edges in place once it draws at that size. The new
+/// size.
+fn resize_window(
+    data: &mut Helix,
+    window: &Window,
+    edges: Edges,
+    initial: Rectangle<i32, Logical>,
+    delta: Point<f64, Logical>,
+) -> Size<i32, Logical> {
+    if window.x11_surface().is_some() {
+        return resize_x11(data, window, edges, initial, delta);
+    }
+    let Some(toplevel) = window.toplevel() else { return initial.size };
+    let (min, max) = with_states(toplevel.wl_surface(), |states| {
+        let mut cached = states.cached_state.get::<SurfaceCachedState>();
+        let current = cached.current();
+        (current.min_size, current.max_size)
+    });
+    let size = resized(initial.size, edges, delta, min, max);
+    toplevel.with_pending_state(|state| {
+        state.states.set(xdg_toplevel::State::Resizing);
+        state.size = Some(size);
+    });
+    toplevel.configure_pending();
+    size
+}
+
+/// A resize of `window` is over, at `last_size`: an xdg window is no
+/// longer Resizing (unless `cancelled`, which puts the window back
+/// itself), and the tracking is finished, so later commits don't
+/// re-anchor the window (helixdesktop/desktop#239).
+fn end_resize(data: &mut Helix, window: &Window, last_size: Size<i32, Logical>, cancelled: bool) {
+    if !cancelled {
+        if let Some(toplevel) = window.toplevel() {
+            toplevel.with_pending_state(|state| {
+                state.states.unset(xdg_toplevel::State::Resizing);
+                state.size = Some(last_size);
+            });
+            toplevel.configure_pending();
+        }
+    }
+    if let Some(tracking) = data.resize.as_mut().filter(|t| &t.window == window) {
+        tracking.finished = true;
+    }
+}
+
 impl PointerGrab<Helix> for ResizeGrab {
     fn motion(
         &mut self,
@@ -289,22 +339,7 @@ impl PointerGrab<Helix> for ResizeGrab {
     ) {
         handle.motion(data, None, event);
         let delta = event.location - self.start_data.location;
-        if self.window.x11_surface().is_some() {
-            self.last_size = resize_x11(data, &self.window, self.edges, self.initial, delta);
-            return;
-        }
-        let Some(toplevel) = self.window.toplevel() else { return };
-        let (min, max) = with_states(toplevel.wl_surface(), |states| {
-            let mut cached = states.cached_state.get::<SurfaceCachedState>();
-            let current = cached.current();
-            (current.min_size, current.max_size)
-        });
-        self.last_size = resized(self.initial.size, self.edges, delta, min, max);
-        toplevel.with_pending_state(|state| {
-            state.states.set(xdg_toplevel::State::Resizing);
-            state.size = Some(self.last_size);
-        });
-        toplevel.configure_pending();
+        self.last_size = resize_window(data, &self.window, self.edges, self.initial, delta);
     }
 
     fn button(&mut self, data: &mut Helix, handle: &mut PointerInnerHandle<'_, Helix>, event: &ButtonEvent) {
@@ -332,18 +367,7 @@ impl PointerGrab<Helix> for ResizeGrab {
         if self.follow {
             data.follow = None;
         }
-        if !cancelled {
-            if let Some(toplevel) = self.window.toplevel() {
-                toplevel.with_pending_state(|state| {
-                    state.states.unset(xdg_toplevel::State::Resizing);
-                    state.size = Some(self.last_size);
-                });
-                toplevel.configure_pending();
-            }
-        }
-        if let Some(tracking) = data.resize.as_mut().filter(|t| t.window == self.window) {
-            tracking.finished = true;
-        }
+        end_resize(data, &self.window, self.last_size, cancelled);
     }
 }
 
@@ -378,9 +402,10 @@ macro_rules! forward_touch_passthrough {
     };
 }
 
-/// Drags a window with a finger (an X11 app's `_NET_WM_MOVERESIZE` from a
-/// touch, as mutter and wlroots): the touch point that was down when it
-/// asked, until it lifts.
+/// Drags a window with a finger (an app's `xdg_toplevel.move` with a touch
+/// serial, or an X11 app's `_NET_WM_MOVERESIZE` from a touch, as mutter
+/// and wlroots): the touch point that was down when it asked, until it
+/// lifts.
 pub struct TouchMoveGrab {
     pub start_data: touch::GrabStartData<Helix>,
     pub window: Window,
@@ -424,13 +449,15 @@ impl TouchGrab<Helix> for TouchMoveGrab {
     }
 }
 
-/// Resizes an X11 window with a finger (`_NET_WM_MOVERESIZE` from a
-/// touch), as [`TouchMoveGrab`].
+/// Resizes a window with a finger (`xdg_toplevel.resize` with a touch
+/// serial, or `_NET_WM_MOVERESIZE` from a touch), as [`TouchMoveGrab`],
+/// the same way as [`ResizeGrab`].
 pub struct TouchResizeGrab {
     pub start_data: touch::GrabStartData<Helix>,
     pub window: Window,
     pub edges: Edges,
     pub initial: Rectangle<i32, Logical>,
+    pub last_size: Size<i32, Logical>,
 }
 
 impl TouchGrab<Helix> for TouchResizeGrab {
@@ -444,7 +471,7 @@ impl TouchGrab<Helix> for TouchResizeGrab {
         if event.slot != self.start_data.slot {
             return;
         }
-        resize_x11(data, &self.window, self.edges, self.initial, event.location - self.start_data.location);
+        self.last_size = resize_window(data, &self.window, self.edges, self.initial, event.location - self.start_data.location);
     }
 
     fn up(&mut self, data: &mut Helix, handle: &mut TouchInnerHandle<'_, Helix>, event: &touch::UpEvent) {
@@ -457,11 +484,9 @@ impl TouchGrab<Helix> for TouchResizeGrab {
 
     forward_touch_passthrough!();
 
-    /// However it ends, the tracking is finished (as [`ResizeGrab`]).
+    /// However it ends, as [`ResizeGrab`].
     fn unset(&mut self, data: &mut Helix) {
-        if let Some(tracking) = data.resize.as_mut().filter(|t| t.window == self.window) {
-            tracking.finished = true;
-        }
+        end_resize(data, &self.window, self.last_size, false);
     }
 }
 

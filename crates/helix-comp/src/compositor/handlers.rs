@@ -45,7 +45,7 @@ use smithay::wayland::shell::xdg::{
 };
 use smithay::wayland::shm::{ShmHandler, ShmState};
 
-use super::grabs::{MoveGrab, ResizeGrab, ResizeTracking};
+use super::grabs::{MoveGrab, ResizeGrab, ResizeTracking, TouchMoveGrab, TouchResizeGrab};
 use super::wm::ConfigureWhenReady;
 use super::{ClientState, Helix};
 
@@ -334,12 +334,20 @@ impl XdgShellHandler for Helix {
 
     fn move_request(&mut self, surface: ToplevelSurface, seat: WlSeat, serial: Serial) {
         let Some(seat) = Seat::<Self>::from_resource(&seat) else { return };
-        let Some(start_data) = check_grab(&seat, surface.wl_surface(), serial) else { return };
+        let Some(start) = check_grab(&seat, surface.wl_surface(), serial) else { return };
         let Some(window) = self.window_for_surface(surface.wl_surface()) else { return };
-        // Dragging a maximized window restores it under the pointer once
-        // it really moves.
+        // Dragging a maximized window restores it under the pointer (or
+        // finger) once it really moves.
         let unmaximize = self.is_any_taken_over(&window);
         let initial_location = self.space.element_location(&window).unwrap_or_default();
+        let start_data = match start {
+            GrabStart::Pointer(start_data) => start_data,
+            GrabStart::Touch(start_data) => {
+                let grab = TouchMoveGrab { start_data, window, initial_location, unmaximize, ended: false };
+                seat.get_touch().unwrap().set_grab(self, grab, serial);
+                return;
+            }
+        };
         let pointer = seat.get_pointer().unwrap();
         pointer.set_grab(
             self,
@@ -364,7 +372,7 @@ impl XdgShellHandler for Helix {
         edges: xdg_toplevel::ResizeEdge,
     ) {
         let Some(seat) = Seat::<Self>::from_resource(&seat) else { return };
-        let Some(start_data) = check_grab(&seat, surface.wl_surface(), serial) else { return };
+        let Some(start) = check_grab(&seat, surface.wl_surface(), serial) else { return };
         let Some(window) = self.window_for_surface(surface.wl_surface()) else { return };
         let location = self.space.element_location(&window).unwrap_or_default();
         let initial = smithay::utils::Rectangle::new(location, window.geometry().size);
@@ -379,6 +387,14 @@ impl XdgShellHandler for Helix {
             initial,
             finished: false,
         });
+        let start_data = match start {
+            GrabStart::Pointer(start_data) => start_data,
+            GrabStart::Touch(start_data) => {
+                let grab = TouchResizeGrab { start_data, window, edges, initial, last_size: initial.size };
+                seat.get_touch().unwrap().set_grab(self, grab, serial);
+                return;
+            }
+        };
         let pointer = seat.get_pointer().unwrap();
         pointer.set_grab(
             self,
@@ -450,23 +466,29 @@ impl XdgShellHandler for Helix {
     }
 }
 
-/// The pointer grab a client's move/resize request refers to, if the
-/// request is legitimate (the pointer is pressed on that client).
-fn check_grab(
-    seat: &Seat<Helix>,
-    surface: &WlSurface,
-    serial: Serial,
-) -> Option<smithay::input::pointer::GrabStartData<Helix>> {
-    let pointer = seat.get_pointer()?;
-    if !pointer.has_grab(serial) {
-        return None;
+/// Where a client's move/resize request starts from.
+enum GrabStart {
+    /// The pointer, its button pressed on the client.
+    Pointer(smithay::input::pointer::GrabStartData<Helix>),
+    /// A touch point down on the client (GTK and Qt on a touch screen send
+    /// the `wl_touch.down` serial, as mutter and wlroots accept).
+    Touch(smithay::input::touch::GrabStartData<Helix>),
+}
+
+/// The pointer or touch grab a client's move/resize request refers to, if
+/// the request is legitimate: `serial` is that of the pointer's press or
+/// the touch's down that is still held, on that client.
+fn check_grab(seat: &Seat<Helix>, surface: &WlSurface, serial: Serial) -> Option<GrabStart> {
+    let on_client = |focus: Option<&super::focus::PointerFocusTarget>| {
+        focus.and_then(|f| f.surface()).is_some_and(|s| s.id().same_client_as(&surface.id()))
+    };
+    if let Some(pointer) = seat.get_pointer().filter(|p| p.has_grab(serial)) {
+        let start_data = pointer.grab_start_data()?;
+        return on_client(start_data.focus.as_ref().map(|(f, _)| f)).then_some(GrabStart::Pointer(start_data));
     }
-    let start_data = pointer.grab_start_data()?;
-    let (focus, _) = start_data.focus.as_ref()?;
-    if !focus.surface()?.id().same_client_as(&surface.id()) {
-        return None;
-    }
-    Some(start_data)
+    let touch = seat.get_touch().filter(|t| t.has_grab(serial))?;
+    let start_data = touch.grab_start_data()?;
+    on_client(start_data.focus.as_ref().map(|(f, _)| f)).then_some(GrabStart::Touch(start_data))
 }
 
 impl XdgDecorationHandler for Helix {
