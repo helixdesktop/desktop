@@ -738,11 +738,12 @@ impl Helix {
         let pointer_location = self.seat.get_pointer().unwrap().current_location();
         let focused = self.focused_window();
         let fullscreen_outputs = self.fullscreen_outputs();
+        // The busy pointer while an app starts (`launches.rs`).
+        let cursor_status = &self.shown_cursor();
         let Helix {
             udev,
             frames,
             space,
-            cursor_status,
             cursors,
             start_time,
             lock,

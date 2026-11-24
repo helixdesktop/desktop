@@ -49,7 +49,7 @@ pub mod gtk_shell_server {
     wayland_scanner::generate_server_code!("protocols/gtk-shell.xml");
 }
 
-/// GNOME's `gtk_shell1`, client side (tests).
+/// GNOME's `gtk_shell1`, client side (the shell's `notify_launch`, tests).
 #[cfg(feature = "client")]
 pub mod gtk_shell_client {
     use crate::__gtk_shell::*;

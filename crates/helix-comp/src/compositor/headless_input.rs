@@ -30,6 +30,12 @@
 //!   virtual touchscreen on the monitor under (X, Y).
 //! - `unplug CONNECTOR`: the monitor goes away, as an unplugged one does
 //!   (windows on it are rescued).
+//!
+//! Queries, answered `ok ANSWER`:
+//!
+//! - `cursor`: the pointer image Helix shows now: a cursor name
+//!   (`default`, `progress`, …), `surface` (an app's own image) or
+//!   `hidden`.
 
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -52,6 +58,8 @@ pub enum Command {
     /// A monitor unplugged (its connector name): windows on it are
     /// rescued, as when a real one goes away.
     Unplug(String),
+    /// What pointer image is shown (a query).
+    Cursor,
 }
 
 fn number<T: std::str::FromStr>(word: Option<&str>) -> Result<T, String> {
@@ -100,6 +108,7 @@ pub fn parse(line: &str) -> Result<Command, String> {
             Command::Input(down.chain(up).collect())
         }
         "move" => Command::Move(number(words.next())?, number(words.next())?),
+        "cursor" => Command::Cursor,
         "unplug" => Command::Unplug(words.next().ok_or("missing connector")?.to_owned()),
         "button" => Command::Input(vec![RemoteInput::Button { button: number(words.next())?, pressed: pressed(words.next())? }]),
         "click" => {
@@ -176,6 +185,7 @@ impl Helix {
         while let Some(at) = pending.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = pending.drain(..=at).collect();
             let answer = match parse(&String::from_utf8_lossy(&line)) {
+                Ok(Command::Cursor) => format!("ok {}\n", self.shown_cursor_name()),
                 Ok(command) => {
                     self.headless_command(command);
                     "ok\n".to_owned()
@@ -221,6 +231,7 @@ impl Helix {
                 }
                 self.headless_touch(at, down);
             }
+            Command::Cursor => {}
             Command::Unplug(connector) => {
                 let output = self.space.outputs().find(|o| o.name() == connector).cloned();
                 if let Some(output) = output {
@@ -288,6 +299,7 @@ mod tests {
             ]))
         );
         assert_eq!(parse("move 10 20.5"), Ok(Command::Move(10.0, 20.5)));
+        assert_eq!(parse("cursor"), Ok(Command::Cursor));
         assert_eq!(parse("unplug HEADLESS-2"), Ok(Command::Unplug("HEADLESS-2".into())));
         assert_eq!(parse("click 1 2"), Ok(Command::Click(1.0, 2.0, 0x110)));
         assert_eq!(parse("click 1 2 274"), Ok(Command::Click(1.0, 2.0, 274)));

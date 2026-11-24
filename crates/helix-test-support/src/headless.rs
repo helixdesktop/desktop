@@ -194,6 +194,19 @@ impl HeadlessSession {
         }
     }
 
+    /// Ask the test input socket `question` (a query command, such as
+    /// `cursor`): its answer, after the `ok`.
+    pub fn query(&mut self, question: &str) -> String {
+        self.input.get_mut().write_all(format!("{}\n", question.trim()).as_bytes()).expect("send test query");
+        let mut answer = String::new();
+        self.input.read_line(&mut answer).expect("test query answered");
+        let answer = answer.trim();
+        match answer.strip_prefix("ok") {
+            Some(rest) => rest.trim().to_owned(),
+            None => panic!("test query {question:?}: {answer}"),
+        }
+    }
+
     /// Where the snapshot is written (every second).
     pub fn snapshot_path(&self) -> PathBuf {
         self.home.join("snapshot.png")

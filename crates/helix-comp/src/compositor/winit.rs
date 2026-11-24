@@ -151,7 +151,7 @@ pub fn init(
                 let mut backend = backend.borrow_mut();
                 // Named cursors are the host's; Helix draws an app's image
                 // itself, with the host's pointer hidden.
-                let host = match &state.cursor_status {
+                let host = match &state.shown_cursor() {
                     CursorImageStatus::Named(icon) => Some(*icon),
                     _ => None,
                 };

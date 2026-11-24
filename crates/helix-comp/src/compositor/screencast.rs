@@ -388,7 +388,7 @@ impl Helix {
         use smithay::input::pointer::CursorImageStatus;
         let pos = self.seat.get_pointer().unwrap().current_location() - origin;
         let inside = pos.x >= 0.0 && pos.y >= 0.0 && pos.x < f64::from(size.w) && pos.y < f64::from(size.h);
-        let image = match &self.cursor_status {
+        let image = match &self.shown_cursor() {
             CursorImageStatus::Hidden => None,
             CursorImageStatus::Named(icon) => {
                 let frame = self.cursors.frame(*icon, scale);

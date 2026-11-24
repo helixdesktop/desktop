@@ -13,6 +13,11 @@
 //! notification id is a fresh token, which GIO passes to D-Bus activated
 //! apps (platform data `activation-token`, `desktop-startup-id`) and to
 //! spawned ones (`XDG_ACTIVATION_TOKEN`, `DESKTOP_STARTUP_ID`).
+//!
+//! A launch's token is also announced as one (`gtk_shell1.notify_launch`,
+//! as GTK does without `xdg_activation_v1`), so helix-comp shows the busy
+//! pointer until the app is up (helixdesktop/spec "Launch feedback");
+//! tokens for anything else are not.
 
 use std::sync::{Mutex, OnceLock};
 
@@ -20,10 +25,13 @@ use smithay_client_toolkit::reexports::client::globals::GlobalList;
 use smithay_client_toolkit::reexports::client::{Connection, Dispatch, EventQueue, QueueHandle};
 use smithay_client_toolkit::reexports::protocols::xdg::activation::v1::client::xdg_activation_token_v1::{self, XdgActivationTokenV1};
 use smithay_client_toolkit::reexports::protocols::xdg::activation::v1::client::xdg_activation_v1::XdgActivationV1;
+use helix_protocols::gtk_shell_client::gtk_shell1::{self, GtkShell1};
 
 struct Source {
     queue: EventQueue<Minted>,
     activation: XdgActivationV1,
+    /// To say a token is a launch's (`notify_launch`, version 3).
+    gtk_shell: Option<GtkShell1>,
 }
 
 /// The token the compositor sent.
@@ -34,6 +42,10 @@ static SOURCE: OnceLock<Mutex<Source>> = OnceLock::new();
 
 impl Dispatch<XdgActivationV1, ()> for Minted {
     fn event(_: &mut Self, _: &XdgActivationV1, _: <XdgActivationV1 as smithay_client_toolkit::reexports::client::Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+}
+
+impl Dispatch<GtkShell1, ()> for Minted {
+    fn event(_: &mut Self, _: &GtkShell1, _: gtk_shell1::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
 }
 
 impl Dispatch<XdgActivationTokenV1, ()> for Minted {
@@ -50,7 +62,8 @@ pub fn init(conn: &Connection, globals: &GlobalList) {
     let queue = conn.new_event_queue::<Minted>();
     match globals.bind::<XdgActivationV1, Minted, ()>(&queue.handle(), 1..=1, ()) {
         Ok(activation) => {
-            let _ = SOURCE.set(Mutex::new(Source { queue, activation }));
+            let gtk_shell = globals.bind::<GtkShell1, Minted, ()>(&queue.handle(), 3..=3, ()).ok();
+            let _ = SOURCE.set(Mutex::new(Source { queue, activation, gtk_shell }));
         }
         Err(err) => tracing::warn!(%err, "no xdg_activation_v1: apps the shell starts may not get focus"),
     }
@@ -79,6 +92,23 @@ pub fn token(app_id: Option<&str>) -> Option<String> {
         tracing::debug!("no activation token");
     }
     minted.0
+}
+
+/// A fresh activation token for launching `app_id` ([`token`]), announced
+/// to the compositor as a launch's, so it shows the busy pointer until
+/// the app is up.
+pub fn launch_token(app_id: Option<&str>) -> Option<String> {
+    let token = token(app_id)?;
+    if let Some(source) = SOURCE.get() {
+        let mut source = source.lock().unwrap_or_else(|e| e.into_inner());
+        let source = &mut *source;
+        if let Some(gtk_shell) = &source.gtk_shell {
+            gtk_shell.notify_launch(token.clone());
+            // Before the app (another client) can use the token.
+            let _ = source.queue.roundtrip(&mut Minted::default());
+        }
+    }
+    Some(token)
 }
 
 /// [`token`] from async code (the round trip blocks a worker thread).
@@ -123,7 +153,7 @@ unsafe extern "C" fn startup_notify_id(_: *mut gio::ffi::GAppLaunchContext, info
         let id = unsafe { gio::ffi::g_app_info_get_id(info) };
         (!id.is_null()).then(|| unsafe { std::ffi::CStr::from_ptr(id) }.to_string_lossy().into_owned())
     };
-    match token(id.as_deref()).and_then(|t| std::ffi::CString::new(t).ok()) {
+    match launch_token(id.as_deref()).and_then(|t| std::ffi::CString::new(t).ok()) {
         // GIO frees it with g_free.
         Some(t) => unsafe { gio::glib::ffi::g_strdup(t.as_ptr()) },
         None => std::ptr::null_mut(),

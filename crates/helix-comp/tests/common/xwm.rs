@@ -494,7 +494,7 @@ macro_rules! shell_quiet {
         }
     )*};
 }
-shell_quiet!(wl_compositor::WlCompositor, wl_surface::WlSurface, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_buffer::WlBuffer, wl_seat::WlSeat, wl_output::WlOutput, ext_session_lock_manager_v1::ExtSessionLockManagerV1, xdg_activation_v1::XdgActivationV1);
+shell_quiet!(wl_compositor::WlCompositor, wl_surface::WlSurface, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_buffer::WlBuffer, wl_seat::WlSeat, wl_output::WlOutput, ext_session_lock_manager_v1::ExtSessionLockManagerV1, xdg_activation_v1::XdgActivationV1, helix_protocols::gtk_shell_client::gtk_shell1::GtkShell1);
 
 impl Dispatch<xdg_activation_token_v1::XdgActivationTokenV1, ()> for ShellState {
     fn event(state: &mut Self, _: &xdg_activation_token_v1::XdgActivationTokenV1, event: xdg_activation_token_v1::Event, _: &(), _: &WlConnection, _: &QueueHandle<Self>) {
@@ -724,15 +724,37 @@ impl Shell {
     /// An activation token, made as the shell makes one for an app it
     /// launches (handed to it as `DESKTOP_STARTUP_ID`).
     pub fn token(&mut self) -> String {
+        self.app_token(None)
+    }
+
+    /// [`Self::token`] for app `app_id` (a desktop file id, as the shell
+    /// sets it).
+    fn app_token(&mut self, app_id: Option<&str>) -> String {
         let qh = self.queue.handle();
         let activation: xdg_activation_v1::XdgActivationV1 = self.globals.bind(&qh, 1..=1, ()).expect("helix-comp offers xdg_activation_v1");
         self.state.token = None;
         let token = activation.get_activation_token(&qh, ());
+        if let Some(app_id) = app_id {
+            token.set_app_id(app_id.to_owned());
+        }
         token.commit();
         self.until("no activation token", |s| s.token.is_some());
         token.destroy();
         activation.destroy();
         self.state.token.take().unwrap()
+    }
+
+    /// The token of a launch of app `app_id`, as the shell makes it when
+    /// it launches an app: announced as a launch's
+    /// (`gtk_shell1.notify_launch`).
+    pub fn launch_token(&mut self, app_id: Option<&str>) -> String {
+        use helix_protocols::gtk_shell_client::gtk_shell1::GtkShell1;
+        let token = self.app_token(app_id);
+        let qh = self.queue.handle();
+        let gtk_shell: GtkShell1 = self.globals.bind(&qh, 3..=3, ()).expect("helix-comp offers gtk_shell1");
+        gtk_shell.notify_launch(token.clone());
+        self.roundtrip();
+        token
     }
 
     /// How many times window `title` is listed.

@@ -217,7 +217,8 @@ impl super::Helix {
 
     /// [`named_element`] for the current pointer.
     pub fn named_cursor_element(&self, renderer: &mut Gles, origin: LogicalPoint, scale: f64) -> Option<smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement<Gles>> {
-        named_element(renderer, &self.cursor_status, &self.cursors, self.pointer_location(), origin, scale)
+        // The busy pointer while an app starts (`launches.rs`), as drawn.
+        named_element(renderer, &self.shown_cursor(), &self.cursors, self.pointer_location(), origin, scale)
     }
 
     /// Frame callbacks for the app's pointer image shown on `output`.
