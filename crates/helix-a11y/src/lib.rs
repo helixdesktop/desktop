@@ -90,6 +90,8 @@ pub struct Node {
     /// Changes are announced (messages, errors, notifications).
     pub live: bool,
     pub modal: bool,
+    /// Busy: what it stands for is not ready yet (an app starting).
+    pub busy: bool,
     /// More actions than the click: (id, name), offered as AT-SPI actions
     /// after "click" and sent back as AccessKit custom actions.
     pub actions: Vec<(i32, String)>,
@@ -204,6 +206,12 @@ impl Node {
 
     pub fn modal(mut self) -> Self {
         self.modal = true;
+        self
+    }
+
+    /// Busy (see [`Node::busy`]) or not.
+    pub fn busy(mut self, busy: bool) -> Self {
+        self.busy = busy;
         self
     }
 

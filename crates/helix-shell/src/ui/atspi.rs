@@ -873,8 +873,9 @@ impl Ui {
     // ----- Dock --------------------------------------------------------------
 
     /// The dock's items: each a button whose description says what is
-    /// painted on it (windows, badge, progress, attention); the focused
-    /// window's item is selected; the keyboard's item has the focus.
+    /// painted on it (windows, badge, progress, attention, starting); the
+    /// focused window's item is selected; a starting app's is busy; the
+    /// keyboard's item has the focus.
     fn dock_nodes(&self, items: &[(Rect, &crate::dock::Item, crate::dock::ItemState)], keyboard: Option<usize>) -> Vec<Node> {
         use crate::dock::Item;
         let names = self.atspi.app_names.as_ref().map(|(n, _)| n);
@@ -894,7 +895,7 @@ impl Ui {
                 Item::Trash => Node::button(tr("Trash"), r).id("trash"),
                 Item::ShowApps => Node::button(tr("Show Apps"), r).id("show-apps").toggled(self.launcher.is_some()),
             };
-            let node = node.describe(crate::dock::describe_item(state)).focusable().focused(keyboard == Some(n));
+            let node = node.describe(crate::dock::describe_item(state)).focusable().focused(keyboard == Some(n)).busy(state.starting);
             if matches!(item, Item::ShowApps) { node } else { node.selected(state.focused) }
         });
         vec![Node::new(Role::Toolbar, tr("Dock")).id("dock").children(buttons)]

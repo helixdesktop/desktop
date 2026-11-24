@@ -30,10 +30,16 @@
 //!   changes it, for tests).
 //!
 //! Launches overlap: the pointer is busy while any is pending.
+//!
+//! When a launch the shell announced ends, the shell is told
+//! (`helix_window_list_v1.launch_ended`, version 14, with why), so its dock
+//! stops showing the app as starting (helixdesktop/desktop#298). Only the
+//! client that announced a launch hears of its end.
 
 use std::time::{Duration, Instant};
 
 use smithay::input::pointer::{CursorIcon, CursorImageStatus};
+use smithay::reexports::wayland_server::backend::ClientId;
 use smithay::reexports::wayland_server::Resource;
 
 use super::window::Window;
@@ -63,9 +69,50 @@ impl Default for Launches {
     }
 }
 
+/// Why a launch ended (`helix_window_list_v1.launch_end`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchEnd {
+    /// Its id was used: a window activated with it, or an app set it.
+    Used,
+    /// A new window of its app mapped (by app id, `WM_CLASS` or
+    /// `_NET_STARTUP_ID`).
+    Window,
+    /// `_NET_STARTUP_INFO` "remove:".
+    Removed,
+    TimedOut,
+    /// Too many were pending: the oldest went.
+    Dropped,
+}
+
+impl LaunchEnd {
+    fn why(self) -> &'static str {
+        match self {
+            Self::Used => "its id was used",
+            Self::Window => "its app mapped a window",
+            Self::Removed => "the app said so (_NET_STARTUP_INFO remove)",
+            Self::TimedOut => "timed out",
+            Self::Dropped => "too many launches pending",
+        }
+    }
+
+    fn wire(self) -> helix_protocols::server::helix_window_list_v1::LaunchEnd {
+        use helix_protocols::server::helix_window_list_v1::LaunchEnd as W;
+        match self {
+            Self::Used => W::Used,
+            Self::Window => W::Window,
+            Self::Removed => W::Removed,
+            Self::TimedOut => W::TimedOut,
+            Self::Dropped => W::Dropped,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Launch {
     id: String,
+    /// The client that announced it (`gtk_shell1.notify_launch`), told
+    /// when it ends; `None` for an X11 launcher's.
+    by: Option<ClientId>,
     /// What a new window's app id or `WM_CLASS` is compared with
     /// (lowercase).
     app: Option<String>,
@@ -94,27 +141,34 @@ impl Helix {
     }
 
     /// A launch with startup id `id` started, of app `app` (a desktop file
-    /// id or `WM_CLASS`, if known).
-    pub fn launch_started(&mut self, id: &str, app: Option<&str>) {
+    /// id or `WM_CLASS`, if known), announced by client `by` (told when it
+    /// ends).
+    pub fn launch_started(&mut self, id: &str, app: Option<&str>, by: Option<ClientId>) {
         if id.is_empty() || id.len() > MAX_ID || self.launches.pending.iter().any(|l| l.id == id) {
             return;
         }
         if self.launches.pending.len() >= MAX_PENDING {
-            self.launches.pending.remove(0);
+            let oldest = self.launches.pending[0].id.clone();
+            self.launch_ended(&oldest, LaunchEnd::Dropped);
         }
         let app = app.and_then(app_key);
         tracing::debug!(app, pending = self.launches.pending.len() + 1, "launch started");
         let known = self.all_windows();
         let deadline = Instant::now() + self.launches.timeout;
-        self.launches.pending.push(Launch { id: id.to_owned(), app, deadline, known });
+        self.launches.pending.push(Launch { id: id.to_owned(), by, app, deadline, known });
     }
 
-    /// The launch with startup id `id` (if any) is over, for `why`.
-    pub fn launch_ended(&mut self, id: &str, why: &str) {
-        let before = self.launches.pending.len();
-        self.launches.pending.retain(|l| l.id != id);
-        if self.launches.pending.len() != before {
-            tracing::debug!(why, pending = self.launches.pending.len(), "launch ended");
+    /// The launch with startup id `id` (if any) is over, for `why`: its
+    /// announcer's window lists hear of it.
+    pub fn launch_ended(&mut self, id: &str, why: LaunchEnd) {
+        if let Some(i) = self.launches.pending.iter().position(|l| l.id == id) {
+            let launch = self.launches.pending.remove(i);
+            tracing::debug!(why = why.why(), told = launch.by.is_some(), pending = self.launches.pending.len(), "launch ended");
+            if let Some(by) = launch.by {
+                for listener in self.window_list.listeners.iter().filter(|l| l.version() >= 14 && Resource::client(*l).is_some_and(|c| c.id() == by)) {
+                    listener.launch_ended(launch.id.clone(), why.wire());
+                }
+            }
         }
         if self.launches.pending.is_empty() {
             self.launches.asked.clear();
@@ -129,7 +183,7 @@ impl Helix {
         }
         let expired: Vec<String> = self.launches.pending.iter().filter(|l| now >= l.deadline).map(|l| l.id.clone()).collect();
         for id in expired {
-            self.launch_ended(&id, "timed out");
+            self.launch_ended(&id, LaunchEnd::TimedOut);
         }
         let windows = self.all_windows();
         let mut ended = Vec::new();
@@ -159,7 +213,7 @@ impl Helix {
             }
         }
         for id in ended {
-            self.launch_ended(&id, "its app mapped a window");
+            self.launch_ended(&id, LaunchEnd::Window);
         }
     }
 
@@ -167,7 +221,7 @@ impl Helix {
     /// own or its client leader's) was read.
     pub(super) fn x11_new_window_startup_id(&mut self, _window: u32, startup_id: Option<String>) {
         if let Some(id) = startup_id {
-            self.launch_ended(&id, "a window mapped with its startup id");
+            self.launch_ended(&id, LaunchEnd::Window);
         }
     }
 
@@ -179,9 +233,9 @@ impl Helix {
         match info.kind {
             StartupKind::New => {
                 let app = info.get("WMCLASS").map(str::to_owned);
-                self.launch_started(&id, app.as_deref());
+                self.launch_started(&id, app.as_deref(), None);
             }
-            StartupKind::Remove => self.launch_ended(&id, "the app said so (_NET_STARTUP_INFO remove)"),
+            StartupKind::Remove => self.launch_ended(&id, LaunchEnd::Removed),
             StartupKind::Change => {}
         }
     }

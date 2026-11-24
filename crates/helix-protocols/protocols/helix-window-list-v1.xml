@@ -10,7 +10,7 @@
     separate. The global is only advertised to privileged clients (the
     shell the compositor launched itself).
   </description>
-  <interface name="helix_window_list_v1" version="13">
+  <interface name="helix_window_list_v1" version="14">
     <description summary="open windows and focus">
       Right after binding, the compositor sends a window event for every
       open window, topmost first, then a focused event (and, since version
@@ -263,6 +263,28 @@
       <arg name="pid" type="uint"/>
       <arg name="a11y_name" type="string"/>
       <arg name="a11y_path" type="string"/>
+    </event>
+    <enum name="launch_end" since="14">
+      <description summary="why a launch is over">
+        See helixdesktop/spec contracts/wayland/README.md, "Launch
+        feedback".
+      </description>
+      <entry name="used" value="0" summary="its startup id was used: a window activated with it, or an app set it"/>
+      <entry name="window" value="1" summary="a new window of the app mapped (by app id, WM_CLASS or _NET_STARTUP_ID)"/>
+      <entry name="removed" value="2" summary="the app ended it (X11 _NET_STARTUP_INFO remove:)"/>
+      <entry name="timed_out" value="3" summary="nothing ended it in time"/>
+      <entry name="dropped" value="4" summary="too many launches were pending: the oldest is no longer followed"/>
+    </enum>
+    <event name="launch_ended" since="14">
+      <description summary="a launch the client announced is over">
+        The launch with startup id startup_id, which this client announced
+        with gtk_shell1.notify_launch, ended, for reason. Sent once per
+        launch, only to the client that announced it (launches other
+        clients announce, and X11 launchers' _NET_STARTUP_INFO new:, are
+        not reported). The shell shows the app as starting until then.
+      </description>
+      <arg name="startup_id" type="string"/>
+      <arg name="reason" type="uint" enum="launch_end"/>
     </event>
   </interface>
 </protocol>

@@ -26,6 +26,9 @@ pub(super) struct DashEntry {
     pub running_only: bool,
     /// Its windows' titles, for the tooltip.
     pub titles: Vec<String>,
+    /// Its app is starting (`starting.rs`): the icon is dimmed (still; the
+    /// dock's breathes).
+    pub starting: bool,
 }
 
 /// What the dash shows at one moment.
@@ -78,7 +81,8 @@ pub(super) fn paint_dash(canvas: &mut Canvas, text: Option<&crate::text::Text>, 
         }
         let dragged = m.drag.as_ref().is_some_and(|(app, _)| *app == entry.app);
         if let (false, Some(icon)) = (dragged, &entry.icon) {
-            paint_item_icon(canvas, center(r), DASH_ICON, look.scale, icon);
+            let alpha = if entry.starting { crate::starting::STILL_ALPHA } else { 1.0 };
+            paint_item_icon(canvas, center(r), DASH_ICON, look.scale, icon, alpha);
         }
         // Running marks under the icon, as on the dock.
         let cell = Rect { x: r.x, y: dy, w: DASH_ICON, h: DASH_H };
@@ -144,7 +148,10 @@ impl Ui {
     pub(super) fn dash_entries(&mut self, scale: f64) -> Vec<DashEntry> {
         // As the launcher counts them: apps shown in menus.
         let installed = crate::icons::apps().shown.clone();
-        let window_apps: Vec<String> = self.windows.mru().iter().map(|e| e.app_id.clone()).collect();
+        let mut window_apps: Vec<String> = self.windows.mru().iter().map(|e| e.app_id.clone()).collect();
+        // Apps starting show as the dock shows them.
+        let launches = crate::starting::snapshot();
+        window_apps.extend(launches.apps());
         let px = (f64::from(DASH_ICON) * scale).round() as u32;
         dash_apps(&crate::favorites::favorites(), &installed, &window_apps)
             .into_iter()
@@ -155,7 +162,8 @@ impl Ui {
                 let key = format!("app:{app}@{px}");
                 let id = app.clone();
                 let icon = self.icon_cache.get(key, move || crate::icons::app_icon(&id, px));
-                DashEntry { app, icon, windows, running_only, titles }
+                let starting = launches.since(&app).is_some();
+                DashEntry { app, icon, windows, running_only, titles, starting }
             })
             .collect()
     }

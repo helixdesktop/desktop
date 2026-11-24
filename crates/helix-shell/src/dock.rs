@@ -500,6 +500,8 @@ pub struct ItemState {
     pub urgent: bool,
     /// The focused window's app (or drive, or Trash).
     pub focused: bool,
+    /// The app is starting (a launch of the shell's has not ended).
+    pub starting: bool,
 }
 
 /// An item's accessible description: what the dock paints on it, in
@@ -520,6 +522,10 @@ pub fn describe_item(s: &ItemState) -> String {
     }
     if s.urgent {
         parts.push("needs attention".to_owned());
+    }
+    if s.starting {
+        // Translators: a dock item whose app was launched and is not up yet.
+        parts.push(tr("starting").to_owned());
     }
     parts.join(", ")
 }
@@ -749,8 +755,11 @@ mod tests {
     #[test]
     fn item_descriptions() {
         assert_eq!(describe_item(&ItemState::default()), "");
-        let s = ItemState { windows: 2, badge: 4, progress: Some(0.454), urgent: true, focused: true };
+        let s = ItemState { windows: 2, badge: 4, progress: Some(0.454), urgent: true, focused: true, starting: false };
         assert_eq!(describe_item(&s), "2 windows, 4 new, 45% done, needs attention");
+        // An app launched and not up yet (#298).
+        assert_eq!(describe_item(&ItemState { starting: true, ..Default::default() }), "starting");
+        assert_eq!(describe_item(&ItemState { windows: 1, starting: true, ..Default::default() }), "1 window, starting");
         assert_eq!(describe_item(&ItemState { windows: 1, ..Default::default() }), "1 window");
         assert_eq!(describe_item(&ItemState { progress: Some(0.0), ..Default::default() }), "0% done");
     }

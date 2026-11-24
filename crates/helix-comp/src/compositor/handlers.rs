@@ -561,7 +561,7 @@ impl XdgActivationHandler for Helix {
         surface: WlSurface,
     ) {
         self.activation_state.remove_token(&token);
-        self.launch_ended(token.as_str(), "its token was used");
+        self.launch_ended(token.as_str(), super::launches::LaunchEnd::Used);
         self.activate_surface(&surface, granted(&token_data));
     }
 }
@@ -579,7 +579,7 @@ impl Helix {
         let fresh = token.and_then(|t| self.activation_state.data_for_token(t)).is_some_and(granted);
         if let Some(token) = token {
             self.activation_state.remove_token(token);
-            self.launch_ended(token.as_str(), "its token was used");
+            self.launch_ended(token.as_str(), super::launches::LaunchEnd::Used);
         }
         self.activate_surface(surface, fresh);
     }
@@ -590,7 +590,7 @@ impl Helix {
         let token = XdgActivationToken::from(token.to_owned());
         let fresh = self.activation_state.data_for_token(&token).is_some_and(granted);
         self.activation_state.remove_token(&token);
-        self.launch_ended(token.as_str(), "its token was used");
+        self.launch_ended(token.as_str(), super::launches::LaunchEnd::Used);
         fresh
     }
 

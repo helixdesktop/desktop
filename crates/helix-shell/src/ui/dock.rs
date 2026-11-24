@@ -107,6 +107,8 @@ pub(super) struct DockView {
     pub(super) keyboard: Option<usize>,
     /// What the items showed when last drawn (for the accessibility bus).
     states: Vec<logic::ItemState>,
+    /// A starting app's icon breathes on it (drawn again soon).
+    breathing: bool,
 }
 
 #[derive(Default)]
@@ -140,6 +142,9 @@ pub(super) struct DockState {
     /// Urgent apps' icons wiggling, until when (by lower-case app id).
     dancing: std::collections::HashMap<String, std::time::Instant>,
     dance_timer: Option<RegistrationToken>,
+    /// Fires when the next starting app's safety timeout is up
+    /// (`starting.rs`).
+    starting_timer: Option<RegistrationToken>,
 }
 
 /// How long an app that turned urgent wiggles, and how far.
@@ -392,7 +397,10 @@ impl Ui {
     fn dock_update_view(&mut self, output: wl_output::WlOutput, area: (i32, i32, i32, i32)) {
         let s = self.dock.settings.clone();
         let installed = crate::icons::apps().shown.clone();
-        let running: Vec<String> = self.dock_running().into_iter().map(|a| desktop_id(&a).map_or(a, |d| d.trim_end_matches(".desktop").to_owned())).collect();
+        let mut running: Vec<String> = self.dock_running().into_iter().map(|a| desktop_id(&a).map_or(a, |d| d.trim_end_matches(".desktop").to_owned())).collect();
+        // Apps starting get an item of their own until their launch ends,
+        // as they would once running (GNOME's dash shows them too).
+        running.extend(crate::starting::snapshot().apps());
         let items = logic::items(&s, &crate::favorites::favorites(), &installed, &running, self.dock.mounts.len(), if self.lock.session.is_some() { 0 } else { self.ext.dock.len() });
         let room = logic::room(&s, if s.edge.vertical() { area.3 } else { area.2 }, panel_height() as i32);
         let icon = logic::fit_icon_size(s.icon_size, s.icon_size_fixed, items.len(), room);
@@ -413,7 +421,7 @@ impl Ui {
         let view = &self.dock.views[self.dock.cur];
         let hovered = view.revealed || view.pointer_on || view.drag.is_some() || view.keyboard.is_some();
         let shown = logic::shown(&s, overlapped, fullscreen, hovered);
-        tracing::debug!(?rect, overlapped, fullscreen, hovered, shown, windows = windows.len(), mode = ?s.hide_mode, "dock");
+        tracing::debug!(?rect, overlapped, fullscreen, hovered, shown, windows = windows.len(), items = items.len(), mode = ?s.hide_mode, "dock");
         let changed = self.dock.views[self.dock.cur].items != items || self.dock.views[self.dock.cur].icon != icon || self.dock.views[self.dock.cur].output.as_ref() != Some(&output);
         self.dock.views[self.dock.cur].items = items;
         self.dock.views[self.dock.cur].icon = icon;
@@ -737,9 +745,12 @@ impl Ui {
         // Item feedback still moving: draw again next frame.
         let now = std::time::Instant::now();
         let moving = self.dock.views.iter_mut().fold(false, |any, v| v.feedback.moving(now) | any);
-        if moving && self.dock.feedback_timer.is_none() {
+        // Starting apps' icons breathing: a slower frame.
+        let breathing = self.dock.views.iter().any(|v| v.breathing);
+        if (moving || breathing) && self.dock.feedback_timer.is_none() {
+            let frame = if moving { Duration::from_millis(16) } else { crate::starting::PULSE_FRAME };
             if let Some(handle) = self.loop_handle.as_ref() {
-                let token = handle.insert_source(Timer::from_duration(Duration::from_millis(16)), |_, _, ui: &mut Ui| {
+                let token = handle.insert_source(Timer::from_duration(frame), |_, _, ui: &mut Ui| {
                     ui.dock.feedback_timer = None;
                     ui.dock_draw();
                     TimeoutAction::Drop
@@ -775,8 +786,15 @@ impl Ui {
                 progress: paint.progress[i],
                 urgent: paint.urgent[i],
                 focused: paint.focused_item == Some(i),
+                starting: paint.starting[i].is_some(),
             })
             .collect();
+        let breathing = paint.breathing;
+        let starting: Vec<&str> = paint.items.iter().zip(&paint.starting).filter_map(|(i, a)| a.and(match i { Item::App { id, .. } => Some(id.as_str()), _ => None })).collect();
+        if !starting.is_empty() {
+            tracing::debug!(pulse = breathing, apps = starting.join(","), "dock items starting");
+        }
+        self.dock.views[self.dock.cur].breathing = breathing;
         let bar = painted.bar;
         self.dock.views[self.dock.cur].bar = bar;
         self.dock.views[self.dock.cur].hits = painted.hits;
@@ -893,6 +911,17 @@ impl Ui {
             })
             .collect();
         let ghosts = view.feedback.ghosts(now).into_iter().filter_map(|(item, p)| Some((items.iter().position(|x| *x == item)?, p))).collect();
+        // Apps starting: dimmed, breathing with full motion.
+        let launches = crate::starting::snapshot();
+        let pulse = crate::starting::pulses(motion);
+        let starting: Vec<Option<f32>> = items
+            .iter()
+            .map(|i| match i {
+                Item::App { id, .. } => launches.since(id).map(|since| crate::starting::icon_alpha(now.saturating_duration_since(since), pulse)),
+                _ => None,
+            })
+            .collect();
+        let breathing = pulse && starting.iter().any(Option::is_some);
         DockPaint {
             size: (w, h),
             edge: s.edge,
@@ -912,6 +941,8 @@ impl Ui {
             focused_item,
             looks,
             ghosts,
+            starting,
+            breathing,
             drag,
             tooltip,
             keyboard,
@@ -1970,6 +2001,11 @@ pub(super) struct DockPaint {
     pub looks: Vec<crate::item_feedback::Look>,
     /// Launch copies growing out of items: (item, progress 0 to 1).
     pub ghosts: Vec<(usize, f64)>,
+    /// Per item: its app is starting, its icon drawn at this opacity
+    /// (`starting.rs`).
+    pub starting: Vec<Option<f32>>,
+    /// A starting icon breathes (it is drawn again soon).
+    pub breathing: bool,
     pub drag: Option<(usize, (f64, f64))>,
     /// The tooltip shown: the item and its lines.
     pub tooltip: Option<(usize, Vec<String>)>,
@@ -2038,7 +2074,7 @@ pub(super) fn paint_dock(canvas: &mut Canvas, text: Option<&Text>, m: &DockPaint
             let (sx, sy) = (cx - size / 2.0, cy - size / 2.0);
             match (item, &m.icons[i]) {
                 (Item::ShowApps, _) => draw_grid(canvas, sx.round() as i32, sy.round() as i32, size.round() as i32),
-                (_, Some(image)) => paint_item_icon(canvas, (cx, cy), icon, look.scale, image),
+                (_, Some(image)) => paint_item_icon(canvas, (cx, cy), icon, look.scale, image, m.starting[i].unwrap_or(1.0)),
                 // Being decoded (apps without one get the generic icon).
                 (_, None) => {}
             }
@@ -2127,10 +2163,14 @@ pub(super) fn paint_item_highlight(canvas: &mut Canvas, ix: i32, iy: i32, icon: 
 }
 
 /// An item's icon centered on `center`, `icon` wide at `scale` (its
-/// feedback size).
-pub(super) fn paint_item_icon(canvas: &mut Canvas, center: (f64, f64), icon: i32, scale: f64, image: &helix_draw::Image) {
+/// feedback size), at opacity `alpha` (below 1 while its app starts).
+pub(super) fn paint_item_icon(canvas: &mut Canvas, center: (f64, f64), icon: i32, scale: f64, image: &helix_draw::Image, alpha: f32) {
     let size = f64::from(icon) * scale;
-    canvas.image(center.0 - size / 2.0, center.1 - size / 2.0, size, size, image);
+    if alpha < 1.0 {
+        canvas.image_alpha(center.0 - size / 2.0, center.1 - size / 2.0, size, size, image, alpha);
+    } else {
+        canvas.image(center.0 - size / 2.0, center.1 - size / 2.0, size, size, image);
+    }
 }
 
 /// A launch copy of an item's icon at progress `p` (0 to 1): growing out
@@ -2163,6 +2203,31 @@ pub(super) fn paint_tooltip(canvas: &mut Canvas, text: Option<&Text>, r: Rect, l
 }
 
 impl Ui {
+    /// What is starting changed (a launch started or ended): give up on
+    /// launches past the safety timeout, show the rest, and wake up for
+    /// the next timeout.
+    pub(super) fn starting_changed(&mut self) {
+        crate::starting::expire();
+        self.dock_update();
+        self.dock_draw();
+        // The overview's dash shows them as well.
+        if self.overview.is_some() {
+            self.draw_overview();
+        }
+        if let (Some(handle), Some(token)) = (self.loop_handle.as_ref(), self.dock.starting_timer.take()) {
+            handle.remove(token);
+        }
+        let next = crate::starting::snapshot().next_deadline();
+        if let (Some(handle), Some(at)) = (self.loop_handle.as_ref(), next) {
+            let token = handle.insert_source(Timer::from_deadline(at), |_, _, ui: &mut Ui| {
+                ui.dock.starting_timer = None;
+                ui.starting_changed();
+                TimeoutAction::Drop
+            });
+            self.dock.starting_timer = token.ok();
+        }
+    }
+
     /// Each dock shown, for the accessibility bus (`ui/atspi.rs`): its
     /// surface, monitor area and size, and its items where they are.
     pub(super) fn dock_a11y(&self) -> Vec<super::atspi::DockShown<'_>> {
@@ -2173,5 +2238,65 @@ impl Ui {
                 Some((v.layer.as_ref()?.wl_surface(), v.area, (v.width, v.height), items, v.keyboard))
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod starting_tests {
+    use super::*;
+
+    /// A one-app dock, its icon solid white, starting at `starting`
+    /// opacity (or not): the icon's middle pixel.
+    fn icon_pixel(starting: Option<f32>) -> [u8; 4] {
+        let (w, h) = (200usize, 120usize);
+        let image = helix_draw::Image { width: 48, height: 48, rgba: vec![0xFF; 48 * 48 * 4] };
+        let m = DockPaint {
+            size: (w as i32, h as i32),
+            edge: Edge::Bottom,
+            extend: false,
+            always_center: true,
+            indicator: logic::Indicator::Dots,
+            icon: 48,
+            thickness: 48 + 12 + 8,
+            background: 0,
+            items: vec![Item::App { id: "org.example.App".into(), favorite: false }],
+            icons: vec![Some(image)],
+            counts: vec![(0, 0)],
+            progress: vec![None],
+            urgent: vec![false],
+            wiggles: vec![0],
+            numbers: vec![None],
+            focused_item: None,
+            looks: vec![crate::item_feedback::Look { highlight: 0.0, pressed: false, scale: 1.0 }],
+            ghosts: Vec::new(),
+            starting: vec![starting],
+            breathing: false,
+            drag: None,
+            tooltip: None,
+            keyboard: None,
+        };
+        let mut data = vec![0u8; w * h * 4];
+        let mut canvas = Canvas::scaled(&mut data, w, h, 1.0);
+        let painted = paint_dock(&mut canvas, None, &m);
+        let (cell, _) = painted.hits[0];
+        let (x, y) = ((cell.x + cell.w / 2) as usize, (cell.y + cell.h / 2) as usize);
+        let i = (y * w + x) * 4;
+        [data[i], data[i + 1], data[i + 2], data[i + 3]]
+    }
+
+    /// A starting app's icon is dimmed (#298): at the still opacity
+    /// without full motion, at the breathing one's with it; not otherwise.
+    #[test]
+    fn a_starting_apps_icon_is_dimmed() {
+        assert_eq!(icon_pixel(None)[3], 0xFF, "an idle icon is opaque");
+        let still = crate::starting::icon_alpha(Duration::from_millis(700), crate::starting::pulses(helix_draw::motion::Motion::None));
+        assert_eq!(still, crate::starting::STILL_ALPHA, "no animations: still");
+        let reduced = crate::starting::icon_alpha(Duration::from_millis(700), crate::starting::pulses(helix_draw::motion::Motion::Reduced));
+        assert_eq!(reduced, crate::starting::STILL_ALPHA, "reduced motion: still");
+        let px = icon_pixel(Some(still));
+        assert!((i32::from(px[3]) - 128).abs() <= 2, "half opaque: {px:?}");
+        let breathing = crate::starting::icon_alpha(crate::starting::PULSE_PERIOD / 2, crate::starting::pulses(helix_draw::motion::Motion::Full));
+        let px = icon_pixel(Some(breathing));
+        assert!((i32::from(px[3]) - (breathing * 255.0).round() as i32).abs() <= 2, "breathing: {px:?}");
     }
 }
