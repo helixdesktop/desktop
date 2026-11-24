@@ -37,8 +37,9 @@ enum Ask {
     Ping(Window),
     /// Its icon (and, with `watch`, follow its changes from now on).
     Icon(Window, bool),
-    /// Its startup notification id.
-    StartupId(Window),
+    /// Its startup notification id (with `true`: for a new window, for
+    /// launch feedback; else for an activation request).
+    StartupId(Window, bool),
 }
 
 /// What the watching and asking threads report.
@@ -66,6 +67,124 @@ pub enum X11Note {
     /// A window's startup notification id (`_NET_STARTUP_ID`), read
     /// ([`X11Ping::ask_startup_id`]).
     StartupId(Window, Option<String>),
+    /// A new window's startup notification id
+    /// ([`X11Ping::ask_new_window_startup_id`]).
+    NewWindowStartupId(Window, Option<String>),
+    /// A startup notification message (`_NET_STARTUP_INFO`) an X11 app
+    /// or launcher sent.
+    StartupInfo(StartupInfo),
+}
+
+/// What a startup notification message says (the startup-notification
+/// spec, freedesktop.org).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartupKind {
+    New,
+    Change,
+    Remove,
+}
+
+/// A startup notification message: its kind and its `KEY=VALUE` pairs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupInfo {
+    pub kind: StartupKind,
+    pub fields: Vec<(String, String)>,
+}
+
+impl StartupInfo {
+    /// The value of `key` (the first, if it is given twice).
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.fields.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+}
+
+/// Parse a startup notification message: `new:`, `change:` or `remove:`,
+/// then `KEY=VALUE` pairs separated by spaces. A value may be quoted with
+/// double quotes (it may then hold spaces) and a backslash escapes the
+/// next character, in quotes or not (as libstartup-notification reads
+/// them). Other kinds of message are `None`.
+pub fn parse_startup_info(text: &str) -> Option<StartupInfo> {
+    let (prefix, rest) = text.split_once(':')?;
+    let kind = match prefix {
+        "new" => StartupKind::New,
+        "change" => StartupKind::Change,
+        "remove" => StartupKind::Remove,
+        _ => return None,
+    };
+    let mut fields = Vec::new();
+    let mut chars = rest.chars().peekable();
+    loop {
+        while chars.next_if(|c| c.is_whitespace()).is_some() {}
+        if chars.peek().is_none() {
+            break;
+        }
+        let mut key = String::new();
+        while let Some(c) = chars.next_if(|c| *c != '=' && !c.is_whitespace()) {
+            key.push(c);
+        }
+        // A word without a value is malformed, as libstartup-notification
+        // finds it.
+        chars.next_if_eq(&'=')?;
+        let mut value = String::new();
+        let mut quoted = false;
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => {
+                    if let Some(next) = chars.next() {
+                        value.push(next);
+                    }
+                }
+                '"' => quoted = !quoted,
+                c if c.is_whitespace() && !quoted => break,
+                c => value.push(c),
+            }
+        }
+        if !key.is_empty() {
+            fields.push((key, value));
+        }
+    }
+    Some(StartupInfo { kind, fields })
+}
+
+/// Longest startup notification message read (bytes).
+const MAX_STARTUP_INFO: usize = 4096;
+
+/// Startup notification messages being sent: each comes in 20-byte
+/// pieces (`_NET_STARTUP_INFO_BEGIN`, then `_NET_STARTUP_INFO`), from a
+/// window of the sender's, up to a NUL.
+#[derive(Debug, Default)]
+pub struct StartupInfoPieces {
+    partial: std::collections::HashMap<Window, Vec<u8>>,
+}
+
+impl StartupInfoPieces {
+    /// A piece from `window` (`begin`: the first): the whole message once
+    /// its NUL came (`None` until then, and for messages that are not
+    /// UTF-8 or too long).
+    pub fn add(&mut self, window: Window, begin: bool, piece: &[u8]) -> Option<String> {
+        if begin {
+            // Senders that never finish do not pile up.
+            if self.partial.len() >= 64 {
+                self.partial.clear();
+            }
+            self.partial.insert(window, Vec::new());
+        }
+        let buffer = self.partial.get_mut(&window)?;
+        let (bytes, done) = match piece.iter().position(|b| *b == 0) {
+            Some(end) => (&piece[..end], true),
+            None => (piece, false),
+        };
+        buffer.extend_from_slice(bytes);
+        if buffer.len() > MAX_STARTUP_INFO {
+            self.partial.remove(&window);
+            return None;
+        }
+        if !done {
+            return None;
+        }
+        let message = self.partial.remove(&window)?;
+        String::from_utf8(message).ok()
+    }
 }
 
 /// An icon: premultiplied ARGB8888 (native byte order) and its size.
@@ -131,8 +250,11 @@ impl X11Ping {
         let (net_startup_id, client_leader) = (atom("_NET_STARTUP_ID")?, atom("WM_CLIENT_LEADER")?);
         let net_wm_state_hidden = atom("_NET_WM_STATE_HIDDEN")?;
         let (net_wm_state, demands_attention) = (atom("_NET_WM_STATE")?, atom("_NET_WM_STATE_DEMANDS_ATTENTION")?);
-        // Answers are sent to the root window with the substructure masks.
-        conn.change_window_attributes(root, &ChangeWindowAttributesAux::new().event_mask(EventMask::SUBSTRUCTURE_NOTIFY))
+        let (startup_info_begin, startup_info) = (atom("_NET_STARTUP_INFO_BEGIN")?, atom("_NET_STARTUP_INFO")?);
+        // Answers are sent to the root window with the substructure masks;
+        // startup notification messages with PropertyChangeMask (as
+        // libstartup-notification, GDK and Qt send them).
+        conn.change_window_attributes(root, &ChangeWindowAttributesAux::new().event_mask(EventMask::SUBSTRUCTURE_NOTIFY | EventMask::PROPERTY_CHANGE))
             .map_err(|e| e.to_string())?
             .check()
             .map_err(|e| e.to_string())?;
@@ -179,13 +301,18 @@ impl X11Ping {
                                 let icon = property(window, net_wm_icon, AtomEnum::CARDINAL, 4 * 1024 * 1024).and_then(|r| r.value32().map(|v| v.collect::<Vec<u32>>())).and_then(|v| pick_icon(&v));
                                 X11Note::Icon(window, icon)
                             }
-                            Ask::StartupId(window) => {
+                            Ask::StartupId(window, new) => {
                                 // The window's own, else its client leader's
                                 // (GTK 3 sets it there for windows it
                                 // presents for a later launch).
                                 let id = |w: Window| property(w, net_startup_id, AtomEnum::ANY, 256).and_then(|r| startup_id(r.format, &r.value));
                                 let leader = || property(window, client_leader, AtomEnum::WINDOW, 1).and_then(|r| r.value32().and_then(|mut v| v.next())).filter(|l| *l != smithay::reexports::x11rb::NONE && *l != window);
-                                X11Note::StartupId(window, id(window).or_else(|| leader().and_then(id)))
+                                let found = id(window).or_else(|| leader().and_then(id));
+                                if new {
+                                    X11Note::NewWindowStartupId(window, found)
+                                } else {
+                                    X11Note::StartupId(window, found)
+                                }
                             }
                         };
                         if answers.send(note).is_err() {
@@ -199,8 +326,13 @@ impl X11Ping {
         std::thread::Builder::new()
             .name("helix-x11-ping".into())
             .spawn(move || {
+                let mut pieces = StartupInfoPieces::default();
                 while let Ok(event) = reader.wait_for_event() {
                     let note = match event {
+                        Event::ClientMessage(msg) if msg.format == 8 && (msg.type_ == startup_info_begin || msg.type_ == startup_info) => {
+                            let message = pieces.add(msg.window, msg.type_ == startup_info_begin, &msg.data.as_data8());
+                            message.and_then(|m| parse_startup_info(&m)).map(X11Note::StartupInfo)
+                        }
                         Event::ClientMessage(msg) if msg.type_ == may_grab => {
                             let data = msg.data.as_data32();
                             Some(X11Note::MayGrab(msg.window, data[0] != 0))
@@ -251,7 +383,13 @@ impl X11Ping {
     /// Read `window`'s startup notification id: answered with
     /// [`X11Note::StartupId`].
     pub fn ask_startup_id(&self, window: Window) {
-        let _ = self.asks.send(Ask::StartupId(window));
+        let _ = self.asks.send(Ask::StartupId(window, false));
+    }
+
+    /// Read new window `window`'s startup notification id, for launch
+    /// feedback: answered with [`X11Note::NewWindowStartupId`].
+    pub fn ask_new_window_startup_id(&self, window: Window) {
+        let _ = self.asks.send(Ask::StartupId(window, true));
     }
 
     /// Add `_NET_WM_STATE_HIDDEN` to `window`'s `_NET_WM_STATE` (appended,
@@ -307,5 +445,84 @@ mod tests {
         assert_eq!(startup_id(32, b"abcd"), None, "not text");
         assert_eq!(startup_id(8, b"a\0b"), None);
         assert_eq!(startup_id(8, &[0xff, 0xfe]), None, "not UTF-8");
+    }
+
+    fn fields(info: &StartupInfo) -> Vec<(&str, &str)> {
+        info.fields.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect()
+    }
+
+    #[test]
+    fn startup_info_messages() {
+        let info = parse_startup_info("remove: ID=abc").unwrap();
+        assert_eq!(info.kind, StartupKind::Remove);
+        assert_eq!(info.get("ID"), Some("abc"));
+        let info = parse_startup_info("new: NAME=\"Text Editor\" ID=gedit-1_TIME42 WMCLASS=gedit SCREEN=0").unwrap();
+        assert_eq!(info.kind, StartupKind::New);
+        assert_eq!(fields(&info), [("NAME", "Text Editor"), ("ID", "gedit-1_TIME42"), ("WMCLASS", "gedit"), ("SCREEN", "0")]);
+        // Backslashes escape, in quotes and out; quotes may sit anywhere.
+        let info = parse_startup_info(r#"change: ID=a\ b NAME="say \"hi\" \\ ok" DESCRIPTION=x"y z"w"#).unwrap();
+        assert_eq!(info.kind, StartupKind::Change);
+        assert_eq!(fields(&info), [("ID", "a b"), ("NAME", r#"say "hi" \ ok"#), ("DESCRIPTION", "xy zw")]);
+        // Spaces around, an empty value, no pairs.
+        assert_eq!(fields(&parse_startup_info("remove:   ID=x   ICON=  ").unwrap()), [("ID", "x"), ("ICON", "")]);
+        assert_eq!(parse_startup_info("remove:").unwrap().fields, []);
+        assert_eq!(parse_startup_info("remove: ID").map(|i| i.fields), None, "a key without a value");
+        assert_eq!(parse_startup_info("frob: ID=x"), None, "not a startup message");
+        assert_eq!(parse_startup_info("ID=x"), None);
+        // A message missing its closing quote takes the rest.
+        assert_eq!(parse_startup_info("remove: ID=\"a b").unwrap().get("ID"), Some("a b"));
+    }
+
+    /// Pieces of 20 bytes, the first as `_NET_STARTUP_INFO_BEGIN`.
+    fn pieces(message: &[u8]) -> Vec<(bool, [u8; 20])> {
+        let mut bytes = message.to_vec();
+        bytes.push(0);
+        bytes
+            .chunks(20)
+            .enumerate()
+            .map(|(i, chunk)| {
+                let mut piece = [0u8; 20];
+                piece[..chunk.len()].copy_from_slice(chunk);
+                (i == 0, piece)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn startup_info_pieces() {
+        let mut assembled = StartupInfoPieces::default();
+        let long = b"remove: ID=\"a token that is longer than forty bytes, so three pieces\"";
+        let a = pieces(long);
+        let b = pieces(b"new: ID=short");
+        assert!(a.len() > 2);
+        // Two senders at once, their pieces interleaved.
+        let mut done = Vec::new();
+        for i in 0..a.len().max(b.len()) {
+            for (window, list) in [(1, &a), (2, &b)] {
+                if let Some((begin, piece)) = list.get(i) {
+                    if let Some(message) = assembled.add(window, *begin, piece) {
+                        done.push((window, message));
+                    }
+                }
+            }
+        }
+        assert_eq!(done, [(2, "new: ID=short".to_owned()), (1, String::from_utf8(long.to_vec()).unwrap())]);
+        // A message exactly 20 bytes long ends in a piece of its own.
+        let twenty = pieces(b"remove: ID=123456789");
+        assert_eq!(twenty.len(), 2);
+        assert_eq!(assembled.add(3, true, &twenty[0].1), None);
+        assert_eq!(assembled.add(3, false, &twenty[1].1).as_deref(), Some("remove: ID=123456789"));
+        // A continuation without a beginning is dropped; a new beginning
+        // starts over.
+        assert_eq!(assembled.add(4, false, b"remove: ID=x\0\0\0\0\0\0\0\0"), None);
+        assert_eq!(assembled.add(5, true, b"remove: ID=lost-to-a"), None);
+        assert_eq!(assembled.add(5, true, b"remove: ID=y\0\0\0\0\0\0\0\0").as_deref(), Some("remove: ID=y"));
+        // Not UTF-8, or far too long: dropped.
+        assert_eq!(assembled.add(6, true, &[0xff; 19].iter().copied().chain([0]).collect::<Vec<u8>>()), None);
+        assert_eq!(assembled.add(7, true, &[b'a'; 20]), None);
+        for _ in 0..(MAX_STARTUP_INFO / 20) {
+            assert_eq!(assembled.add(7, false, &[b'a'; 20]), None);
+        }
+        assert_eq!(assembled.add(7, false, &[0; 20]), None, "a message over the limit");
     }
 }

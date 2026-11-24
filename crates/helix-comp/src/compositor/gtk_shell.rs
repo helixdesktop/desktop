@@ -13,6 +13,9 @@
 //! `org.freedesktop.a11y.PointerLocator` reports for a window. Nothing
 //! else changes for GTK while `xdg_activation_v1` is offered (GTK then
 //! activates with tokens, not `present` or `request_focus`).
+//! `notify_launch` is how the shell says a token is a launch's (the busy
+//! pointer, `launches.rs`), and `set_startup_id` ends that launch, as in
+//! mutter.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -66,8 +69,16 @@ impl Dispatch<gtk_shell1::GtkShell1, ()> for Helix {
                 let surface = surface.and_then(|s| s.data::<GtkSurfaceData>().and_then(|d| d.surface.upgrade().ok()));
                 state.ring_bell(surface.as_ref());
             }
-            // Startup notification is done with xdg_activation_v1 tokens.
-            gtk_shell1::Request::SetStartupId { .. } | gtk_shell1::Request::NotifyLaunch { .. } => {}
+            // A launch with this startup id (an activation token, from
+            // the shell) started: the busy pointer shows until it ends
+            // (`launches.rs`). As in mutter, any client may say so.
+            gtk_shell1::Request::NotifyLaunch { startup_id } => {
+                let app = state.activation_state.data_for_token(&XdgActivationToken::from(startup_id.clone())).and_then(|d| d.app_id.clone());
+                state.launch_started(&startup_id, app.as_deref());
+            }
+            // The app's window is up for this launch (mutter completes the
+            // launch). Focus comes with xdg_activation_v1 tokens.
+            gtk_shell1::Request::SetStartupId { startup_id: Some(id) } => state.launch_ended(&id, "the app set its startup id"),
             _ => {}
         }
     }

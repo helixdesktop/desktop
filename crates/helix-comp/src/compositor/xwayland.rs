@@ -322,6 +322,8 @@ impl Helix {
                         Msg(super::x11ping::X11Note::Bell(id)) => state.x11_bell(id),
                         Msg(super::x11ping::X11Note::Attention(id, action)) => state.x11_demands_attention(id, action),
                         Msg(super::x11ping::X11Note::StartupId(id, startup_id)) => state.x11_startup_id(id, startup_id),
+                        Msg(super::x11ping::X11Note::NewWindowStartupId(id, startup_id)) => state.x11_new_window_startup_id(id, startup_id),
+                        Msg(super::x11ping::X11Note::StartupInfo(info)) => state.x11_startup_info(info),
                         Msg(super::x11ping::X11Note::MayGrab(id, on)) => {
                             tracing::debug!(id, on, "an X11 window asks to be allowed keyboard grabs");
                             state.protocols.x11_may_grab.retain(|w| *w != id);

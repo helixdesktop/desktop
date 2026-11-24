@@ -38,6 +38,7 @@ mod tiling;
 mod wm_behavior;
 mod input_config;
 mod keybindings;
+mod launches;
 mod lock;
 mod safe_mode;
 mod ext_popover;
@@ -331,6 +332,8 @@ pub struct Helix {
     pub remote: remote::RemoteState,
     pub gamma: gamma::GammaState,
     pub screencast: screencast::CastState,
+    /// Apps launched and still starting (the busy pointer).
+    pub launches: launches::Launches,
 
     events: UnboundedSender<Event>,
     last_activity_sent: Option<Instant>,
@@ -485,6 +488,7 @@ impl Helix {
             remote: Default::default(),
             gamma: Default::default(),
             screencast: Default::default(),
+            launches: Default::default(),
         };
         helix.init_captures();
         Ok(helix)
