@@ -1,5 +1,7 @@
-//! Interactive move and resize pointer grabs (started by xdg_toplevel
-//! move/resize requests). Modeled on Smithay's `smallvil` example (MIT).
+//! Interactive move and resize grabs, of the pointer (started by
+//! xdg_toplevel move/resize requests, the window menu and X11 apps) and of
+//! a touch (X11 apps' `_NET_WM_MOVERESIZE` from a touch). Modeled on
+//! Smithay's `smallvil` and `anvil` examples (MIT).
 
 use super::window::Window;
 use smithay::input::pointer::{
@@ -8,6 +10,7 @@ use smithay::input::pointer::{
     GestureSwipeUpdateEvent, GrabStartData, MotionEvent, PointerGrab, PointerInnerHandle,
     RelativeMotionEvent,
 };
+use smithay::input::touch::{self, TouchGrab, TouchInnerHandle};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 use smithay::wayland::compositor::with_states;
@@ -81,6 +84,40 @@ pub struct MoveGrab {
     pub ended: bool,
 }
 
+/// The pointer or finger that grabbed `window` at `start` is now at `at`:
+/// the window follows it (a maximized one is restored first, once it has
+/// really moved).
+fn drag_window(
+    data: &mut Helix,
+    window: &Window,
+    initial_location: &mut Point<i32, Logical>,
+    unmaximize: &mut bool,
+    start: Point<f64, Logical>,
+    at: Point<f64, Logical>,
+) {
+    let mut delta = at - start;
+    if *unmaximize {
+        if delta.x.abs() + delta.y.abs() < 8.0 {
+            return;
+        }
+        *unmaximize = false;
+        // Under the pointer where it was grabbed (not back where it
+        // was before it was maximized).
+        data.restore_window_at(window, Some(start));
+        *initial_location = data.space.element_location(window).unwrap_or(*initial_location);
+        delta = at - start;
+    }
+    let location = (initial_location.to_f64() + delta).to_i32_round();
+    data.space.map_element(window.clone(), location, true);
+    data.restack_above();
+    data.move_attached(window, location);
+    data.update_tile_preview(at);
+    // X11 apps need to know where they are (for menus and input).
+    if let Some(x11) = window.x11_surface() {
+        let _ = x11.configure(Rectangle::new(location, x11.last_configure().size));
+    }
+}
+
 impl PointerGrab<Helix> for MoveGrab {
     fn motion(
         &mut self,
@@ -90,27 +127,7 @@ impl PointerGrab<Helix> for MoveGrab {
         event: &MotionEvent,
     ) {
         handle.motion(data, None, event);
-        let mut delta = event.location - self.start_data.location;
-        if self.unmaximize {
-            if delta.x.abs() + delta.y.abs() < 8.0 {
-                return;
-            }
-            self.unmaximize = false;
-            // Under the pointer where it was grabbed (not back where it
-            // was before it was maximized).
-            data.restore_window_at(&self.window, Some(self.start_data.location));
-            self.initial_location = data.space.element_location(&self.window).unwrap_or(self.initial_location);
-            delta = event.location - self.start_data.location;
-        }
-        let location = (self.initial_location.to_f64() + delta).to_i32_round();
-        data.space.map_element(self.window.clone(), location, true);
-        data.restack_above();
-        data.move_attached(&self.window, location);
-        data.update_tile_preview(event.location);
-        // X11 apps need to know where they are (for menus and input).
-        if let Some(x11) = self.window.x11_surface() {
-            let _ = x11.configure(Rectangle::new(location, x11.last_configure().size));
-        }
+        drag_window(data, &self.window, &mut self.initial_location, &mut self.unmaximize, self.start_data.location, event.location);
     }
 
     fn button(&mut self, data: &mut Helix, handle: &mut PointerInnerHandle<'_, Helix>, event: &ButtonEvent) {
@@ -233,6 +250,35 @@ pub fn resized(
     (clamp(w, min.w, max.w), clamp(h, min.h, max.h)).into()
 }
 
+/// An X11 window's `edges` dragged by `delta` from `initial`: its new
+/// geometry applied directly, keeping the opposite edges in place. The
+/// new size.
+fn resize_x11(
+    data: &mut Helix,
+    window: &Window,
+    edges: Edges,
+    initial: Rectangle<i32, Logical>,
+    delta: Point<f64, Logical>,
+) -> Size<i32, Logical> {
+    let Some(x11) = window.x11_surface() else { return initial.size };
+    let (min, max) = (
+        x11.min_size().unwrap_or_default(),
+        x11.max_size().unwrap_or_default(),
+    );
+    let size = resized(initial.size, edges, delta, min, max);
+    let mut location = initial.loc;
+    if edges.left() {
+        location.x += initial.size.w - size.w;
+    }
+    if edges.top() {
+        location.y += initial.size.h - size.h;
+    }
+    let _ = x11.configure(Rectangle::new(location, size));
+    data.space.map_element(window.clone(), location, true);
+    data.restack_above();
+    size
+}
+
 impl PointerGrab<Helix> for ResizeGrab {
     fn motion(
         &mut self,
@@ -243,24 +289,8 @@ impl PointerGrab<Helix> for ResizeGrab {
     ) {
         handle.motion(data, None, event);
         let delta = event.location - self.start_data.location;
-        if let Some(x11) = self.window.x11_surface() {
-            // X11: apply the new geometry directly, keeping the opposite
-            // edge in place.
-            let (min, max) = (
-                x11.min_size().unwrap_or_default(),
-                x11.max_size().unwrap_or_default(),
-            );
-            self.last_size = resized(self.initial.size, self.edges, delta, min, max);
-            let mut location = self.initial.loc;
-            if self.edges.left() {
-                location.x += self.initial.size.w - self.last_size.w;
-            }
-            if self.edges.top() {
-                location.y += self.initial.size.h - self.last_size.h;
-            }
-            let _ = x11.configure(Rectangle::new(location, self.last_size));
-            data.space.map_element(self.window.clone(), location, true);
-            data.restack_above();
+        if self.window.x11_surface().is_some() {
+            self.last_size = resize_x11(data, &self.window, self.edges, self.initial, delta);
             return;
         }
         let Some(toplevel) = self.window.toplevel() else { return };
@@ -313,6 +343,144 @@ impl PointerGrab<Helix> for ResizeGrab {
         }
         if let Some(tracking) = data.resize.as_mut().filter(|t| t.window == self.window) {
             tracking.finished = true;
+        }
+    }
+}
+
+/// Forward the touch grab methods a move or resize leaves alone. Other
+/// touch points than the one that started it go nowhere while it lasts.
+macro_rules! forward_touch_passthrough {
+    () => {
+        fn down(
+            &mut self,
+            _data: &mut Helix,
+            _handle: &mut TouchInnerHandle<'_, Helix>,
+            _focus: Option<(super::focus::PointerFocusTarget, Point<f64, Logical>)>,
+            _event: &touch::DownEvent,
+        ) {
+        }
+        fn frame(&mut self, data: &mut Helix, handle: &mut TouchInnerHandle<'_, Helix>) {
+            handle.frame(data);
+        }
+        fn cancel(&mut self, data: &mut Helix, handle: &mut TouchInnerHandle<'_, Helix>) {
+            handle.cancel(data);
+            handle.unset_grab(self, data);
+        }
+        fn shape(&mut self, data: &mut Helix, handle: &mut TouchInnerHandle<'_, Helix>, event: &touch::ShapeEvent) {
+            handle.shape(data, event);
+        }
+        fn orientation(&mut self, data: &mut Helix, handle: &mut TouchInnerHandle<'_, Helix>, event: &touch::OrientationEvent) {
+            handle.orientation(data, event);
+        }
+        fn start_data(&self) -> &touch::GrabStartData<Helix> {
+            &self.start_data
+        }
+    };
+}
+
+/// Drags a window with a finger (an X11 app's `_NET_WM_MOVERESIZE` from a
+/// touch, as mutter and wlroots): the touch point that was down when it
+/// asked, until it lifts.
+pub struct TouchMoveGrab {
+    pub start_data: touch::GrabStartData<Helix>,
+    pub window: Window,
+    pub initial_location: Point<i32, Logical>,
+    /// The window is maximized: restore it once the finger has moved.
+    pub unmaximize: bool,
+    /// Ended by its own finger lifting (which applies the tile preview).
+    pub ended: bool,
+}
+
+impl TouchGrab<Helix> for TouchMoveGrab {
+    fn motion(
+        &mut self,
+        data: &mut Helix,
+        _handle: &mut TouchInnerHandle<'_, Helix>,
+        _focus: Option<(super::focus::PointerFocusTarget, Point<f64, Logical>)>,
+        event: &touch::MotionEvent,
+    ) {
+        if event.slot != self.start_data.slot {
+            return;
+        }
+        drag_window(data, &self.window, &mut self.initial_location, &mut self.unmaximize, self.start_data.location, event.location);
+    }
+
+    fn up(&mut self, data: &mut Helix, handle: &mut TouchInnerHandle<'_, Helix>, event: &touch::UpEvent) {
+        if event.slot != self.start_data.slot {
+            return;
+        }
+        handle.up(data, event);
+        data.finish_tile_preview(&self.window);
+        self.ended = true;
+        handle.unset_grab(self, data);
+    }
+
+    forward_touch_passthrough!();
+
+    fn unset(&mut self, data: &mut Helix) {
+        if !self.ended {
+            data.cancel_tile_preview();
+        }
+    }
+}
+
+/// Resizes an X11 window with a finger (`_NET_WM_MOVERESIZE` from a
+/// touch), as [`TouchMoveGrab`].
+pub struct TouchResizeGrab {
+    pub start_data: touch::GrabStartData<Helix>,
+    pub window: Window,
+    pub edges: Edges,
+    pub initial: Rectangle<i32, Logical>,
+}
+
+impl TouchGrab<Helix> for TouchResizeGrab {
+    fn motion(
+        &mut self,
+        data: &mut Helix,
+        _handle: &mut TouchInnerHandle<'_, Helix>,
+        _focus: Option<(super::focus::PointerFocusTarget, Point<f64, Logical>)>,
+        event: &touch::MotionEvent,
+    ) {
+        if event.slot != self.start_data.slot {
+            return;
+        }
+        resize_x11(data, &self.window, self.edges, self.initial, event.location - self.start_data.location);
+    }
+
+    fn up(&mut self, data: &mut Helix, handle: &mut TouchInnerHandle<'_, Helix>, event: &touch::UpEvent) {
+        if event.slot != self.start_data.slot {
+            return;
+        }
+        handle.up(data, event);
+        handle.unset_grab(self, data);
+    }
+
+    forward_touch_passthrough!();
+
+    /// However it ends, the tracking is finished (as [`ResizeGrab`]).
+    fn unset(&mut self, data: &mut Helix) {
+        if let Some(tracking) = data.resize.as_mut().filter(|t| t.window == self.window) {
+            tracking.finished = true;
+        }
+    }
+}
+
+impl Helix {
+    /// A touch move or resize (of `window`, or any) going on ends where it
+    /// is: `_NET_WM_MOVERESIZE` cancel, or the session locking.
+    pub fn end_touch_move_resize(&mut self, window: Option<&Window>) {
+        let Some(touch) = self.seat.get_touch() else { return };
+        let ours = touch
+            .with_grab(|_, grab| {
+                let grabbed = grab
+                    .downcast_ref::<TouchMoveGrab>()
+                    .map(|g| &g.window)
+                    .or_else(|| grab.downcast_ref::<TouchResizeGrab>().map(|g| &g.window));
+                grabbed.is_some_and(|w| window.is_none_or(|window| w == window))
+            })
+            .unwrap_or(false);
+        if ours {
+            touch.unset_grab(self);
         }
     }
 }
