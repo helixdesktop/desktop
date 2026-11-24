@@ -139,17 +139,17 @@ fn overlapping_launches_and_windows_of_the_app() {
     cursor_becomes(&mut session, "progress", "two apps launched");
 
     let mut app = common::connect(&session);
-    let (window, ()) = app.toplevel((200, 120), |_, t| t.toplevel.set_app_id("org.example.First".into()));
+    // (Its window's app id is another's, so only the token ends it.)
+    let (window, ()) = app.toplevel((200, 120), |_, t| t.toplevel.set_app_id("org.example.FirstHelper".into()));
     app.activate_token(first.clone(), &window.surface);
     cursor_stays(&mut session, "progress", "one launch of two ended");
-    // (Its window, of the launched app, mapped first: that ended it.)
-    shell_told(&mut shell, &[(&first, WINDOW)], "the first app's window mapped");
+    shell_told(&mut shell, &[(&first, USED)], "the first launch's token was used");
 
     // The second app never uses its token; its window maps.
     let mut second = common::connect(&session);
     let _window = second.toplevel((200, 120), |_, t| t.toplevel.set_app_id("org.example.Second".into()));
     cursor_becomes(&mut session, "default", "the second app's window mapped");
-    shell_told(&mut shell, &[(&first, WINDOW), (&second_token, WINDOW)], "the second app's window mapped");
+    shell_told(&mut shell, &[(&first, USED), (&second_token, WINDOW)], "the second app's window mapped");
 }
 
 /// An X11 app launched with the token as `DESKTOP_STARTUP_ID` ends the
