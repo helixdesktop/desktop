@@ -321,6 +321,7 @@ impl Helix {
                         Msg(super::x11ping::X11Note::IconChanged(id)) => state.x11_icon_changed(id),
                         Msg(super::x11ping::X11Note::Bell(id)) => state.x11_bell(id),
                         Msg(super::x11ping::X11Note::Attention(id, action)) => state.x11_demands_attention(id, action),
+                        Msg(super::x11ping::X11Note::StartupId(id, startup_id)) => state.x11_startup_id(id, startup_id),
                         Msg(super::x11ping::X11Note::MayGrab(id, on)) => {
                             tracing::debug!(id, on, "an X11 window asks to be allowed keyboard grabs");
                             state.protocols.x11_may_grab.retain(|w| *w != id);
@@ -696,8 +697,8 @@ impl Helix {
     /// as `xdg_activation_v1` on Wayland): granted for a pager (`wmctrl -a`,
     /// `xdotool windowactivate`) and for an app moving between its own
     /// windows (the request names the focused window as its active one);
-    /// otherwise the window wants attention, as for an activation token
-    /// Helix does not grant (`Windows wanting attention`).
+    /// otherwise it depends on the window's startup notification id
+    /// ([`Self::x11_startup_id`]).
     fn x11_activate(&mut self, x11: X11Window, source: u32, current: Option<X11Window>) {
         let Some(window) = self.x11_window(&x11) else { return };
         let focused = self.seat.get_keyboard().and_then(|k| k.current_focus()).and_then(|f| self.window_for_focus(&f));
@@ -705,6 +706,26 @@ impl Helix {
         let pager = source == 2;
         tracing::debug!(pager, from_focused, "X11 activation request");
         if pager || from_focused {
+            self.focus_window(&window);
+        } else if let Some(ping) = self.x11ping.as_ref() {
+            ping.ask_startup_id(x11.window_id());
+        } else {
+            self.set_attention(&window, true);
+        }
+    }
+
+    /// The startup notification id (`_NET_STARTUP_ID`) of X11 window `id`,
+    /// which asked to be activated: an activation token Helix grants (the
+    /// shell launched or woke the app, which was handed the token as
+    /// `DESKTOP_STARTUP_ID` or `desktop-startup-id`) activates it, once,
+    /// as the token would on Wayland; otherwise the window wants
+    /// attention, as for a token Helix does not grant (`Windows wanting
+    /// attention`).
+    pub(super) fn x11_startup_id(&mut self, id: u32, startup_id: Option<String>) {
+        let Some(window) = self.x11_by_id(id) else { return };
+        let granted = startup_id.is_some_and(|t| self.take_activation_token(&t));
+        tracing::debug!(granted, "X11 activation request with a startup id");
+        if granted {
             self.focus_window(&window);
         } else {
             self.set_attention(&window, true);

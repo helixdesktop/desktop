@@ -49,7 +49,7 @@ impl Helix {
     }
 
     /// The window of X11 window `id`.
-    fn x11_by_id(&self, id: u32) -> Option<Window> {
+    pub(super) fn x11_by_id(&self, id: u32) -> Option<Window> {
         self.window_list.ids.iter().map(|(w, _)| w).find(|w| w.x11_surface().is_some_and(|x| x.window_id() == id)).cloned()
     }
 

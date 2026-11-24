@@ -17,6 +17,7 @@ use wayland_client::globals::{registry_queue_init, GlobalList, GlobalListContent
 use wayland_client::protocol::{wl_buffer, wl_compositor, wl_keyboard, wl_output, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface};
 use wayland_client::{Connection as WlConnection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
 use wayland_protocols::ext::session_lock::v1::client::{ext_session_lock_manager_v1, ext_session_lock_surface_v1, ext_session_lock_v1};
+use wayland_protocols::xdg::activation::v1::client::{xdg_activation_token_v1, xdg_activation_v1};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
     AtomEnum, ClientMessageEvent, ConnectionExt, CreateWindowAux, EventMask, PropMode, UnmapNotifyEvent, Window, WindowClass, UNMAP_NOTIFY_EVENT,
@@ -481,6 +482,8 @@ pub struct ShellState {
     pub focus_log: Vec<Option<u32>>,
     pub workspace_log: Vec<(u32, u32)>,
     pub minimized_log: Vec<(u32, bool)>,
+    /// The last activation token made (`Shell::token`).
+    token: Option<String>,
     lock_configures: Vec<(ext_session_lock_surface_v1::ExtSessionLockSurfaceV1, u32, u32, u32)>,
 }
 
@@ -491,7 +494,15 @@ macro_rules! shell_quiet {
         }
     )*};
 }
-shell_quiet!(wl_compositor::WlCompositor, wl_surface::WlSurface, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_buffer::WlBuffer, wl_seat::WlSeat, wl_output::WlOutput, ext_session_lock_manager_v1::ExtSessionLockManagerV1);
+shell_quiet!(wl_compositor::WlCompositor, wl_surface::WlSurface, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_buffer::WlBuffer, wl_seat::WlSeat, wl_output::WlOutput, ext_session_lock_manager_v1::ExtSessionLockManagerV1, xdg_activation_v1::XdgActivationV1);
+
+impl Dispatch<xdg_activation_token_v1::XdgActivationTokenV1, ()> for ShellState {
+    fn event(state: &mut Self, _: &xdg_activation_token_v1::XdgActivationTokenV1, event: xdg_activation_token_v1::Event, _: &(), _: &WlConnection, _: &QueueHandle<Self>) {
+        if let xdg_activation_token_v1::Event::Done { token } = event {
+            state.token = Some(token);
+        }
+    }
+}
 
 impl Dispatch<ext_session_lock_v1::ExtSessionLockV1, ()> for ShellState {
     fn event(state: &mut Self, _: &ext_session_lock_v1::ExtSessionLockV1, event: ext_session_lock_v1::Event, _: &(), _: &WlConnection, _: &QueueHandle<Self>) {
@@ -708,6 +719,20 @@ impl Shell {
     pub fn switch_workspace(&mut self, workspace: u32) {
         self.list.switch_workspace(workspace);
         self.roundtrip();
+    }
+
+    /// An activation token, made as the shell makes one for an app it
+    /// launches (handed to it as `DESKTOP_STARTUP_ID`).
+    pub fn token(&mut self) -> String {
+        let qh = self.queue.handle();
+        let activation: xdg_activation_v1::XdgActivationV1 = self.globals.bind(&qh, 1..=1, ()).expect("helix-comp offers xdg_activation_v1");
+        self.state.token = None;
+        let token = activation.get_activation_token(&qh, ());
+        token.commit();
+        self.until("no activation token", |s| s.token.is_some());
+        token.destroy();
+        activation.destroy();
+        self.state.token.take().unwrap()
     }
 
     /// How many times window `title` is listed.

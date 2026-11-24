@@ -37,6 +37,8 @@ enum Ask {
     Ping(Window),
     /// Its icon (and, with `watch`, follow its changes from now on).
     Icon(Window, bool),
+    /// Its startup notification id.
+    StartupId(Window),
 }
 
 /// What the watching and asking threads report.
@@ -61,6 +63,9 @@ pub enum X11Note {
     /// `_NET_WM_STATE` asks to change `_NET_WM_STATE_DEMANDS_ATTENTION`
     /// (window, action: 0 remove, 1 add, 2 toggle).
     Attention(Window, u32),
+    /// A window's startup notification id (`_NET_STARTUP_ID`), read
+    /// ([`X11Ping::ask_startup_id`]).
+    StartupId(Window, Option<String>),
 }
 
 /// An icon: premultiplied ARGB8888 (native byte order) and its size.
@@ -105,6 +110,13 @@ pub fn pick_icon(values: &[u32]) -> Option<X11Icon> {
     Some((out, size as u32))
 }
 
+/// A `_NET_STARTUP_ID` value (UTF-8 text; any client can set any bytes).
+fn startup_id(format: u8, value: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(value).ok().filter(|_| format == 8)?;
+    let text = text.trim_end_matches('\0');
+    (!text.is_empty() && !text.contains('\0')).then(|| text.to_owned())
+}
+
 impl X11Ping {
     /// Connect to Xwayland `:display`; answers (their window) go to `answers`.
     pub fn start(display: u32, answers: Sender<X11Note>) -> Result<Self, String> {
@@ -116,6 +128,7 @@ impl X11Ping {
         let (wm_protocols, net_wm_ping, net_wm_icon) = (atom("WM_PROTOCOLS")?, atom("_NET_WM_PING")?, atom("_NET_WM_ICON")?);
         let may_grab = atom("_XWAYLAND_MAY_GRAB_KEYBOARD")?;
         let net_wm_pid = atom("_NET_WM_PID")?;
+        let (net_startup_id, client_leader) = (atom("_NET_STARTUP_ID")?, atom("WM_CLIENT_LEADER")?);
         let net_wm_state_hidden = atom("_NET_WM_STATE_HIDDEN")?;
         let (net_wm_state, demands_attention) = (atom("_NET_WM_STATE")?, atom("_NET_WM_STATE_DEMANDS_ATTENTION")?);
         // Answers are sent to the root window with the substructure masks.
@@ -165,6 +178,14 @@ impl X11Ping {
                                 }
                                 let icon = property(window, net_wm_icon, AtomEnum::CARDINAL, 4 * 1024 * 1024).and_then(|r| r.value32().map(|v| v.collect::<Vec<u32>>())).and_then(|v| pick_icon(&v));
                                 X11Note::Icon(window, icon)
+                            }
+                            Ask::StartupId(window) => {
+                                // The window's own, else its client leader's
+                                // (GTK 3 sets it there for windows it
+                                // presents for a later launch).
+                                let id = |w: Window| property(w, net_startup_id, AtomEnum::ANY, 256).and_then(|r| startup_id(r.format, &r.value));
+                                let leader = || property(window, client_leader, AtomEnum::WINDOW, 1).and_then(|r| r.value32().and_then(|mut v| v.next())).filter(|l| *l != smithay::reexports::x11rb::NONE && *l != window);
+                                X11Note::StartupId(window, id(window).or_else(|| leader().and_then(id)))
                             }
                         };
                         if answers.send(note).is_err() {
@@ -227,6 +248,12 @@ impl X11Ping {
         let _ = self.asks.send(Ask::Icon(window, watch));
     }
 
+    /// Read `window`'s startup notification id: answered with
+    /// [`X11Note::StartupId`].
+    pub fn ask_startup_id(&self, window: Window) {
+        let _ = self.asks.send(Ask::StartupId(window));
+    }
+
     /// Add `_NET_WM_STATE_HIDDEN` to `window`'s `_NET_WM_STATE` (appended,
     /// so nothing waits on a reply). For Smithay's window manager, which
     /// takes a window starting Iconic as hidden but writes the property
@@ -270,5 +297,15 @@ mod tests {
         v.extend([1, 1, 0xFF000000]);
         assert_eq!(pick_icon(&v).unwrap().1, 1);
         assert!(pick_icon(&[]).is_none());
+    }
+
+    #[test]
+    fn startup_ids() {
+        assert_eq!(startup_id(8, b"abc"), Some("abc".into()));
+        assert_eq!(startup_id(8, b"abc\0"), Some("abc".into()), "a terminating NUL");
+        assert_eq!(startup_id(8, b""), None);
+        assert_eq!(startup_id(32, b"abcd"), None, "not text");
+        assert_eq!(startup_id(8, b"a\0b"), None);
+        assert_eq!(startup_id(8, &[0xff, 0xfe]), None, "not UTF-8");
     }
 }

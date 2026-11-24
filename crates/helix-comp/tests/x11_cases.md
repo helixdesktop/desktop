@@ -87,6 +87,7 @@ Apps are the ones the upstream reports name.
 | X34 | S55, W26 | Changes the compositor makes reach X11 apps at once (flushed), without other X11 traffic | evince, GTK drag and drop | `x11_focus::focus_changes_reach_x11_apps_at_once` |
 | X90 | W53 | `_NET_ACTIVE_WINDOW` names a dummy window instead of None while a Wayland window is active | Wine | not applicable: Helix sets None (#166, `x11_windows::the_active_window_follows_focus`); revisit if Wine misbehaves |
 | X99 | S35, W62 | `_NET_ACTIVE_WINDOW` requests from apps and pagers | | `x11_windows::activation_requests` |
+| X138 | review (#282) | An app's `_NET_ACTIVE_WINDOW` request (source 1, out of the blue) for a window whose `_NET_STARTUP_ID`, or its client leader's (GTK 3 puts it there when a running app presents a window for a new launch), is an activation token Helix grants (the shell's, handed over as `DESKTOP_STARTUP_ID` or `desktop-startup-id`): the window gets focus, as the token would on Wayland; the token is used up; no or another startup id (an X11 launcher's) only wants attention | single-instance apps launched from the dock (GTK 3, Qt) | `x11_startup_id::the_shells_token_activates_the_window_once`, `x11_startup_id::the_shells_token_on_the_client_leader_activates_the_window`, `x11_startup_id::other_startup_ids_only_want_attention` |
 | X100 | S28 | Keys reach an app whose focused window takes no input | JetBrains | `x11_windows::typing_reaches_an_app_whose_focused_window_takes_no_input` |
 | X101 | S30 | `_NET_ACTIVE_WINDOW` follows focus | Awakened PoE Trade | `x11_windows::the_active_window_follows_focus` |
 
@@ -126,7 +127,7 @@ Apps are the ones the upstream reports name.
 | X56 | W8 | Properties set before mapping are there at first show | | `x11_shell::properties_set_before_mapping_show_at_once` |
 | X87 | S23, W42 | `_NET_WM_WINDOW_OPACITY` | xwaylandvideobridge | not applicable: Helix doesn't apply X11 window opacity |
 | X88 | W29 | Struts and `_NET_WORKAREA` | X11 panels; Qt, Java and Wine read the work area | X11 struts: not applicable (Helix doesn't honor them). `_NET_WORKAREA` published from Helix's own panels (#227): `x11_ewmh::the_work_area_follows_the_panels`, `x11_ewmh::the_desktop_is_described_to_apps` |
-| X89 | W46 | Startup notification (`_NET_STARTUP_ID`, `_NET_STARTUP_INFO`): an X11 app launched from the dock or app grid ends the launch feedback with `_NET_STARTUP_INFO` "remove" | single-instance apps | applicable, not done: Helix doesn't read X11 startup notification yet, so the feedback ends when a window shows or times out (#282) |
+| X89 | W46 | Startup notification (`_NET_STARTUP_ID`, `_NET_STARTUP_INFO`): an X11 app launched from the dock or app grid ends the launch feedback with `_NET_STARTUP_INFO` "remove"; a window's `_NET_STARTUP_ID` carries the launch's activation token | single-instance apps | `_NET_STARTUP_ID`: X138. `_NET_STARTUP_INFO`: not applicable: Helix's launch feedback (the 0.25 s launch copy, "Item feedback") doesn't wait for the app, so there is nothing for "remove" to end; it is read only if feedback that waits for the app comes (#291) |
 
 ## `_NET_WM_STATE` and the WM's identity
 
