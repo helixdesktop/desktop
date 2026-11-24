@@ -560,6 +560,15 @@ impl Helix {
         self.activate_surface(surface, fresh);
     }
 
+    /// Use activation token `token` (an X11 window's startup id): whether
+    /// Helix grants it. It is used up either way.
+    pub(super) fn take_activation_token(&mut self, token: &str) -> bool {
+        let token = XdgActivationToken::from(token.to_owned());
+        let fresh = self.activation_state.data_for_token(&token).is_some_and(granted);
+        self.activation_state.remove_token(&token);
+        fresh
+    }
+
     /// Honor granted tokens (an app launched from the shell, a
     /// notification click, or one asked for with the user's latest
     /// press); for others the window wants attention instead of stealing
