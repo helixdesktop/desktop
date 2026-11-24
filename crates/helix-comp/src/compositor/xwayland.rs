@@ -788,7 +788,7 @@ impl Helix {
             finished: false,
         });
         if let Some(start_data) = touch_start {
-            touch.set_grab(self, TouchResizeGrab { start_data, window, edges, initial }, SERIAL_COUNTER.next_serial());
+            touch.set_grab(self, TouchResizeGrab { start_data, window, edges, initial, last_size: initial.size }, SERIAL_COUNTER.next_serial());
             return;
         }
         let Some(start_data) = pointer_start else { return };
