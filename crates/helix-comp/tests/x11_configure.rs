@@ -346,7 +346,7 @@ fn an_app_moves_its_window_by_touch() {
     until("the window did not follow the finger", || x.position(window) == (px + 100, py + 50));
 }
 
-/// X138: `_NET_WM_MOVERESIZE` resizes (directions 0-7) started from a
+/// X139: `_NET_WM_MOVERESIZE` resizes (directions 0-7) started from a
 /// touch on an app's own border (GTK, Chromium and Firefox on a touch
 /// screen): the edge follows the finger, the opposite edge stays put.
 #[test]
