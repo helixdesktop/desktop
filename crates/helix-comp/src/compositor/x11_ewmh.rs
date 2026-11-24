@@ -80,6 +80,7 @@ impl Helix {
         if ours && pointer.is_grabbed() {
             pointer.unset_grab(self, SERIAL_COUNTER.next_serial(), smithay::backend::input::InputTime::from_millis(0));
         }
+        self.end_touch_move_resize(Some(&window));
     }
 
     /// `_NET_WM_DESKTOP`: the window asks to go to another workspace

@@ -64,6 +64,7 @@ impl SessionLockHandler for Helix {
         if let Some(pointer) = self.seat.get_pointer() {
             pointer.unset_grab(self, SERIAL_COUNTER.next_serial(), smithay::backend::input::InputTime::from_millis(0));
         }
+        self.end_touch_move_resize(None);
         let keyboard = self.seat.get_keyboard().unwrap();
         keyboard.unset_grab(self);
         keyboard.set_focus(self, Option::<super::focus::KeyboardFocusTarget>::None, SERIAL_COUNTER.next_serial());

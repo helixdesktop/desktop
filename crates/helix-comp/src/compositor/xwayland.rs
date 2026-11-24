@@ -26,7 +26,7 @@ use smithay::wayland::xwayland_shell::{XWaylandShellHandler, XWaylandShellState}
 use smithay::xwayland::xwm::{Reorder, ResizeEdge as X11ResizeEdge, XwmId};
 use smithay::xwayland::{X11Surface, X11Wm, XWayland, XWaylandEvent, XwmHandler};
 
-use super::grabs::{Edges, MoveGrab, ResizeGrab, ResizeTracking};
+use super::grabs::{Edges, MoveGrab, ResizeGrab, ResizeTracking, TouchMoveGrab, TouchResizeGrab};
 use super::Helix;
 
 /// How Helix treats an X11 window, by its `_NET_WM_WINDOW_TYPE` (#168;
@@ -732,13 +732,21 @@ impl Helix {
         }
     }
 
+    /// `_NET_WM_MOVERESIZE` move (8): the window follows the pointer whose
+    /// button is down, else the touch point that is down (as mutter and
+    /// wlroots; GTK, Chromium and Firefox on a touch screen), else nothing.
     fn x11_move(&mut self, x11: X11Window) {
         let Some(window) = self.x11_window(&x11) else { return };
-        let pointer = self.seat.get_pointer().unwrap();
-        let Some(start_data) = pointer.grab_start_data() else { return };
-        // Restored under the pointer once it really moves.
+        // Restored under the pointer (or finger) once it really moves.
         let unmaximize = self.is_any_taken_over(&window);
         let initial_location = self.space.element_location(&window).unwrap_or_default();
+        let pointer = self.seat.get_pointer().unwrap();
+        let Some(start_data) = pointer.grab_start_data() else {
+            let touch = self.seat.get_touch().unwrap();
+            let Some(start_data) = touch.grab_start_data() else { return };
+            touch.set_grab(self, TouchMoveGrab { start_data, window, initial_location, unmaximize, ended: false }, SERIAL_COUNTER.next_serial());
+            return;
+        };
         pointer.set_grab(
             self,
             MoveGrab {
@@ -754,10 +762,20 @@ impl Helix {
         );
     }
 
+    /// `_NET_WM_MOVERESIZE` resize (0-7): from the pointer or a touch, as
+    /// [`Self::x11_move`].
     fn x11_resize(&mut self, x11: X11Window, edges: Edges) {
         let Some(window) = self.x11_window(&x11) else { return };
         let pointer = self.seat.get_pointer().unwrap();
-        let Some(start_data) = pointer.grab_start_data() else { return };
+        let touch = self.seat.get_touch().unwrap();
+        let pointer_start = pointer.grab_start_data();
+        let touch_start = match pointer_start {
+            Some(_) => None,
+            None => match touch.grab_start_data() {
+                Some(start_data) => Some(start_data),
+                None => return,
+            },
+        };
         let location = self.space.element_location(&window).unwrap_or_default();
         let initial = Rectangle::new(location, window.geometry().size);
         self.resize = Some(ResizeTracking {
@@ -766,6 +784,11 @@ impl Helix {
             initial,
             finished: false,
         });
+        if let Some(start_data) = touch_start {
+            touch.set_grab(self, TouchResizeGrab { start_data, window, edges, initial }, SERIAL_COUNTER.next_serial());
+            return;
+        }
+        let Some(start_data) = pointer_start else { return };
         pointer.set_grab(
             self,
             ResizeGrab {

@@ -317,9 +317,6 @@ fn an_app_moves_its_window_from_its_own_title_bar() {
 /// finger.
 #[test]
 fn an_app_moves_its_window_by_touch() {
-    if common::known_failure(&[common::Xwm::Smithay, common::Xwm::Helix], "_NET_WM_MOVERESIZE only follows the pointer, not a touch (#281)") {
-        return;
-    }
     let Some(mut session) = xwm::session() else { return };
     let x = X::new(&session);
     let window = x.mapped();
@@ -334,6 +331,40 @@ fn an_app_moves_its_window_by_touch() {
     }
     session.input("touch up");
     until("the window did not follow the finger", || x.position(window) == (px + 100, py + 50));
+}
+
+/// X138: `_NET_WM_MOVERESIZE` resizes (directions 0-7) started from a
+/// touch on an app's own border (GTK, Chromium and Firefox on a touch
+/// screen): the edge follows the finger, the opposite edge stays put.
+#[test]
+fn an_app_resizes_its_window_by_touch() {
+    let Some(mut session) = xwm::session() else { return };
+    let x = X::new(&session);
+    let window = x.mapped();
+    x.sync();
+    let (px, py) = x.position(window);
+    let (w, h) = x.size(window);
+    // Bottom right (4): the window grows by what the finger moved.
+    let (gx, gy) = (i32::from(px) + i32::from(w) - 3, i32::from(py) + i32::from(h) - 3);
+    session.input(&format!("touch down {gx} {gy}"));
+    x.tell_wm(window, "_NET_WM_MOVERESIZE", [gx as u32, gy as u32, 4, 1, 1]);
+    x.sync();
+    for step in 1..=10 {
+        session.input(&format!("touch move {} {}", gx + step * 6, gy + step * 4));
+    }
+    session.input("touch up");
+    until("the bottom right corner did not follow the finger", || x.size(window) == (w + 60, h + 40) && x.position(window) == (px, py));
+    let (w, h) = (w + 60, h + 40);
+    // Top left (0): the bottom right corner stays where it is.
+    let (gx, gy) = (i32::from(px) + 3, i32::from(py) + 3);
+    session.input(&format!("touch down {gx} {gy}"));
+    x.tell_wm(window, "_NET_WM_MOVERESIZE", [gx as u32, gy as u32, 0, 1, 1]);
+    x.sync();
+    for step in 1..=10 {
+        session.input(&format!("touch move {} {}", gx + step * 3, gy + step * 2));
+    }
+    session.input("touch up");
+    until("the top left corner did not follow the finger", || x.size(window) == (w - 30, h - 20) && x.position(window) == (px + 30, py + 20));
 }
 
 /// X75 (S16): X11 coordinates at an Xwayland scale (Helix scales Xwayland
