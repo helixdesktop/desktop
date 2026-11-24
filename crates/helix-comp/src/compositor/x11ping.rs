@@ -15,15 +15,18 @@ use std::sync::Arc;
 use smithay::reexports::calloop::channel::Sender;
 use smithay::reexports::x11rb::connection::Connection;
 use smithay::reexports::x11rb::protocol::xproto::{
-    Atom, AtomEnum, ChangeWindowAttributesAux, ClientMessageEvent, ConnectionExt, EventMask, Window,
+    Atom, AtomEnum, ChangeWindowAttributesAux, ClientMessageEvent, ConnectionExt, EventMask, PropMode, Window,
 };
 use smithay::reexports::x11rb::protocol::Event;
 use smithay::reexports::x11rb::rust_connection::RustConnection;
+use smithay::reexports::x11rb::wrapper::ConnectionExt as _;
 
 pub struct X11Ping {
     conn: Arc<RustConnection>,
     wm_protocols: Atom,
     net_wm_ping: Atom,
+    net_wm_state: Atom,
+    net_wm_state_hidden: Atom,
     /// Questions for the asking thread.
     asks: std::sync::mpsc::Sender<Ask>,
 }
@@ -113,6 +116,7 @@ impl X11Ping {
         let (wm_protocols, net_wm_ping, net_wm_icon) = (atom("WM_PROTOCOLS")?, atom("_NET_WM_PING")?, atom("_NET_WM_ICON")?);
         let may_grab = atom("_XWAYLAND_MAY_GRAB_KEYBOARD")?;
         let net_wm_pid = atom("_NET_WM_PID")?;
+        let net_wm_state_hidden = atom("_NET_WM_STATE_HIDDEN")?;
         let (net_wm_state, demands_attention) = (atom("_NET_WM_STATE")?, atom("_NET_WM_STATE_DEMANDS_ATTENTION")?);
         // Answers are sent to the root window with the substructure masks.
         conn.change_window_attributes(root, &ChangeWindowAttributesAux::new().event_mask(EventMask::SUBSTRUCTURE_NOTIFY))
@@ -200,7 +204,7 @@ impl X11Ping {
                 }
             })
             .map_err(|e| e.to_string())?;
-        Ok(Self { conn, wm_protocols, net_wm_ping, asks })
+        Ok(Self { conn, wm_protocols, net_wm_ping, net_wm_state, net_wm_state_hidden, asks })
     }
 
     /// Find out whether `window` takes pings, and its app: answered with
@@ -221,6 +225,15 @@ impl X11Ping {
     /// answered with [`X11Note::Icon`].
     pub fn ask_icon(&self, window: Window, watch: bool) {
         let _ = self.asks.send(Ask::Icon(window, watch));
+    }
+
+    /// Add `_NET_WM_STATE_HIDDEN` to `window`'s `_NET_WM_STATE` (appended,
+    /// so nothing waits on a reply). For Smithay's window manager, which
+    /// takes a window starting Iconic as hidden but writes the property
+    /// only when its state changes (#288).
+    pub fn add_hidden_state(&self, window: Window) {
+        let _ = self.conn.change_property32(PropMode::APPEND, window, self.net_wm_state, AtomEnum::ATOM, &[self.net_wm_state_hidden]);
+        let _ = self.conn.flush();
     }
 
     /// Force Quit: close the app's connection to the display.

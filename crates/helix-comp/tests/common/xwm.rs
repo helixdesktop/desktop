@@ -475,6 +475,12 @@ pub struct ShellState {
     pub locked: bool,
     pub lock_focused: bool,
     pub lock_keys: Vec<u32>,
+    /// Every `focused`, `workspace` and `geometry` event, in order (window
+    /// id 0 / `None`: no focus): what the shell saw on the way, not only
+    /// where it ended (#288).
+    pub focus_log: Vec<Option<u32>>,
+    pub workspace_log: Vec<(u32, u32)>,
+    pub minimized_log: Vec<(u32, bool)>,
     lock_configures: Vec<(ext_session_lock_surface_v1::ExtSessionLockSurfaceV1, u32, u32, u32)>,
 }
 
@@ -551,11 +557,16 @@ impl Dispatch<HelixWindowListV1, ()> for ShellState {
                 state.not_responding.retain(|i| *i != id);
             }
             E::Icon { id, size, .. } => state.entry(id).icon_size = size,
-            E::Focused { id } => state.focused = (id != 0).then_some(id),
+            E::Focused { id } => {
+                state.focused = (id != 0).then_some(id);
+                state.focus_log.push(state.focused);
+            }
+            E::Workspace { id, workspace } => state.workspace_log.push((id, workspace)),
             E::Geometry { id, x, y, width, height, minimized } => {
                 let entry = state.entry(id);
                 entry.geometry = Some((x, y, width, height));
                 entry.minimized = minimized != 0;
+                state.minimized_log.push((id, minimized != 0));
             }
             E::Attention { id, wanting } => {
                 state.attention.retain(|i| *i != id);
