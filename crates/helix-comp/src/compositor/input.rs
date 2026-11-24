@@ -572,6 +572,19 @@ impl Helix {
 
     /// A touch point went down at `pos` (layout coordinates).
     pub(super) fn touch_down(&mut self, slot: smithay::backend::input::TouchSlot, pos: Point<f64, Logical>, time: u32) {
+        // The title bars and borders Helix draws around X11 windows: the
+        // touch is theirs (`frame_under` is nothing while locked). A
+        // finger down while another moves or resizes a window is dropped.
+        if let Some((window, part)) = self.frame_under(pos) {
+            let touch = self.seat.get_touch().unwrap();
+            let grabbed = touch.is_grabbed();
+            let down = smithay::input::touch::DownEvent { slot, location: pos, serial: SERIAL_COUNTER.next_serial(), time: smithay::backend::input::InputTime::from_millis(time) };
+            touch.down(self, None, &down);
+            if !grabbed {
+                self.frame_touch(slot, window, part, pos, time);
+            }
+            return;
+        }
         if !self.lock.locked {
             // A touch focuses the window it lands on, as a click does.
             if let Some(window) = self.window_under(pos).map(|(w, _)| w.clone()) {

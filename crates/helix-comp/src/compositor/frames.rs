@@ -1,4 +1,4 @@
-//! Drawing X11 windows' title bars and handling clicks on them
+//! Drawing X11 windows' title bars and handling clicks and touches on them
 //! (helixdesktop/spec `contracts/wayland/README.md`, "Window frames"),
 //! and the scene every output shows: shell layers, windows with their
 //! frames, in stacking order.
@@ -20,7 +20,7 @@ use smithay::output::Output;
 use smithay::utils::{Logical, Point, Rectangle, Scale, Transform, SERIAL_COUNTER};
 use smithay::wayland::shell::wlr_layer::Layer;
 
-use super::grabs::{Edges, MoveGrab, ResizeGrab, ResizeTracking};
+use super::grabs::{Edges, FrameTouchGrab, MoveGrab, ResizeGrab, ResizeTracking, TouchMoveGrab, TouchResizeGrab};
 use super::wm::Takeover;
 use super::Helix;
 
@@ -96,6 +96,8 @@ pub struct Frames {
     pub pressed: Option<(Window, Button)>,
     /// The last left click on a title (window, time), for double clicks.
     last_click: Option<(Window, u32)>,
+    /// The last tap on a title (window, time, where), for double taps.
+    last_tap: Option<(Window, u32, Point<f64, Logical>)>,
     /// The edge-tiling preview (where a dragged window would go).
     preview: Option<(Rectangle<i32, Logical>, SolidColorBuffer)>,
     /// Visual bells: area, start, and the white drawn over it.
@@ -106,6 +108,9 @@ pub struct Frames {
     pub shaded: Vec<Window>,
 }
 
+/// How far apart (logical pixels) the two taps of a double tap on a title
+/// bar may be: GTK's double-click distance (5) times four for a finger.
+const DOUBLE_TAP_DISTANCE: f64 = 20.0;
 /// How long a visual bell flash lasts.
 const FLASH: std::time::Duration = std::time::Duration::from_millis(250);
 /// How long the locate-pointer rings show.
@@ -623,17 +628,68 @@ impl Helix {
     pub fn frame_release(&mut self, pos: Point<f64, Logical>) {
         let Some((window, button)) = self.frames.pressed.take() else { return };
         let still = self.frame_under(pos).is_some_and(|(w, part)| w == window && part == Part::Button(button));
-        if !still {
-            return;
+        if still {
+            self.frame_button(&window, button);
         }
+    }
+
+    /// A frame button was clicked or tapped.
+    pub(super) fn frame_button(&mut self, window: &Window, button: Button) {
         match button {
             Button::Close => {
                 if let Some(x11) = window.x11_surface() {
                     let _ = x11.close();
                 }
             }
-            Button::Maximize => self.title_action(&window, TitleAction::ToggleMaximize),
-            Button::Minimize => self.minimize(&window),
+            Button::Maximize => self.title_action(window, TitleAction::ToggleMaximize),
+            Button::Minimize => self.minimize(window),
+        }
+    }
+
+    /// A finger went down on `part` of `window`'s frame (touch `slot`,
+    /// already down with no app focus), as mutter does for its own frames:
+    /// the title bar moves the window (a double tap does
+    /// `action-double-click-titlebar`), a border resizes it, a button acts
+    /// if the finger lifts on it. The window gets focus and is raised; the
+    /// touch goes to no app.
+    pub(super) fn frame_touch(&mut self, slot: smithay::backend::input::TouchSlot, window: Window, part: Part, pos: Point<f64, Logical>, time: u32) {
+        self.layer_clicked_away();
+        self.focus_window(&window);
+        let touch = self.seat.get_touch().unwrap();
+        let start_data = smithay::input::touch::GrabStartData { focus: None, slot, location: pos };
+        let swallow = |start_data: smithay::input::touch::GrabStartData<Helix>, window: Window, button: Option<Button>| FrameTouchGrab { start_data, window, button, at: pos };
+        match part {
+            Part::Button(b) => {
+                self.frames.pressed = Some((window.clone(), b));
+                touch.set_grab(self, swallow(start_data, window, Some(b)), SERIAL_COUNTER.next_serial());
+            }
+            Part::Title => {
+                let double = self.frames.last_tap.take().is_some_and(|(w, at, from)| {
+                    w == window && time.wrapping_sub(at) <= self.frames.config.double_click_ms && (pos.x - from.x).hypot(pos.y - from.y) <= DOUBLE_TAP_DISTANCE
+                });
+                if double {
+                    touch.set_grab(self, swallow(start_data, window.clone(), None), SERIAL_COUNTER.next_serial());
+                    self.title_action(&window, self.frames.config.double_click);
+                    return;
+                }
+                self.frames.last_tap = Some((window.clone(), time, pos));
+                // A maximized or tiled window is restored once the finger
+                // really moves (so a double tap can restore it instead).
+                let unmaximize = self.is_any_taken_over(&window);
+                let initial_location = self.space.element_location(&window).unwrap_or_default();
+                touch.set_grab(self, TouchMoveGrab { start_data, window, initial_location, unmaximize, ended: false }, SERIAL_COUNTER.next_serial());
+            }
+            Part::Edge(edges) => {
+                if self.is_taken_over(&window, Takeover::Maximized) {
+                    touch.set_grab(self, swallow(start_data, window, None), SERIAL_COUNTER.next_serial());
+                    return;
+                }
+                let edges = Edges::from_bits(edges);
+                let location = self.space.element_location(&window).unwrap_or_default();
+                let initial = Rectangle::new(location, window.geometry().size);
+                self.resize = Some(ResizeTracking { window: window.clone(), edges, initial, finished: false });
+                touch.set_grab(self, TouchResizeGrab { start_data, window, edges, initial, last_size: initial.size }, SERIAL_COUNTER.next_serial());
+            }
         }
     }
 

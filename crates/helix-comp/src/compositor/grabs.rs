@@ -490,9 +490,72 @@ impl TouchGrab<Helix> for TouchResizeGrab {
     }
 }
 
+/// A finger on a button of the title bar Helix draws around an X11 window
+/// (`button`), or on a frame doing nothing more (`None`: the second tap of
+/// a double tap, a border of a maximized window). The touch is the
+/// frame's: no app gets it. A button shows pressed while the finger is on
+/// it and acts if the finger lifts there; a cancelled touch does nothing.
+pub struct FrameTouchGrab {
+    pub start_data: touch::GrabStartData<Helix>,
+    pub window: Window,
+    pub button: Option<helix_comp::frames::Button>,
+    /// Where the finger is.
+    pub at: Point<f64, Logical>,
+}
+
+impl FrameTouchGrab {
+    fn on_button(&self, data: &Helix) -> bool {
+        let Some(button) = self.button else { return false };
+        data.frame_under(self.at).is_some_and(|(w, part)| w == self.window && part == helix_comp::frames::Part::Button(button))
+    }
+}
+
+impl TouchGrab<Helix> for FrameTouchGrab {
+    fn motion(
+        &mut self,
+        data: &mut Helix,
+        handle: &mut TouchInnerHandle<'_, Helix>,
+        _focus: Option<(super::focus::PointerFocusTarget, Point<f64, Logical>)>,
+        event: &touch::MotionEvent,
+    ) {
+        if event.slot != self.start_data.slot {
+            return;
+        }
+        handle.motion(data, None, event);
+        self.at = event.location;
+        if let Some(button) = self.button {
+            let pressed = self.on_button(data).then(|| (self.window.clone(), button));
+            if data.frames.pressed != pressed {
+                data.frames.pressed = pressed;
+            }
+        }
+    }
+
+    fn up(&mut self, data: &mut Helix, handle: &mut TouchInnerHandle<'_, Helix>, event: &touch::UpEvent) {
+        if event.slot != self.start_data.slot {
+            return;
+        }
+        handle.up(data, event);
+        let activate = self.on_button(data).then_some(self.button).flatten();
+        handle.unset_grab(self, data);
+        if let Some(button) = activate {
+            data.frame_button(&self.window, button);
+        }
+    }
+
+    forward_touch_passthrough!();
+
+    fn unset(&mut self, data: &mut Helix) {
+        if self.button.is_some() && data.frames.pressed.as_ref().is_some_and(|(w, _)| *w == self.window) {
+            data.frames.pressed = None;
+        }
+    }
+}
+
 impl Helix {
     /// A touch move or resize (of `window`, or any) going on ends where it
-    /// is: `_NET_WM_MOVERESIZE` cancel, or the session locking.
+    /// is, and a finger on a frame button lets go of it without acting:
+    /// `_NET_WM_MOVERESIZE` cancel, or the session locking.
     pub fn end_touch_move_resize(&mut self, window: Option<&Window>) {
         let Some(touch) = self.seat.get_touch() else { return };
         let ours = touch
@@ -500,7 +563,8 @@ impl Helix {
                 let grabbed = grab
                     .downcast_ref::<TouchMoveGrab>()
                     .map(|g| &g.window)
-                    .or_else(|| grab.downcast_ref::<TouchResizeGrab>().map(|g| &g.window));
+                    .or_else(|| grab.downcast_ref::<TouchResizeGrab>().map(|g| &g.window))
+                    .or_else(|| grab.downcast_ref::<FrameTouchGrab>().map(|g| &g.window));
                 grabbed.is_some_and(|w| window.is_none_or(|window| w == window))
             })
             .unwrap_or(false);
