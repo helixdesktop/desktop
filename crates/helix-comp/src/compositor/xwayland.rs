@@ -777,7 +777,10 @@ impl Helix {
             },
         };
         let location = self.space.element_location(&window).unwrap_or_default();
-        let initial = Rectangle::new(location, window.geometry().size);
+        // The size it was last given: its surface keeps the old one until
+        // it draws (a resize right after another started from the stale
+        // size).
+        let initial = Rectangle::new(location, x11.requested_size());
         self.resize = Some(ResizeTracking {
             window: window.clone(),
             edges,
