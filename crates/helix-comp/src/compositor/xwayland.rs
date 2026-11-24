@@ -441,6 +441,11 @@ impl Helix {
             }
             return;
         }
+        // Where it starts (minimized, on another workspace, on every
+        // one; #288), decided before it is shown, as mutter does: one
+        // that starts hidden is never shown, focused or on the active
+        // workspace first, for the app or the shell.
+        let start = self.x11_start(&x11);
         let size = x11.last_configure().size;
         // Where the user said it goes (`USPosition`: `-geometry`, a saved
         // session), as mutter: kept, on a monitor as a move after mapping
@@ -457,8 +462,13 @@ impl Helix {
         if !taken_over {
             let _ = x11.configure(Rectangle::new(location, size));
         }
-        tracing::info!(title = x11.title(), class = x11.class(), ?location, ?size, user_placed, "new X11 window");
-        self.map_new_window(&window, location);
+        tracing::info!(title = x11.title(), class = x11.class(), ?location, ?size, user_placed, ?start, "new X11 window");
+        if start.shown() {
+            self.map_new_window(&window, location);
+        }
+        self.start_window(&window, location, start);
+        // Placed, maximized or full screen where it goes back to when it
+        // starts hidden.
         if let Some(output) = legacy {
             tracing::info!(output = output.name(), "X11 window covers a monitor: full screen");
             self.wm.legacy_fullscreen.push(window.clone());
@@ -471,43 +481,62 @@ impl Helix {
         if !user_placed {
             self.place_new_window(&window);
         }
+        // Minimized from the start: mapped with `WM_STATE` Iconic, never
+        // Normal first.
+        if start.minimized {
+            let _ = x11.set_hidden(true);
+        }
         if !self.x11_show(&x11) {
             self.forget_window(&window);
             return;
         }
-        // Mapped on top of the X stack: stacked as Helix shows it.
+        // Smithay's window manager has it hidden but hasn't said so in
+        // `_NET_WM_STATE` (it writes that only on a change; maximized or
+        // full screen it did).
+        if let (true, X11Window::Smithay(s), Some(ping)) = (start.minimized, &x11, self.x11ping.as_ref()) {
+            if !self.restore.iter().any(|(w, _, _)| *w == window) {
+                ping.add_hidden_state(s.window_id());
+            }
+        }
+        // Mapped on top of the X stack: stacked as Helix shows it (one
+        // that starts hidden goes to the bottom).
         self.sync_x11_stack();
         if x11.is_above() {
             self.set_above(&window, true);
         }
-        // Asked to start minimized (WM_HINTS Iconic), as GNOME does.
-        if x11.starts_iconic() {
-            self.minimize(&window);
+        // `_NET_WM_DESKTOP` written as it is: where it asked, or the
+        // active workspace for a number there isn't.
+        if x11.initial_desktop().is_some() {
+            self.tidy_workspaces();
         }
-        self.x11_initial_desktop(&window, &x11);
     }
 
-    /// The workspace an app window asked to start on (`_NET_WM_DESKTOP`
-    /// set, or asked for by message, before mapping; #279), as mutter:
-    /// `u32::MAX` puts it on every workspace, one there is puts it there
-    /// (hidden, and focus goes back, unless that is the active one), and
-    /// any other number leaves it on the active one. `_NET_WM_DESKTOP` is
-    /// then written back as it is ([`Helix::publish_x11_desktop`]).
-    fn x11_initial_desktop(&mut self, window: &Window, x11: &X11Window) {
-        let Some(desktop) = x11.initial_desktop() else { return };
-        // The count as it is with this window (dynamic workspaces).
-        self.tidy_workspaces();
-        if desktop == u32::MAX {
-            self.set_on_all_workspaces(window, true);
-        } else if (desktop as usize) < self.workspaces.layout.count && desktop as usize != self.workspaces.layout.active {
-            tracing::debug!(desktop, "X11 window starts on another workspace");
-            self.move_to_workspace(window, desktop as usize);
+    /// Where a new app window starts: minimized if it asked to start
+    /// Iconic (`WM_HINTS`, as GNOME does), and on the workspace it asked
+    /// for (`_NET_WM_DESKTOP` set, or asked for by message, before
+    /// mapping; #279), as mutter: `u32::MAX` puts it on every workspace,
+    /// one there is that isn't the active one puts it there (hidden, the
+    /// focus left where it is), and any other number leaves it on the
+    /// active one.
+    fn x11_start(&mut self, x11: &X11Window) -> super::workspaces::Start {
+        let mut start = super::workspaces::Start { minimized: x11.starts_iconic(), ..Default::default() };
+        match x11.initial_desktop() {
+            None => {}
+            Some(u32::MAX) => start.sticky = true,
+            Some(desktop) => {
+                self.tidy_workspaces();
+                let n = desktop as usize;
+                if n < self.workspaces.layout.count && n != self.workspaces.layout.active {
+                    tracing::debug!(desktop, "X11 window starts on another workspace");
+                    start.workspace = Some(n);
+                }
+            }
         }
-        self.publish_x11_desktop();
+        start
     }
 
-    /// Maps a managed X11 window on the X server (`WM_STATE` Normal, the
-    /// client lists); false if it can't be.
+    /// Maps a managed X11 window on the X server (`WM_STATE` Normal, or
+    /// Iconic once it is hidden; the client lists); false if it can't be.
     fn x11_show(&mut self, x11: &X11Window) -> bool {
         let mapped = match x11 {
             X11Window::Smithay(s) => s.set_mapped(true).map_err(|e| e.to_string()),

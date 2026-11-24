@@ -178,7 +178,7 @@ impl Helix {
     /// Put `window` at `location`: moved if shown, or where it goes back
     /// if hidden (a hidden window asking to be maximized or restored
     /// stays hidden). Mapped if not known yet (a new window).
-    fn place(&mut self, window: &Window, location: Point<i32, Logical>, activate: bool) {
+    pub(super) fn place(&mut self, window: &Window, location: Point<i32, Logical>, activate: bool) {
         match self.presence(window) {
             Presence::Shown | Presence::Gone => self.space.map_element(window.clone(), location, activate),
             Presence::Minimized(_) => {

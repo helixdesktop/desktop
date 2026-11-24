@@ -811,8 +811,11 @@ impl Xwm {
     pub fn set_mapped(&mut self, win: &XWin, mapped: bool) -> Result<(), ConnectionError> {
         let id = win.window_id();
         if mapped {
-            self.conn.change_property32(PropMode::REPLACE, id, self.atoms.WM_STATE, self.atoms.WM_STATE, &[1, x11rb::NONE])?;
+            // Iconic for a window that starts minimized (hidden before it
+            // is shown; #288): it never sees itself Normal first.
             let states: Vec<u32> = win.state().net_state.iter().copied().collect();
+            let wm_state = if states.contains(&self.atoms._NET_WM_STATE_HIDDEN) { 3 } else { 1 };
+            self.conn.change_property32(PropMode::REPLACE, id, self.atoms.WM_STATE, self.atoms.WM_STATE, &[wm_state, x11rb::NONE])?;
             self.conn.change_property32(PropMode::REPLACE, id, self.atoms._NET_WM_STATE, AtomEnum::ATOM, &states)?;
             let a = &self.atoms;
             let allowed = [

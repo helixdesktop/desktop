@@ -334,7 +334,8 @@ impl Helix {
     }
 
     fn place_at(&mut self, window: &Window, at: Point<i32, Logical>) {
-        self.space.map_element(window.clone(), at, false);
+        // Where it goes back, for a new window that starts hidden (#288).
+        self.place(window, at, false);
         self.restack_above();
         if let Some(x11) = window.x11_surface() {
             let _ = x11.configure(Rectangle::new(at, window.geometry().size));

@@ -24,6 +24,25 @@ pub struct WorkspaceState {
     sticky: Vec<Window>,
 }
 
+/// Where a new window starts (#288), decided before it is first shown.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Start {
+    /// Minimized (an X11 window asking to start Iconic).
+    pub minimized: bool,
+    /// On this workspace, which is not the active one.
+    pub workspace: Option<usize>,
+    /// On every workspace.
+    pub sticky: bool,
+}
+
+impl Start {
+    /// Shown (and focused) when it opens: on the active workspace (or on
+    /// every one), not minimized.
+    pub fn shown(&self) -> bool {
+        !self.minimized && self.workspace.is_none()
+    }
+}
+
 impl WorkspaceState {
     pub fn parked(&self) -> impl Iterator<Item = &Window> {
         self.parked.iter().map(|(w, _)| w)
@@ -237,6 +256,31 @@ impl Helix {
         let history = &mut self.workspaces.history;
         history.retain(|w| w != window);
         history.insert(0, window.clone());
+    }
+
+    /// Put a new `window` where it starts (#288): straight into its
+    /// workspace, on every workspace, minimized or parked, so that it is
+    /// never shown, focused or counted on the active workspace first. A
+    /// window that starts shown is mapped first ([`Helix::map_new_window`]).
+    pub fn start_window(&mut self, window: &Window, location: Point<i32, Logical>, start: Start) {
+        let ws = &mut self.workspaces;
+        if let Some(n) = start.workspace {
+            ws.assigned.retain(|(w, _)| w != window);
+            ws.assigned.push((window.clone(), n));
+        }
+        if start.sticky && !ws.sticky.contains(window) {
+            ws.sticky.push(window.clone());
+        }
+        if start.minimized {
+            self.minimized.push((window.clone(), location));
+        } else if start.workspace.is_some() {
+            ws.parked.push((window.clone(), location));
+            // On top of its workspace, and the window focused when that
+            // workspace is shown, as a new window there would be (mutter
+            // focuses the top window of the workspace it shows).
+            ws.history.retain(|w| w != window);
+            ws.history.insert(0, window.clone());
+        }
     }
 
     /// Show `window` on every workspace, or (off) only on the active one.

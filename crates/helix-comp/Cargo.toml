@@ -54,8 +54,9 @@ helix-protocols = { workspace = true, features = ["client"] }
 # A Wayland client for protocol tests.
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
-# Input shapes (SHAPE) and the monitors (XINERAMA) in the X11 tests.
-x11rb = { version = "0.14", default-features = false, features = ["xkb", "shape", "xinerama"] }
+# Input shapes (SHAPE), the monitors (XINERAMA) and what the window
+# manager asks of the X server (RECORD) in the X11 tests.
+x11rb = { version = "0.14", default-features = false, features = ["xkb", "shape", "xinerama", "record"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 # Checking the polkit policy.
 roxmltree = "0.20"

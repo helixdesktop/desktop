@@ -5,6 +5,7 @@
 
 #![allow(dead_code)]
 
+pub mod record;
 pub mod xdnd;
 pub mod xwm;
 
