@@ -64,6 +64,8 @@ impl Source {
 pub struct ClipboardState {
     pub generation: u32,
     pub source: Source,
+    /// The copy kept for when its app goes away (#284).
+    pub keep: super::clipboard_keep::Keep,
 }
 
 /// The most `copy_data` reads (as the shell's Agent Access allows).
@@ -78,6 +80,11 @@ impl Helix {
     /// The clipboard changed: a new generation, from `source`.
     pub fn note_clipboard_source(&mut self, source: Source) {
         self.clipboard.generation = self.clipboard.generation.wrapping_add(1);
+        // Set by Helix itself (the shell's, an agent's or a remote
+        // session's copy): nothing of an app's to keep.
+        if matches!(source.kind, Kind::Shell | Kind::Agent | Kind::Remote(_)) {
+            self.keep_forget();
+        }
         tracing::debug!(generation = self.clipboard.generation, kind = ?source.kind, app = %source.app_id, "clipboard source");
         self.clipboard.source = source;
     }

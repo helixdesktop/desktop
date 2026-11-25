@@ -387,6 +387,9 @@ impl Helix {
                         Msg(super::x11ping::X11Note::StartupId(id, startup_id)) => state.x11_startup_id(id, startup_id),
                         Msg(super::x11ping::X11Note::NewWindowStartupId(id, startup_id)) => state.x11_new_window_startup_id(id, startup_id),
                         Msg(super::x11ping::X11Note::StartupInfo(info)) => state.x11_startup_info(info),
+                        Msg(super::x11ping::X11Note::ClipboardOwner { owner, ours, cleared }) => state.keep_x11_owner(owner, ours, cleared),
+                        Msg(super::x11ping::X11Note::ClipboardAnswered(owner)) => state.keep_x11_answered(owner),
+                        Msg(super::x11ping::X11Note::SaveTargets(request)) => state.keep_save_targets(request),
                         Msg(super::x11ping::X11Note::MayGrab(id, on)) => {
                             tracing::debug!(id, on, "an X11 window asks to be allowed keyboard grabs");
                             state.protocols.x11_may_grab.retain(|w| *w != id);
@@ -920,6 +923,11 @@ impl Helix {
                 if x11 {
                     clear_data_device_selection(&self.display_handle, &self.seat);
                     self.clipboard_changed(Vec::new(), super::clipboard::Source::default());
+                    // Whether the owner went or cleared it is what Helix's
+                    // own X connection sees (#284); without one, it went.
+                    if !self.keep_watches_x11() {
+                        self.keep_owner_gone();
+                    }
                 }
             }
             SelectionTarget::Primary => {
@@ -954,6 +962,10 @@ impl Helix {
                     self.start_transfer(session, mime_type, fd);
                     return;
                 }
+                Some(super::ServerSelection::Kept(kept)) => {
+                    super::clipboard_keep::serve(kept, &mime_type, fd);
+                    return;
+                }
                 _ => {}
             }
         }
@@ -977,7 +989,8 @@ impl Helix {
             SelectionTarget::Clipboard => {
                 set_data_device_selection(&self.display_handle, &self.seat, mime_types.clone(), super::ServerSelection::X11);
                 let source = self.x11_clipboard_source();
-                self.clipboard_changed(mime_types, source);
+                self.clipboard_changed(mime_types.clone(), source.clone());
+                self.keep_new_selection(super::clipboard_keep::Owner::X11, &mime_types, source);
             }
             SelectionTarget::Primary => {
                 set_primary_selection(&self.display_handle, &self.seat, mime_types, super::ServerSelection::X11)
@@ -993,6 +1006,10 @@ impl Helix {
             if let Err(err) = xwm.new_selection(selection, types.clone()) {
                 tracing::warn!(?err, ?selection, "cannot offer the selection to X11");
             }
+            // Smithay leaves taking the selection unsent until it next
+            // flushes (its next X event): an empty restack flushes now, so
+            // X11 apps paste the copy at once (#284).
+            let _ = xwm.update_stacking_order_downwards(std::iter::empty::<&X11Surface>());
         }
         if let Some(xwm) = self.hxwm.as_mut() {
             xwm.set_selection(selection, types);

@@ -374,6 +374,11 @@ fn a_large_x11_copy_reaches_a_slow_reader_whole() {
     let picture = data(16 * 1024 * 1024 + 5, 6);
     let finished = x11_owner(&session, vec![("image/png", picture.clone())], false);
     assert!(session.wait_for_log("selection set by an X11 app", Duration::from_secs(10)), "the compositor never saw the X11 copy");
+    // Helix reads the copy first, to keep it (#284): too large to keep,
+    // its read ends there and the owner sends the rest to no one. That
+    // transfer ends before this test's.
+    assert!(session.wait_for_log("too large", Duration::from_secs(30)), "the copy was kept, or never read to keep it");
+    assert!(finished.recv_timeout(Duration::from_secs(30)).is_ok(), "the owner never finished the transfer for keeping the copy");
     let mut app = wayland_app(&session);
     app.until("no clipboard offered", |s| s.selection.is_some());
     let (offer, _) = app.state.selection.clone().unwrap();

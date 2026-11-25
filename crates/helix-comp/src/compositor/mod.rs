@@ -10,6 +10,7 @@ mod alive;
 mod attention;
 mod capture;
 mod clipboard;
+mod clipboard_keep;
 mod color;
 mod cursor;
 mod focus;
@@ -804,6 +805,8 @@ pub enum ServerSelection {
     /// Data of one type an agent copied (`copy_data`), other than plain
     /// text (that is [`ServerSelection::Text`]).
     Data { mime_type: String, data: Arc<Vec<u8>> },
+    /// What Helix kept of a copy whose app went away (#284).
+    Kept(clipboard_keep::Kept),
 }
 
 /// Whether `client` is the shell the compositor launched.
