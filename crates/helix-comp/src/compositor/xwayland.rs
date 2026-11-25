@@ -4,6 +4,10 @@
 //! manager (Smithay's `X11Wm`). X11 windows join the same space as Wayland
 //! windows and share focus, stacking, move/resize, maximize/fullscreen and
 //! the clipboard. Integration follows Smithay's `anvil` example (MIT).
+//!
+//! The window manager is Smithay's or Helix's own (`HELIX_XWM=helix`). If
+//! the one chosen fails to start, Xwayland is started again on the same
+//! display with the other, for the rest of the session (#270).
 
 use std::os::fd::OwnedFd;
 use std::process::Stdio;
@@ -51,6 +55,9 @@ pub fn x11_kind(surface: &X11Window) -> X11Kind {
         _ => X11Kind::App,
     }
 }
+
+/// What runs once Xwayland is up (its display number) or has failed.
+type XwaylandReady = Box<dyn FnOnce(&mut Helix, Option<u32>)>;
 
 /// How many times a minute Xwayland is started again after it went away.
 const XWAYLAND_RESTARTS: usize = 3;
@@ -210,7 +217,13 @@ impl Helix {
                     let started = if super::xwm::helix_selected() {
                         state.start_helix_xwm(x11_socket, client.clone())
                     } else {
-                        match X11Wm::start_wm(state.loop_handle.clone(), &state.display_handle.clone(), x11_socket, client.clone()) {
+                        let started = if super::xwm::start_fails_for_test() {
+                            drop(x11_socket);
+                            Err("HELIX_XWM_FAIL_START=1 (fault injected for a test)".into())
+                        } else {
+                            X11Wm::start_wm(state.loop_handle.clone(), &state.display_handle.clone(), x11_socket, client.clone())
+                        };
+                        match started {
                             Ok(wm) => {
                                 state.xwm = Some(wm);
                                 Ok(())
@@ -219,6 +232,19 @@ impl Helix {
                         }
                     };
                     match started {
+                        Err(err) if super::xwm::fall_back() => {
+                            // The other window manager needs an Xwayland of
+                            // its own (this one gave its window manager
+                            // connection to the one that failed), on the
+                            // same display.
+                            let failed = if super::xwm::helix_selected() { "Smithay's X11 window manager" } else { "Helix's X11 window manager" };
+                            let fallback = super::xwm::selected_name();
+                            tracing::error!(%err, display = display_number, failed, "{failed} failed to start; falling back to {fallback} for this session, on the same display");
+                            if let Some(ready) = ready.take() {
+                                state.restart_xwayland_for_fallback(display_number, ready);
+                            }
+                            return;
+                        }
                         Ok(()) => {
                             state.xdisplay = Some(display_number);
                             state.xwayland_client = Some(client.clone());
@@ -232,11 +258,11 @@ impl Helix {
                                     state.x11_offer_selection(selection, Some(types));
                                 }
                             }
-                            tracing::info!(display = display_number, "Xwayland ready");
+                            tracing::info!(display = display_number, xwm = super::xwm::selected_name(), "Xwayland ready");
                             Some(display_number)
                         }
                         Err(err) => {
-                            tracing::warn!(%err, "cannot manage Xwayland windows");
+                            tracing::error!(%err, xwm = super::xwm::selected_name(), "cannot manage Xwayland windows; X11 apps will not run");
                             None
                         }
                     }
@@ -254,6 +280,43 @@ impl Helix {
             Ok(token) => self.xwayland_source = Some(token),
             Err(err) => tracing::warn!(%err, "cannot watch Xwayland"),
         }
+    }
+
+    /// The window manager chosen failed to start on display `number`, and
+    /// the other is to take over (#270): Xwayland, which gave its window
+    /// manager connection to the one that failed, is stopped and started
+    /// again on the same display, which is kept meanwhile (DISPLAY, the
+    /// session's and its apps', stays right; no other X server takes it).
+    /// `ready` runs once that one is up, or has failed.
+    fn restart_xwayland_for_fallback(&mut self, number: u32, ready: impl FnOnce(&mut Helix, Option<u32>) + 'static) {
+        // What the one that failed left behind.
+        self.xwm = None;
+        self.hxwm = None;
+        for token in [self.hxwm_source.take(), self.hxwm_replies.take()].into_iter().flatten() {
+            self.loop_handle.remove(token);
+        }
+        self.x_drag_tx = None;
+        // Not from inside the Xwayland source's own callback.
+        self.loop_handle.insert_idle(move |state| {
+            // Dropping it stops Xwayland and gives the display back...
+            if let Some(token) = state.xwayland_source.take() {
+                state.loop_handle.remove(token);
+            }
+            // ...kept at once, and let go just before Xwayland takes it
+            // again (`start_xwayland`).
+            state.xwayland_reserved = DisplayReservation::take(number);
+            helix_comp::xauth::set_current(None);
+            // Boxed: `start_xwayland` is generic over `ready`, and calls this.
+            let ready: XwaylandReady = Box::new(move |state, started| {
+                match started {
+                    Some(n) if n == number => tracing::info!(display = n, xwm = super::xwm::selected_name(), "Xwayland started again with the other X11 window manager"),
+                    Some(n) => tracing::warn!(display = n, before = number, "Xwayland started again on another display"),
+                    None => {}
+                }
+                ready(state, started);
+            });
+            state.start_xwayland(Some(number), ready);
+        });
     }
 
     /// Helix's own window manager (#191) on the connection Xwayland gave
