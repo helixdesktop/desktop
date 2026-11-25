@@ -70,7 +70,7 @@ use helix_test_support::headless::HeadlessSession;
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
 use wayland_client::protocol::{wl_buffer, wl_compositor, wl_data_device, wl_data_device_manager, wl_data_offer, wl_data_source, wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface};
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
-use wayland_protocols::wp::primary_selection::zv1::client::{zwp_primary_selection_device_manager_v1 as primary_manager, zwp_primary_selection_device_v1 as primary_device, zwp_primary_selection_offer_v1 as primary_offer};
+use wayland_protocols::wp::primary_selection::zv1::client::{zwp_primary_selection_device_manager_v1 as primary_manager, zwp_primary_selection_device_v1 as primary_device, zwp_primary_selection_offer_v1 as primary_offer, zwp_primary_selection_source_v1 as primary_source};
 use wayland_protocols::xdg::activation::v1::client::{xdg_activation_token_v1, xdg_activation_v1};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
@@ -276,6 +276,16 @@ impl Dispatch<primary_device::ZwpPrimarySelectionDeviceV1, ()> for State {
         primary_device::EVT_DATA_OFFER_OPCODE => (primary_offer::ZwpPrimarySelectionOfferV1, ()),
     ]);
 }
+impl Dispatch<primary_source::ZwpPrimarySelectionSourceV1, ()> for State {
+    fn event(state: &mut Self, _: &primary_source::ZwpPrimarySelectionSourceV1, event: primary_source::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+        if let primary_source::Event::Send { fd, .. } = event {
+            let data = state.copied.clone();
+            std::thread::spawn(move || {
+                let _ = std::io::Write::write_all(&mut std::fs::File::from(fd), &data);
+            });
+        }
+    }
+}
 impl Dispatch<primary_offer::ZwpPrimarySelectionOfferV1, ()> for State {
     fn event(state: &mut Self, offer: &primary_offer::ZwpPrimarySelectionOfferV1, event: primary_offer::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
         if let primary_offer::Event::Offer { mime_type } = event {
@@ -314,6 +324,7 @@ pub struct Client {
     data_manager: wl_data_device_manager::WlDataDeviceManager,
     /// The primary selection device, when the compositor offers one.
     pub primary_device: Option<primary_device::ZwpPrimarySelectionDeviceV1>,
+    primary_manager: Option<primary_manager::ZwpPrimarySelectionDeviceManagerV1>,
     layer_shell: Option<wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1>,
     /// The monitors, in the order the compositor advertised them.
     pub outputs: Vec<wl_output::WlOutput>,
@@ -453,8 +464,9 @@ impl Client {
         self.roundtrip();
     }
 
-    /// Copy `types` (each type with its own data) to the clipboard.
-    pub fn copy_types(&mut self, types: &[(&str, &[u8])]) {
+    /// Copy `types` (each type with its own data) to the clipboard; the
+    /// source, which the app may destroy later.
+    pub fn copy_types(&mut self, types: &[(&str, &[u8])]) -> wl_data_source::WlDataSource {
         self.state.copied = types.first().map(|(_, d)| d.to_vec()).unwrap_or_default();
         self.state.copied_as = types.iter().map(|(m, d)| ((*m).to_owned(), d.to_vec())).collect();
         let source = self.data_manager.create_data_source(&self.qh, ());
@@ -463,6 +475,19 @@ impl Client {
         }
         self.data_device.set_selection(Some(&source), 0);
         self.roundtrip();
+        source
+    }
+
+    /// Set the primary selection to `data` as `mime` (the client must
+    /// have keyboard focus); the source, which the app may destroy later.
+    pub fn copy_primary(&mut self, mime: &str, data: &[u8]) -> primary_source::ZwpPrimarySelectionSourceV1 {
+        self.state.copied = data.to_vec();
+        self.state.copied_as.clear();
+        let source = self.primary_manager.as_ref().expect("helix-comp offers the primary selection").create_source(&self.qh, ());
+        source.offer(mime.to_owned());
+        self.primary_device.as_ref().unwrap().set_selection(Some(&source), 0);
+        self.roundtrip();
+        source
     }
 
     /// Start dragging `data` as `mime` from `origin`, for the press of
@@ -539,7 +564,8 @@ pub fn connect(session: &HeadlessSession) -> Client {
     seat.get_pointer(&qh, ());
     let manager: wl_data_device_manager::WlDataDeviceManager = globals.bind(&qh, 3..=3, ()).unwrap();
     let data_device = manager.get_data_device(&seat, &qh, ());
-    let primary_device = globals.bind::<primary_manager::ZwpPrimarySelectionDeviceManagerV1, _, _>(&qh, 1..=1, ()).ok().map(|m| m.get_device(&seat, &qh, ()));
+    let primary_manager = globals.bind::<primary_manager::ZwpPrimarySelectionDeviceManagerV1, _, _>(&qh, 1..=1, ()).ok();
+    let primary_device = primary_manager.as_ref().map(|m| m.get_device(&seat, &qh, ()));
     let layer_shell = globals.bind(&qh, 1..=4, ()).ok();
     let outputs = globals.contents().with_list(|list| {
         list.iter().filter(|g| g.interface == "wl_output").map(|g| globals.registry().bind::<wl_output::WlOutput, _, _>(g.name, g.version.min(4), &qh, ())).collect()
@@ -548,6 +574,7 @@ pub fn connect(session: &HeadlessSession) -> Client {
         layer_shell,
         outputs,
         primary_device,
+        primary_manager,
         compositor: globals.bind(&qh, 4..=6, ()).unwrap(),
         shm: globals.bind(&qh, 1..=1, ()).unwrap(),
         base: globals.bind(&qh, 1..=6, ()).unwrap(),

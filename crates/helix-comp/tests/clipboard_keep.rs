@@ -228,6 +228,46 @@ fn a_wayland_copy_pastes_after_its_app_exits() {
     assert_eq!(x11_read(&session, "UTF8_STRING").as_deref(), Some(&b"kept after exit"[..]));
 }
 
+/// #305: a Wayland app destroys its copy's source without clearing the
+/// clipboard (`set_selection(NULL)`) and keeps running: Helix takes over
+/// the copy it kept, for Wayland apps and for X11 apps (which are no
+/// longer offered the gone one).
+#[test]
+fn a_wayland_copy_whose_source_is_destroyed_pastes_while_its_app_runs() {
+    let Some(session) = xwm::session() else { return };
+    let kept = logged(&session, "clipboard kept");
+    let (mut app, _window) = wayland_app(&session);
+    let source = app.copy_types(&[(TEXT, b"source destroyed")]);
+    until_logged(&session, &mut [&mut app], "clipboard kept", kept);
+    source.destroy();
+    app.roundtrip();
+    assert_eq!(pasted_after_exit(&session, TEXT).as_deref(), Some(&b"source destroyed"[..]), "nothing pasted after the source was destroyed");
+    assert_eq!(x11_read(&session, "UTF8_STRING").as_deref(), Some(&b"source destroyed"[..]), "the X11 app's paste");
+    // The app that copied is still there.
+    app.roundtrip();
+}
+
+/// #305: a Wayland app destroys its primary selection's source and keeps
+/// running: X11 apps are no longer offered it (the window manager lets
+/// go of PRIMARY).
+#[test]
+fn a_destroyed_primary_source_is_not_offered_to_x11() {
+    let Some(session) = xwm::session() else { return };
+    let (mut app, _window) = wayland_app(&session);
+    let source = app.copy_primary(TEXT, b"selected");
+    let (conn, _) = common::x11(&session);
+    let primary = atom(&conn, "PRIMARY");
+    until_x11_owned(&conn, primary);
+    source.destroy();
+    app.roundtrip();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while conn.get_selection_owner(primary).unwrap().reply().unwrap().owner != x11rb::NONE {
+        assert!(Instant::now() < deadline, "X11 apps are still offered a primary selection whose source is gone");
+        app.roundtrip();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// An image is kept, whole.
 #[test]
 fn a_copied_image_is_kept() {
