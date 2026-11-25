@@ -414,8 +414,6 @@ impl Helix {
         for window in &windows {
             self.forget_window(window);
         }
-        self.x11_selection_cleared(SelectionTarget::Clipboard);
-        self.x11_selection_cleared(SelectionTarget::Primary);
         self.xwm = None;
         if let Some(xwm) = self.hxwm.as_mut() {
             xwm.xwayland_gone();
@@ -430,6 +428,12 @@ impl Helix {
         for (_, token) in self.hxwm_watches.drain() {
             self.loop_handle.remove(token);
         }
+        // With no window manager left, what Helix offers X11 apps is only
+        // noted, for the next Xwayland. An X11 app's copy Helix kept is
+        // taken over before its own X connection goes (#306).
+        self.keep_xwayland_gone();
+        self.x11_selection_cleared(SelectionTarget::Clipboard);
+        self.x11_selection_cleared(SelectionTarget::Primary);
         self.xwayland_client = None;
         self.x11ping = None;
         self.xsettings = None;
@@ -993,6 +997,7 @@ impl Helix {
                 self.keep_new_selection(super::clipboard_keep::Owner::X11, &mime_types, source);
             }
             SelectionTarget::Primary => {
+                self.keep_primary(None);
                 set_primary_selection(&self.display_handle, &self.seat, mime_types, super::ServerSelection::X11)
             }
         }

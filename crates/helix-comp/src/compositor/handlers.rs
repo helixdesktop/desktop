@@ -157,6 +157,9 @@ impl SelectionHandler for Helix {
         // was refused.
         tracing::info!(?ty, app = %self.focused_app(), types = mime_types.as_ref().map_or(0, Vec::len), "selection set by a Wayland app");
         self.x11_offer_selection(ty, mime_types.clone());
+        if ty == smithay::wayland::selection::SelectionTarget::Primary {
+            self.keep_primary(source.clone());
+        }
         if ty == smithay::wayland::selection::SelectionTarget::Clipboard {
             let who = match source.as_ref() {
                 Some(source) => self.clipboard_source_of(source.client().as_ref()),

@@ -1028,3 +1028,30 @@ fn a_wayland_copy_pastes_into_x11_after_xwayland_comes_back() {
     let got = while_serving(&mut app, || Reader::new(&session).read("UTF8_STRING"));
     assert_eq!(got.as_deref(), Some(&b"before the restart"[..]), "a Wayland copy made before Xwayland went away doesn't paste into X11 apps once it is back");
 }
+
+/// #306: an X11 app's copy, then Xwayland goes away (a crash): Wayland
+/// apps paste the copy Helix kept, and X11 apps do too once it is back.
+#[test]
+fn an_x11_copy_is_kept_when_xwayland_goes_away() {
+    let Some(session) = xwm::session() else { return };
+    let mut app = wayland_app(&session);
+    let count = |text: &str| session.log().matches(text).count();
+    let (kept, taken) = (count("clipboard kept"), count("Helix keeps its copy"));
+    let _owner = x11_owner(&session, vec![("UTF8_STRING", b"from before the crash".to_vec())], false);
+    let until = |app: &mut common::Client, text: &str, before: usize, what: &str| {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while count(text) <= before {
+            assert!(Instant::now() < deadline, "{what}");
+            app.roundtrip();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    until(&mut app, "clipboard kept", kept, "the X11 copy was never kept");
+    let killed = xwm::kill_xwayland(&session);
+    until(&mut app, "Helix keeps its copy", taken, "the X11 copy Helix kept was not taken over when Xwayland went away");
+    app.until("the kept copy wasn't offered", |s| s.selection.as_ref().is_some_and(|(_, types)| types.iter().any(|t| t == "text/plain;charset=utf-8")));
+    assert_eq!(app.paste("text/plain;charset=utf-8"), b"from before the crash", "the Wayland app's paste after Xwayland went away");
+    drop(xwm::restarted_xwayland(&session, killed));
+    let got = while_serving(&mut app, || Reader::new(&session).read("UTF8_STRING"));
+    assert_eq!(got.as_deref(), Some(&b"from before the crash"[..]), "an X11 copy kept when Xwayland went away doesn't paste into X11 apps once it is back");
+}

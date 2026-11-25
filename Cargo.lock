@@ -3153,7 +3153,7 @@ checksum = "149309498a5f7334b12ddae0cad8aba81ce785fe91755068867e017cf98fee46"
 [[package]]
 name = "smithay"
 version = "0.7.0"
-source = "git+https://github.com/helixdesktop/smithay?rev=26aae9eea07a8510537d834b038b3c5ea8003466#26aae9eea07a8510537d834b038b3c5ea8003466"
+source = "git+https://github.com/helixdesktop/smithay?rev=54ab115f917395011b1fdae4c8fea79ffa953493#54ab115f917395011b1fdae4c8fea79ffa953493"
 dependencies = [
  "appendlist",
  "bitflags 2.13.2",

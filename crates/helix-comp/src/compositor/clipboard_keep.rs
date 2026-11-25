@@ -11,8 +11,11 @@
 //! selection cancels it. When the owner goes away (its Wayland client
 //! disconnects, the X11 owner's window or connection is gone) and the copy
 //! was complete, Helix owns the clipboard with what it kept, for Wayland
-//! and X11 apps alike. A clipboard an app cleared on purpose (Wayland
-//! `set_selection(NULL)`, X11 `SetSelectionOwner(None)`) stays empty.
+//! and X11 apps alike. A Wayland app that destroys its copy's source and
+//! keeps running counts as gone too (#305), and so does an X11 owner when
+//! Xwayland itself goes away (#306). A clipboard an app cleared on purpose
+//! (Wayland `set_selection(NULL)`, X11 `SetSelectionOwner(None)`) stays
+//! empty.
 //!
 //! Not kept: the primary selection (nor does mutter), types other than
 //! text and images, a type over its limit, and a copy marked secret
@@ -163,6 +166,9 @@ pub struct Keep {
     /// An X11 app took the clipboard: whether it says what it offers in
     /// time (its window, and since when).
     targets: Option<(u32, Instant)>,
+    /// The Wayland source of the primary selection (not kept, only
+    /// watched: X11 apps stop being offered it once it's gone, #305).
+    primary: Option<SelectionSource>,
 }
 
 /// Never the content.
@@ -389,12 +395,35 @@ impl Helix {
         }
     }
 
+    /// The primary selection is now `source`'s (a Wayland app's), or
+    /// nobody's or an X11 app's (`None`).
+    pub(super) fn keep_primary(&mut self, source: Option<SelectionSource>) {
+        self.clipboard.keep.primary = source;
+    }
+
+    /// Xwayland went away (its X connections with it): an X11 app's copy
+    /// Helix kept is taken over (#306), as when its app exits; the
+    /// window manager offers it to X11 apps again once Xwayland is back.
+    pub(super) fn keep_xwayland_gone(&mut self) {
+        self.clipboard.keep.targets = None;
+        if matches!(self.clipboard.keep.owner, Owner::X11) && !self.clipboard.keep.taken {
+            self.keep_owner_gone();
+        }
+    }
+
     /// Every tick: a Wayland owner gone, an X11 owner silent too long,
     /// `SAVE_TARGETS` waiting too long.
     pub fn keep_tick(&mut self) {
-        let gone = matches!(&self.clipboard.keep.owner, Owner::Wayland(source) if source.client().is_none());
+        // Its client gone, or the source destroyed while the app runs on
+        // (#305): Smithay dropped the selection without a word either way.
+        let gone = matches!(&self.clipboard.keep.owner, Owner::Wayland(source) if !source.is_alive());
         if gone && !self.clipboard.keep.taken {
             self.keep_owner_gone();
+        }
+        if self.clipboard.keep.primary.as_ref().is_some_and(|s| !s.is_alive()) {
+            self.clipboard.keep.primary = None;
+            tracing::info!("the primary selection's Wayland source is gone");
+            self.x11_offer_selection(SelectionTarget::Primary, None);
         }
         let now = Instant::now();
         if self.clipboard.keep.targets.is_some_and(|(_, since)| now >= since + TARGETS_WAIT) {
