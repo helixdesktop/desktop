@@ -20,7 +20,7 @@ use wayland_protocols::ext::session_lock::v1::client::{ext_session_lock_manager_
 use wayland_protocols::xdg::activation::v1::client::{xdg_activation_token_v1, xdg_activation_v1};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
-    AtomEnum, ClientMessageEvent, ConnectionExt, CreateWindowAux, EventMask, PropMode, UnmapNotifyEvent, Window, WindowClass, UNMAP_NOTIFY_EVENT,
+    AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt, CreateWindowAux, EventMask, PropMode, UnmapNotifyEvent, Window, WindowClass, UNMAP_NOTIFY_EVENT,
 };
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
@@ -281,17 +281,23 @@ impl X {
         self.tell_wm(window, "_NET_ACTIVE_WINDOW", [source, x11rb::CURRENT_TIME, current, 0, 0]);
     }
 
-    /// Activate `window` as a pager does, and wait until it is active.
     /// Waits until the window manager has handled every X event this
     /// client's requests so far caused, and acted on them (#235): it
     /// handles events in order, and answers `_NET_REQUEST_FRAME_EXTENTS`
     /// (for a window it hasn't shown) only once it got there. Not for
     /// what comes through the compositor (pointer input): those events
     /// aren't ordered with this client's. Smithay's window manager doesn't
-    /// answer the request: a fixed wait there.
+    /// answer the request: there, a resize asked for a window never shown
+    /// (which Helix grants) is the marker instead (#302).
     pub fn sync(&self) {
         if super::xwm_running() != super::Xwm::Helix {
-            std::thread::sleep(Duration::from_millis(300));
+            let probe = self.conn.generate_id().unwrap();
+            self.conn.create_window(x11rb::COPY_DEPTH_FROM_PARENT, probe, self.root, -10, -10, 1, 1, 0, WindowClass::INPUT_OUTPUT, 0, &CreateWindowAux::new()).unwrap();
+            self.conn.configure_window(probe, &ConfigureWindowAux::new().width(2).height(3)).unwrap();
+            self.flush();
+            until("the window manager never got to a resize request (sync)", || self.size(probe) == (2, 3));
+            self.conn.destroy_window(probe).unwrap();
+            self.flush();
             return;
         }
         let probe = self.conn.generate_id().unwrap();
@@ -308,8 +314,15 @@ impl X {
         self.flush();
     }
 
+    /// Activate `window` as a pager does, and wait until it is active.
+    /// Until the window manager has handled the request, too: a window
+    /// already active (the last one mapped) is so before it gets there,
+    /// and a request handled after input the test sends next (through
+    /// the compositor, not ordered with this client's requests) would
+    /// take the focus back from where that input gave it (#302).
     pub fn focus(&self, window: Window) {
         self.activate(window, 2, x11rb::NONE);
+        self.sync();
         until("the window never became active", || self.active() == Some(window));
         // `_NET_ACTIVE_WINDOW` is written a moment before the window
         // manager sets the X input focus: wait for that too (a window that
