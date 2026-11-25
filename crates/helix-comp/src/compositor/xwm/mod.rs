@@ -83,8 +83,35 @@ pub(super) fn parse<R: x11rb::x11_utils::TryParse>(reply: Option<Vec<u8>>) -> Op
     reply.and_then(|b| R::try_parse(&b).ok().map(|(r, _)| r))
 }
 
+/// Whether Helix's window manager runs Xwayland's windows: the one
+/// `HELIX_XWM` asks for, unless it failed to start this session and the
+/// other took over ([`fall_back`], #270).
 pub fn helix_selected() -> bool {
-    std::env::var("HELIX_XWM").is_ok_and(|v| v == "helix")
+    std::env::var("HELIX_XWM").is_ok_and(|v| v == "helix") != FELL_BACK.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Set once the window manager `HELIX_XWM` asks for has failed to start:
+/// the other runs Xwayland's windows for the rest of the session.
+static FELL_BACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The chosen window manager failed to start: use the other from now on.
+/// False if that already happened (the other failed too: no more tries).
+pub fn fall_back() -> bool {
+    !FELL_BACK.swap(true, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The name of the window manager in use, for the log.
+pub fn selected_name() -> &'static str {
+    if helix_selected() { "Helix's X11 window manager" } else { "Smithay's X11 window manager" }
+}
+
+/// Fault injection for tests (#270): with `HELIX_XWM_FAIL_START=1`, the
+/// window manager `HELIX_XWM` asks for fails to start (Helix's partway
+/// through becoming the window manager, Smithay's before it begins), as
+/// one would on an X server it cannot handle. Debug builds only: release
+/// builds ignore it.
+pub fn start_fails_for_test() -> bool {
+    cfg!(debug_assertions) && !FELL_BACK.load(std::sync::atomic::Ordering::Relaxed) && std::env::var("HELIX_XWM_FAIL_START").is_ok_and(|v| v == "1")
 }
 
 /// What the window manager asks of the compositor.
@@ -242,6 +269,9 @@ impl Xwm {
             &ChangeWindowAttributesAux::new().event_mask(EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY | EventMask::PROPERTY_CHANGE | EventMask::FOCUS_CHANGE),
         )?
         .check()?;
+        if start_fails_for_test() {
+            return Err(StartError("HELIX_XWM_FAIL_START=1 (fault injected for a test)".into()));
+        }
 
         // Who the window manager is (EWMH "_NET_SUPPORTING_WM_CHECK"): Java
         // tells window managers apart by it.
