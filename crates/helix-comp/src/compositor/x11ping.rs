@@ -4,6 +4,13 @@
 //! keeps a connection of its own to Xwayland: it sends the pings, reads
 //! icons, and a thread watches for ping answers and icon changes.
 //!
+//! It is also the X11 side of keeping the clipboard (#284;
+//! [`super::clipboard_keep`]), for either window manager: it owns
+//! `CLIPBOARD_MANAGER` and passes on `SAVE_TARGETS` (freedesktop's
+//! ClipboardManager spec), and follows who owns CLIPBOARD (XFixes): whether
+//! an owner went away or cleared it, and whether a new one says what it
+//! offers (it is asked for `TARGETS` too).
+//!
 //! It never waits for an X reply on the compositor's thread (#249): this
 //! is an ordinary X client, so one holding the X server (XGrabServer)
 //! would stop the whole desktop. What needs a reply (whether a window
@@ -14,8 +21,10 @@ use std::sync::Arc;
 
 use smithay::reexports::calloop::channel::Sender;
 use smithay::reexports::x11rb::connection::Connection;
+use smithay::reexports::x11rb::protocol::xfixes::{self, ConnectionExt as _};
 use smithay::reexports::x11rb::protocol::xproto::{
-    Atom, AtomEnum, ChangeWindowAttributesAux, ClientMessageEvent, ConnectionExt, EventMask, PropMode, Window,
+    Atom, AtomEnum, ChangeWindowAttributesAux, ClientMessageEvent, ConnectionExt, CreateWindowAux, EventMask, PropMode, SelectionNotifyEvent,
+    SelectionRequestEvent, Window, WindowClass, SELECTION_NOTIFY_EVENT,
 };
 use smithay::reexports::x11rb::protocol::Event;
 use smithay::reexports::x11rb::rust_connection::RustConnection;
@@ -29,6 +38,8 @@ pub struct X11Ping {
     net_wm_state_hidden: Atom,
     /// Questions for the asking thread.
     asks: std::sync::mpsc::Sender<Ask>,
+    /// It follows CLIPBOARD's owner and is the clipboard manager.
+    pub watches_clipboard: bool,
 }
 
 /// What the asking thread finds out.
@@ -73,6 +84,25 @@ pub enum X11Note {
     /// A startup notification message (`_NET_STARTUP_INFO`) an X11 app
     /// or launcher sent.
     StartupInfo(StartupInfo),
+    /// CLIPBOARD's owner now: an app's window, the window manager's
+    /// (`ours`), or none (0), then `cleared` when an app let it go on
+    /// purpose (`SetSelectionOwner(None)`) rather than its window or its
+    /// connection going.
+    ClipboardOwner { owner: Window, ours: bool, cleared: bool },
+    /// CLIPBOARD's owner answered `TARGETS` (offered or refused).
+    ClipboardAnswered(Window),
+    /// An X11 app asks the clipboard manager to save the clipboard.
+    SaveTargets(SaveRequest),
+}
+
+/// A `SAVE_TARGETS` request to the clipboard manager, to be answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SaveRequest {
+    pub requestor: Window,
+    pub selection: Atom,
+    pub target: Atom,
+    pub property: Atom,
+    pub time: u32,
 }
 
 /// What a startup notification message says (the startup-notification
@@ -236,6 +266,111 @@ fn startup_id(format: u8, value: &[u8]) -> Option<String> {
     (!text.is_empty() && !text.contains('\0')).then(|| text.to_owned())
 }
 
+/// CLIPBOARD, as Helix's own connection follows it, and the clipboard
+/// manager it is.
+struct Clipboard {
+    /// Its window: owning `CLIPBOARD_MANAGER`, asking owners for TARGETS.
+    window: Window,
+    clipboard: Atom,
+    manager: Atom,
+    save_targets: Atom,
+    targets: Atom,
+    probe: Atom,
+    /// The window manager's client (its resource id base): its windows
+    /// own CLIPBOARD for Wayland copies.
+    wm_base: u32,
+    base_mask: u32,
+    /// The owner last seen, and whether it is the window manager's.
+    owner: (Window, bool),
+}
+
+impl Clipboard {
+    fn start(conn: &RustConnection, root: Window, atom: &dyn Fn(&str) -> Result<Atom, String>) -> Result<Self, String> {
+        let e = |e: &dyn std::fmt::Display| e.to_string();
+        conn.xfixes_query_version(5, 0).map_err(|x| e(&x))?.reply().map_err(|x| e(&x))?;
+        let (clipboard, manager, save_targets) = (atom("CLIPBOARD")?, atom("CLIPBOARD_MANAGER")?, atom("SAVE_TARGETS")?);
+        let (targets, probe, manager_msg) = (atom("TARGETS")?, atom("_HELIX_CLIPBOARD_TARGETS")?, atom("MANAGER")?);
+        let wm = conn.get_selection_owner(atom("WM_S0")?).map_err(|x| e(&x))?.reply().map_err(|x| e(&x))?.owner;
+        let base_mask = !conn.setup().resource_id_mask;
+        let window = conn.generate_id().map_err(|x| e(&x))?;
+        conn.create_window(0, window, root, -1, -1, 1, 1, 0, WindowClass::INPUT_ONLY, smithay::reexports::x11rb::COPY_FROM_PARENT, &CreateWindowAux::new())
+            .map_err(|x| e(&x))?;
+        let events = xfixes::SelectionEventMask::SET_SELECTION_OWNER | xfixes::SelectionEventMask::SELECTION_WINDOW_DESTROY | xfixes::SelectionEventMask::SELECTION_CLIENT_CLOSE;
+        conn.xfixes_select_selection_input(window, clipboard, events).map_err(|x| e(&x))?;
+        // The clipboard manager (ICCCM 2.8: announced with MANAGER).
+        conn.set_selection_owner(window, manager, smithay::reexports::x11rb::CURRENT_TIME).map_err(|x| e(&x))?;
+        let owner = conn.get_selection_owner(manager).map_err(|x| e(&x))?.reply().map_err(|x| e(&x))?.owner;
+        if owner == window {
+            let announce = ClientMessageEvent::new(32, root, manager_msg, [smithay::reexports::x11rb::CURRENT_TIME, manager, window, 0, 0]);
+            conn.send_event(false, root, EventMask::STRUCTURE_NOTIFY, announce).map_err(|x| e(&x))?;
+        } else {
+            tracing::info!("another X11 client is the clipboard manager");
+        }
+        conn.flush().map_err(|x| e(&x))?;
+        Ok(Self { window, clipboard, manager, save_targets, targets, probe, wm_base: wm & base_mask, base_mask, owner: (smithay::reexports::x11rb::NONE, false) })
+    }
+
+    fn owner_changed(&mut self, conn: &RustConnection, e: &xfixes::SelectionNotifyEvent) -> Option<X11Note> {
+        if e.selection != self.clipboard {
+            return None;
+        }
+        let none = smithay::reexports::x11rb::NONE;
+        let ours = e.owner != none && e.owner & self.base_mask == self.wm_base;
+        let was_ours = self.owner.1;
+        self.owner = (e.owner, ours);
+        if e.owner == none && was_ours {
+            // The window manager let go of a Wayland copy's.
+            return None;
+        }
+        if e.owner != none && !ours {
+            // Ask what it offers as the window manager does: an owner that
+            // never answers is found out (#270).
+            let _ = conn.convert_selection(self.window, self.clipboard, self.targets, self.probe, e.timestamp);
+            let _ = conn.flush();
+        }
+        let cleared = e.owner == none && e.subtype == xfixes::SelectionEvent::SET_SELECTION_OWNER;
+        Some(X11Note::ClipboardOwner { owner: e.owner, ours, cleared })
+    }
+
+    fn answered(&mut self, conn: &RustConnection, e: &SelectionNotifyEvent) -> Option<X11Note> {
+        if e.requestor != self.window || e.selection != self.clipboard || e.target != self.targets {
+            return None;
+        }
+        if e.property != smithay::reexports::x11rb::NONE {
+            let _ = conn.delete_property(self.window, e.property);
+            let _ = conn.flush();
+        }
+        (self.owner.0 != smithay::reexports::x11rb::NONE && !self.owner.1).then_some(X11Note::ClipboardAnswered(self.owner.0))
+    }
+
+    /// A request to the clipboard manager: TARGETS answered here,
+    /// SAVE_TARGETS passed on, anything else refused.
+    fn request(&mut self, conn: &RustConnection, e: &SelectionRequestEvent) -> Option<X11Note> {
+        if e.owner != self.window || e.selection != self.manager {
+            return None;
+        }
+        // Obsolete clients give no property: the target is the property.
+        let property = if e.property == smithay::reexports::x11rb::NONE { e.target } else { e.property };
+        let request = SaveRequest { requestor: e.requestor, selection: e.selection, target: e.target, property, time: e.time };
+        if e.target == self.save_targets {
+            return Some(X11Note::SaveTargets(request));
+        }
+        let ok = e.target == self.targets && conn.change_property32(PropMode::REPLACE, e.requestor, property, AtomEnum::ATOM, &[self.targets, self.save_targets]).is_ok();
+        let notify = SelectionNotifyEvent {
+            response_type: SELECTION_NOTIFY_EVENT,
+            sequence: 0,
+            time: e.time,
+            requestor: e.requestor,
+            selection: e.selection,
+            target: e.target,
+            property: if ok { property } else { smithay::reexports::x11rb::NONE },
+        };
+        let _ = conn.send_event(false, e.requestor, EventMask::NO_EVENT, notify);
+        let _ = conn.flush();
+        None
+    }
+}
+
 impl X11Ping {
     /// Connect to Xwayland `:display`; answers (their window) go to `answers`.
     pub fn start(display: u32, answers: Sender<X11Note>) -> Result<Self, String> {
@@ -251,6 +386,8 @@ impl X11Ping {
         let net_wm_state_hidden = atom("_NET_WM_STATE_HIDDEN")?;
         let (net_wm_state, demands_attention) = (atom("_NET_WM_STATE")?, atom("_NET_WM_STATE_DEMANDS_ATTENTION")?);
         let (startup_info_begin, startup_info) = (atom("_NET_STARTUP_INFO_BEGIN")?, atom("_NET_STARTUP_INFO")?);
+        let clipboard = Clipboard::start(&conn, root, &atom).map_err(|err| tracing::warn!(err, "cannot follow the X11 clipboard")).ok();
+        let watches_clipboard = clipboard.is_some();
         // Answers are sent to the root window with the substructure masks;
         // startup notification messages with PropertyChangeMask (as
         // libstartup-notification, GDK and Qt send them).
@@ -327,8 +464,12 @@ impl X11Ping {
             .name("helix-x11-ping".into())
             .spawn(move || {
                 let mut pieces = StartupInfoPieces::default();
+                let mut clipboard = clipboard;
                 while let Ok(event) = reader.wait_for_event() {
                     let note = match event {
+                        Event::XfixesSelectionNotify(e) => clipboard.as_mut().and_then(|c| c.owner_changed(&reader, &e)),
+                        Event::SelectionNotify(e) => clipboard.as_mut().and_then(|c| c.answered(&reader, &e)),
+                        Event::SelectionRequest(e) => clipboard.as_mut().and_then(|c| c.request(&reader, &e)),
                         Event::ClientMessage(msg) if msg.format == 8 && (msg.type_ == startup_info_begin || msg.type_ == startup_info) => {
                             let message = pieces.add(msg.window, msg.type_ == startup_info_begin, &msg.data.as_data8());
                             message.and_then(|m| parse_startup_info(&m)).map(X11Note::StartupInfo)
@@ -357,7 +498,7 @@ impl X11Ping {
                 }
             })
             .map_err(|e| e.to_string())?;
-        Ok(Self { conn, wm_protocols, net_wm_ping, net_wm_state, net_wm_state_hidden, asks })
+        Ok(Self { conn, wm_protocols, net_wm_ping, net_wm_state, net_wm_state_hidden, asks, watches_clipboard })
     }
 
     /// Find out whether `window` takes pings, and its app: answered with
@@ -398,6 +539,21 @@ impl X11Ping {
     /// only when its state changes (#288).
     pub fn add_hidden_state(&self, window: Window) {
         let _ = self.conn.change_property32(PropMode::APPEND, window, self.net_wm_state, AtomEnum::ATOM, &[self.net_wm_state_hidden]);
+        let _ = self.conn.flush();
+    }
+
+    /// Answer an X11 app's `SAVE_TARGETS`: saved (`ok`) or not.
+    pub fn answer_save(&self, request: &SaveRequest, ok: bool) {
+        let notify = SelectionNotifyEvent {
+            response_type: SELECTION_NOTIFY_EVENT,
+            sequence: 0,
+            time: request.time,
+            requestor: request.requestor,
+            selection: request.selection,
+            target: request.target,
+            property: if ok { request.property } else { smithay::reexports::x11rb::NONE },
+        };
+        let _ = self.conn.send_event(false, request.requestor, EventMask::NO_EVENT, notify);
         let _ = self.conn.flush();
     }
 

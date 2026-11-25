@@ -175,6 +175,10 @@ impl Helix {
                 self.start_transfer(*session, mime_type, fd);
                 Ok(())
             }
+            Some(ServerSelection::Kept(kept)) => {
+                super::clipboard_keep::serve(kept, &mime_type, fd);
+                Ok(())
+            }
             Some(ServerSelection::X11) => {
                 if self.xwm.is_none() && self.hxwm.is_none() {
                     return Err(failed("no X11"));

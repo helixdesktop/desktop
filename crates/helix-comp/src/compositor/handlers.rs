@@ -162,7 +162,16 @@ impl SelectionHandler for Helix {
                 Some(source) => self.clipboard_source_of(source.client().as_ref()),
                 None => super::clipboard::Source::default(),
             };
-            self.clipboard_changed(mime_types.unwrap_or_default(), who);
+            let types = mime_types.unwrap_or_default();
+            self.clipboard_changed(types.clone(), who.clone());
+            match source {
+                Some(source) => self.keep_new_selection(super::clipboard_keep::Owner::Wayland(source), &types, who),
+                // Cleared on purpose: it stays empty.
+                None => {
+                    tracing::info!("a Wayland app cleared the clipboard; it stays empty");
+                    self.keep_forget();
+                }
+            }
         }
     }
 
@@ -189,6 +198,10 @@ impl SelectionHandler for Helix {
         }
         if let super::ServerSelection::Remote { session } = user_data {
             self.start_transfer(*session, mime_type, fd);
+            return;
+        }
+        if let super::ServerSelection::Kept(kept) = user_data {
+            super::clipboard_keep::serve(kept, &mime_type, fd);
             return;
         }
         self.x11_paste_selection(ty, mime_type, fd);
